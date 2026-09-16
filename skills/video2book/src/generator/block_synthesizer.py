@@ -1,7 +1,7 @@
 """Note Synthesizer: 导出「笔记」融合任务书（文章直供版）。
 
 架构定位：工具层只负责**备料与渲染提示词**——把该篇笔记涵盖各集单集精读长文（`articles/`）的
-路径清单、笔记边界信息、专属提示词（`MODULE_NOTE_PROMPT`）、渲染兼容规则与笔记版式规范组装成
+路径清单、笔记边界信息与专属提示词（`MODULE_NOTE_PROMPT`，其【排版】一节自带渲染硬约束）组装成
 `notes/笔记XX_*_TASK.md`，交由宿主 Agent（通常是每篇笔记一个子智能体）原生撰写。
 
 粒度（v2.1）：一篇笔记覆盖的集号来自**第二趟语义归并**（`note_plan.json`），一篇笔记**可以跨多个
@@ -21,8 +21,6 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 from src.generator.prompt_templates import (
     MODULE_NOTE_PROMPT,
-    NOTE_VISUAL_SPEC,
-    RENDER_COMPAT_RULES,
 )
 
 # 成品体积门槛：低于该值视为空壳，需重新派发
@@ -35,19 +33,22 @@ NOTE_PREFIX = "笔记"
 class BlockSynthesizer:
     @classmethod
     def _render_article_list(cls, article_paths: Iterable[Any]) -> str:
-        """渲染「唯一事实来源」清单：仓库相对路径 + 字节数，便于 Agent 逐篇 Read。"""
+        """渲染「唯一事实来源」清单：**绝对路径** + 字节数，便于 Agent 直接读。
+
+        为什么改给绝对路径（原先是仓库相对路径）：子智能体拿到相对路径还得自己拼基准目录，
+        实测会多花一轮工具调用、拼错还要整轮重来。绝对路径可以直接读，省的是派发环节的真实时间。
+        """
         lines: List[str] = []
         for raw in article_paths:
             path = Path(raw)
             try:
-                from src.core.workspace import TaskWorkspace
-                shown = TaskWorkspace.to_relative(path)
-            except Exception:
-                shown = path.as_posix()
-            try:
                 size = path.stat().st_size if path.exists() else 0
             except OSError:
                 size = 0
+            try:
+                shown = path.resolve().as_posix()
+            except OSError:
+                shown = path.as_posix()
             lines.append(f"- {shown}  ({size:,} 字节)")
         return "\n".join(lines) if lines else "- （本篇尚无单集精读长文，请先补齐 articles/ 后再派发）"
 
@@ -120,9 +121,10 @@ class BlockSynthesizer:
                 f"```json\n{compact}\n```\n"
             )
 
-        # 排版硬约束 + 统一版式规范：在此统一注入（笔记只有这一种风格，不再按风格分支）
-        prompt += f"\n━━━━━━━━━━━━━━━━━━\n{RENDER_COMPAT_RULES}\n"
-        prompt += f"\n━━━━━━━━━━━━━━━━━━\n{NOTE_VISUAL_SPEC}\n"
+        # 渲染硬约束**不再追加**：笔记提示词的【排版】一节已完整覆盖同一批要求（告警块、围栏与
+        # 语言标识、公式、GFM 表格、分隔线、裸 HTML / mermaid、emoji 都写了），再追加一遍
+        # RENDER_COMPAT_RULES 就是同一批要求说两遍，只会稀释重点（笔记只有这一种风格，无分支）。
+        # RENDER_COMPAT_RULES 仍由两套长文提示词注入，仍是渲染约束的唯一文案来源。
         return prompt
 
     @classmethod
@@ -172,6 +174,17 @@ class BlockSynthesizer:
         task_file = ws.notes_dir / cls.get_task_filename(block_meta)
         note_file = ws.notes_dir / cls.get_note_filename(block_meta)
 
+        # 语料先落成 list：下面既要渲染清单、又要统计体积，迭代器过一次就空了
+        article_list = list(articles or [])
+        corpus_bytes = 0
+        for item in article_list:
+            try:
+                path = Path(item)
+                if path.exists():
+                    corpus_bytes += path.stat().st_size
+            except OSError:
+                continue
+
         base_result = {
             "block_id": block_meta.get("block_id"),
             "block_title": block_meta.get("block_title"),
@@ -202,17 +215,19 @@ class BlockSynthesizer:
             }
 
         synthesis_prompt = cls.build_synthesis_prompt(
-            block_meta, article_paths=articles, kernel_index=kernel_index
+            block_meta, article_paths=article_list, kernel_index=kernel_index
         )
         header = (
             f"# 笔记 {block_meta['block_id']:02d} {block_meta.get('block_title', '')} 笔记任务书（NOTE_TASK）\n\n"
             f"> 状态：need-agent-note | 语料：本篇涵盖各集的单集精读长文（articles/） | 由宿主 Agent / 子智能体原生撰写\n"
             f"> 涵盖模块：{cls._blocks_str(block_meta)} | 涵盖分集：{p_str}\n"
+            f"> 语料体积：{corpus_bytes:,} 字节\n"
             f"> 工作区绝对路径：`{Path(ws.root_dir).as_posix()}`\n\n"
             f"## 1. 落盘要求\n\n"
-            f"- 撰写提示词见下方第 2 节（含笔记信息、语料清单、结构要求、密度纪律、零套话禁令与笔记版式规范）\n"
+            f"- 撰写提示词见下方第 2 节（含定位、收录范围、精炼硬指标、知识点完整性、版式规范与补充规范）\n"
             f"- 目标文件：`{Path(note_file).as_posix()}`\n"
-            f"- 必须逐篇完整读取上方列出的单集精读长文后再撰写；成品产出后本任务书会被自动回收\n"
+            f"- **逐篇完整读取**第 2 节列出的全部单集精读长文后再撰写：清单给的是**绝对路径**，可直接读取；\n"
+            f"  不要探测目录、不要浏览工作区里的其他文件（那只会浪费时间）；成品产出后本任务书会被自动回收\n"
             f"- 执行须知：建议由**一个子智能体负责一篇笔记**；完成后只需回报"
             f"「笔记号 | 目标文件 | 字节数 | 覆盖分集」，**不要回传正文**\n\n"
             f"---\n\n"
@@ -352,6 +367,9 @@ class BlockSynthesizer:
             print(f"[*] 让 Agent 完成规划、写出 topic_plan.json / note_plan.json 后重跑本命令，即完成派发。")
             return result
 
+        # 笔记侧**不做体积切分**：一篇笔记与该篇的 note_plan.json 严格一一对应，模块边界
+        # 只由语义规划决定。体积上限（300KB）只作用于教材分册，见 topic_planner.SIZE_CAP_BYTES
+        # 处的实测依据：按体积切笔记会让覆盖不升、体积涨 39%、多出 22 处跨篇重复。
         cls._purge_placeholder_tasks(ws)
 
         # 占位块的模块边界不是语义边界：照它派发笔记会让子智能体写出内容错位的成品，

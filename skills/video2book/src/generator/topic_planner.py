@@ -30,6 +30,20 @@ class SemanticTopicPlanner:
     # 缺规划时的占位块大小：只为了让流程继续往下走，不代表任何语义判断，也不落盘。
     PLACEHOLDER_BLOCK_SIZE = 10
 
+    # ── 模块语料体积上限（**只作用于教材分册**；笔记侧一律不做体积切分） ────────────
+    # 为什么教材要按体积切模块：一本教材要把该模块的**全部单集长文**一次性交给子智能体
+    # 读完。实测语料体积超过 ~300KB 后产出质量明显下滑（细节被压平、条目被切成半句）。
+    # 上限 300KB 是**硬**的；256KB 只是目标区间下沿，不强行合并去凑——把两个语义模块
+    # 揉成一篇的代价比体量偏差更大。
+    #
+    # **笔记侧不适用这条上限**（`enforce_note_size_cap` 与笔记派发路径上的 `enforce_size_cap`
+    # 均已移除，笔记严格按 `note_plan.json` 一条一篇）。实测依据（同一模块 23 篇/310KB 对拍）：
+    # 把一篇笔记按体积切成两篇，知识点覆盖没有变好（96.1% → 94.7%），却多出 39% 的体积、
+    # 22 处跨篇重复（切点由字节数决定，切出的两半互不知道对方写了什么），还会让笔记编号与
+    # 模块映射错位。所以笔记的粒度只由语义归并决定，模块再大也不拆。
+    SIZE_CAP_BYTES = 300 * 1024
+    SIZE_TARGET_BYTES = 256 * 1024
+
     # ── 第一趟：模块规划（消费方 = 教材） ──────────────────────────────────────
     PLAN_PROMPT = """你是一位国家级计算机学科教学大纲架构专家。
 请仔细分析以下课程的**分集长文主题**以及【实际语料核心提要】。
@@ -415,6 +429,142 @@ class SemanticTopicPlanner:
         if missing:
             notes.append(f"无人认领、已补为占位块的集号：{cls.describe_pages(missing)}")
         return kept, notes
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # 模块体积归一：超限模块就地切开
+    # ─────────────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _split_episodes_by_cap(
+        eps: Sequence[int], sizes: Dict[int, int], cap: int
+    ) -> List[List[int]]:
+        """把一串集号按累计字节均衡切成若干段，**每段不超过 cap**。
+
+        切点永远落在集与集之间——绝不切进一集内部，所以一篇长文都不会被拆散。
+        段数取 `ceil(总量 / cap)`（下界），再按该目标做均衡装填：
+        「装不下必须切」（硬）＋「够一段的量就切」（软，避免出现 300KB + 10KB 的畸形分段）。
+        某段内含单篇就超上限的长文时切无可切，该段会原样返回、由调用方打诊断。
+        """
+        if not eps:
+            return []
+        total = sum(sizes.get(int(e), 0) for e in eps)
+        if total <= cap:
+            return [[int(e) for e in eps]]
+
+        k = max(2, -(-total // cap))
+        target = total / k
+        groups: List[List[int]] = []
+        cur: List[int] = []
+        acc = 0
+        for ep in eps:
+            size = sizes.get(int(ep), 0)
+            if cur and (acc + size > cap or acc >= target):
+                groups.append(cur)
+                cur, acc = [], 0
+            cur.append(int(ep))
+            acc += size
+        if cur:
+            groups.append(cur)
+        return groups
+
+    @classmethod
+    def load_cached_plan(cls, ws: Any) -> List[Dict[str, Any]]:
+        """**只读**盘上的 `topic_plan.json`；不存在或损坏时返回空列表。
+
+        为什么要单独一个只读入口：教材整编（`cluster-articles`）是纯工具环节，它需要
+        与其他环节拿到**同一套模块边界**，但**不该**因此导出规划任务书——那是
+        `cluster-notes` 的职责（`resolve_blocks()` 才会导出）。
+        """
+        plan_file = Path(ws.root_dir) / "topic_plan.json"
+        if not plan_file.exists():
+            return []
+        try:
+            raw = json.loads(plan_file.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        return raw if isinstance(raw, list) else []
+
+    @classmethod
+    def episode_corpus_bytes(cls, ws: Any, page: int) -> int:
+        """该集单集精读长文的字节数（缺长文按 0 计，与派发门禁口径一致）。"""
+        from src.core.kernel_extractor import KernelExtractor
+
+        article = KernelExtractor.find_article(ws, int(page))
+        if article is None:
+            return 0
+        try:
+            return article.stat().st_size
+        except OSError:
+            return 0
+
+    @classmethod
+    def enforce_size_cap(
+        cls,
+        blocks: Sequence[Dict[str, Any]],
+        ws: Any,
+        cap: Optional[int] = None,
+    ) -> Tuple[List[Dict[str, Any]], List[str]]:
+        """把语料超上限的模块就地切开，返回 `(归一后的 blocks, 诊断行)`。
+
+        规则：
+
+        * 模块总语料不超过上限 → 原样保留（不动它的语义边界）；
+        * 超过上限 → **只在该模块内部**按集顺序切成 `k = ceil(总量 / 上限)` 段，
+          切点永远落在集与集之间（绝不切进一集内部），每段严格不超过上限；
+        * **不跨模块合并**：合并会把两个语义模块揉成一篇，边界比体量更值钱；
+        * **不为卡体积少读**：这里只改分组，一篇长文都不会从清单里消失。
+
+        为什么放在这一层：盘上的 `topic_plan.json` 是 Agent 的语义产物，工具层不得改写
+        （与 `salvage_blocks` 同一条原则）。归一只在内存里做一次，**只在教材分册这一侧
+        调用**（`cli.py` 的 `cluster-articles`）；真规划补齐后重跑即自动替换。
+        """
+        limit = int(cap or cls.SIZE_CAP_BYTES)
+        if limit <= 0 or not blocks:
+            return list(blocks or []), []
+
+        out: List[Dict[str, Any]] = []
+        diag: List[str] = []
+
+        for block in blocks:
+            eps = sorted(int(e) for e in (block.get("episodes") or []))
+            if not eps:
+                continue
+            raw_id = int(block.get("block_id") or len(out) + 1)
+            sizes = {e: cls.episode_corpus_bytes(ws, e) for e in eps}
+            total = sum(sizes.values())
+
+            if total <= limit:
+                out.append({**block, "block_id": raw_id, "episodes": eps})
+                continue
+
+            groups = cls._split_episodes_by_cap(eps, sizes, limit)
+
+            base_title = str(block.get("block_title") or f"模块 {raw_id:02d}")
+            for idx, group in enumerate(groups, 1):
+                seg_bytes = sum(sizes[e] for e in group)
+                if seg_bytes > limit:
+                    diag.append(
+                        f"模块 {raw_id:02d} 第 {idx} 段仍有 {seg_bytes:,} 字节（该段内含单篇就超过"
+                        f"上限的长文，已切无可切）"
+                    )
+                out.append({
+                    **block,
+                    "block_id": 0,  # 下面统一重编号
+                    # 标题带上集号区间：既让人一眼看清这段的范围，也保证拆分后文件名不撞车
+                    # （get_task_filename 会剥掉括号，只留下字母数字，所以括号内的集号是必要的）
+                    "block_title": f"{base_title}（P{group[0]:02d}-P{group[-1]:02d}）",
+                    "episodes": group,
+                    "core_theme": str(block.get("core_theme") or ""),
+                })
+            diag.append(
+                f"模块 {raw_id:02d}（{total:,} 字节）超过上限 {limit:,}，"
+                f"已按集边界切成 {len(groups)} 段："
+                + "、".join(f"P{g[0]:02d}-P{g[-1]:02d}" for g in groups)
+            )
+
+        # 块号必须连续：教材的文件名靠它排序
+        for idx, block in enumerate(out, 1):
+            block["block_id"] = idx
+        return out, diag
 
     @classmethod
     def placeholder_blocks(
@@ -810,26 +960,39 @@ class SemanticTopicPlanner:
         ws: Optional[Any] = None,
         force: bool = False,
         article_titles: Optional[Dict[int, str]] = None,
+        stale_plan: bool = False,
     ) -> Tuple[List[Dict[str, Any]], str, List[str]]:
         """第二趟总入口：返回 `(notes, status, 诊断行)`，**永远拿得到可用归并**。
 
         * `planned`     —— 盘上是完全合法的 `note_plan.json`，直接复用；
         * `salvaged`    —— 盘上有归并但不完全合法，抢救成全覆盖归并；
-        * `unmerged`    —— 盘上没有归并，兜底「一个模块一篇」（标注未归并，粒度偏碎）。
+        * `unmerged`    —— 盘上没有归并（或 `stale_plan` 判定盘上那份已作废），
+          兜底「一个模块一篇」（标注未归并，粒度偏碎）。
+
+        `stale_plan=True` 表示**调用方判定盘上那份已作废**（模块边界被重切过等），盘上的
+        `note_plan.json` 是按旧模块号写的：既对不上新边界，抢救时还会把已经切开的模块
+        重新并回一篇，标题也会与集号张冠李戴。那时一律不采用也不抢救。
+
+        注：规格改为「笔记不做体积切分」之后，笔记派发路径上已不存在重切来源，
+        `block_synthesizer` 不再传这个开关；参数保留给别的边界变更来源使用。
         """
         if not blocks:
             return [], "planned", []
 
         notes = cls.notes(
-            blocks, parts, course_title=course_title, ws=ws, force=force,
-            article_titles=article_titles,
+            blocks, parts, course_title=course_title, ws=ws,
+            force=force or stale_plan, article_titles=article_titles,
         )
         if notes is not None:
             return notes, "planned", []
 
         raw: Any = None
         plan_file = ws.root_dir / "note_plan.json" if ws and hasattr(ws, "root_dir") else None
-        if plan_file is not None and plan_file.exists():
+        if stale_plan:
+            print("[!] 模块边界已被重切，盘上的 note_plan.json 属于旧边界：")
+            print("[!] 本轮不采用、也不抢救它（抢救会把切开的模块并回去，并让标题与集号错配）。")
+            print("[*] 已改按「一段一篇」兜底派发；补齐 note_plan.json 后重跑即替换。")
+        elif plan_file is not None and plan_file.exists():
             try:
                 raw = json.loads(plan_file.read_text(encoding="utf-8"))
             except Exception as err:

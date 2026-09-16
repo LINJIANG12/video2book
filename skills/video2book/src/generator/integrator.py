@@ -85,24 +85,32 @@ class ArticleIntegrator:
 
         return []
 
-    def group_episodes_by_module(self, parts: List[dict]) -> Dict[str, List[dict]]:
-        """Groups parts into distinct logical modules based on title semantics."""
+    def group_episodes_by_module(
+        self, parts: List[dict], plan: Optional[List[dict]] = None
+    ) -> Dict[str, List[dict]]:
+        """Groups parts into distinct logical modules based on title semantics.
+
+        `plan` 显式传入时以它为准：调用方（CLI）已按**语料体积上限**归一过模块边界
+        （这是**教材分册专用**的归一，笔记侧不做体积切分）。缺省时保持原行为——先读盘上的
+        `topic_plan.json`（或 manifest 的 `knowledge_blocks_plan`），再退回按标题章节号 / 序号前缀分组。
+        """
         modules: Dict[str, List[dict]] = {}
-        # First try to load from knowledge_blocks_plan if present in manifest.json or topic_plan.json
-        manifest_file = self.task_dir / "manifest.json"
-        topic_plan_file = self.task_dir / "topic_plan.json"
-        plan = []
-        if topic_plan_file.exists():
-            try:
-                plan = json.loads(topic_plan_file.read_text(encoding="utf-8"))
-            except Exception:
-                pass
-        if not plan and manifest_file.exists():
-            try:
-                m_data = json.loads(manifest_file.read_text(encoding="utf-8"))
-                plan = m_data.get("knowledge_blocks_plan", [])
-            except Exception:
-                pass
+        if plan is None:
+            # First try to load from knowledge_blocks_plan if present in manifest.json or topic_plan.json
+            manifest_file = self.task_dir / "manifest.json"
+            topic_plan_file = self.task_dir / "topic_plan.json"
+            plan = []
+            if topic_plan_file.exists():
+                try:
+                    plan = json.loads(topic_plan_file.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+            if not plan and manifest_file.exists():
+                try:
+                    m_data = json.loads(manifest_file.read_text(encoding="utf-8"))
+                    plan = m_data.get("knowledge_blocks_plan", [])
+                except Exception:
+                    pass
 
         if plan:
             page_map = {p["page"]: p for p in parts}
@@ -268,15 +276,23 @@ class ArticleIntegrator:
         out_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
         return out_path
 
-    def run(self, course_title: str, force: bool = False, parts: Optional[List[dict]] = None) -> List[Path]:
+    def run(
+        self,
+        course_title: str,
+        force: bool = False,
+        parts: Optional[List[dict]] = None,
+        plan: Optional[List[dict]] = None,
+    ) -> List[Path]:
         """Runs the complete module integration process.
 
         force=False（默认）时复用已存在的模块教材；force=True 时全部重新整编。
         `parts` 显式传入时以它为准（CLI 已按「工作区 parts.json 优先」解析过集号基准），
         免得这一层再去猜一遍工作区到底有哪几集。
+        `plan` 显式传入时以它为准，且**不再读盘上的规划**：CLI 已按语料体积上限归一过
+        模块边界（**教材分册专用**；笔记侧不做体积切分，一篇笔记与 `note_plan.json` 一条对应）。
         """
         parts = list(parts) if parts else self.load_parts()
-        grouped = self.group_episodes_by_module(parts)
+        grouped = self.group_episodes_by_module(parts, plan=plan)
         results = []
         for idx, (mod_name, eps) in enumerate(grouped.items(), 1):
             path = self.integrate_module(idx, mod_name, eps, course_title, force=force)

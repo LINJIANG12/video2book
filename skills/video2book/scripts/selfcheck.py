@@ -1180,19 +1180,21 @@ def check_render_compat_rules():
     for ph in ("{title}", "{part_title}", "{content}"):
         assert ph in ARTICLE_LEARNING_PROMPT, f"讲义提示词占位符缺失: {ph}"
 
-    # 3) 模块笔记提示词对本模块字符画提出了围栏要求（文章直供版专属提示词）
+    # 3) 模块笔记提示词自带字符画围栏要求（换版后【排版】一节覆盖渲染硬约束）
     from src.generator.prompt_templates import MODULE_NOTE_PROMPT
-    assert "```text 围栏内" in MODULE_NOTE_PROMPT, "MODULE_NOTE_PROMPT 未要求字符画进围栏"
+    assert "```text" in MODULE_NOTE_PROMPT, "MODULE_NOTE_PROMPT 未要求字符画进围栏"
     assert "{article_list}" in MODULE_NOTE_PROMPT, "MODULE_NOTE_PROMPT 缺少语料清单占位符"
 
-    # 4) 笔记只有一种风格：渲染兼容规则与版式规范都必须注入（build_synthesis_prompt 已无 style 参数）
+    # 4) 笔记只有一种风格；渲染硬约束**不再重复追加**（【排版】一节已覆盖同一批要求）
     import inspect as _inspect
 
     assert "style" not in _inspect.signature(BlockSynthesizer.build_synthesis_prompt).parameters, \
         "build_synthesis_prompt 不应再有 style 参数（八种旧风格已删除）"
     block_meta = {"block_id": 1, "block_title": "t", "episodes": [1], "core_theme": "x"}
-    assert RENDER_COMPAT_RULES in BlockSynthesizer.build_synthesis_prompt(block_meta, []), \
-        "模块笔记提示词未注入渲染兼容规则"
+    rendered = BlockSynthesizer.build_synthesis_prompt(block_meta, [])
+    assert RENDER_COMPAT_RULES not in rendered, \
+        "笔记提示词不得再追加 RENDER_COMPAT_RULES（【排版】已覆盖，说两遍只会稀释重点）"
+    assert "【排版】" in rendered, "笔记提示词未注入【排版】一节"
 
     # 5) 格式总纲必须写明阅读器为 Typora
     rel = "references/delivery_matrix.md"
@@ -1214,38 +1216,61 @@ def check_module_note_contract():
     # 1) 专属提示词必须点名禁止「套话填充」「分集标题」「分集口吻」「中途截断」
     for 关键短语, 说明 in (
         ("概念属性与边界", "套话黑名单"),
-        ("严禁以分集为单位组织内容", "分集标题禁令"),
-        ("严禁分集口吻", "分集口吻禁令"),
-        ("严禁中途截断", "截断禁令"),
+        ("严禁用分集编号或分集标题作标题", "分集标题禁令"),
+        ("上一讲", "分集口吻禁令"),
+        ("不中途截断", "截断禁令"),
     ):
         assert 关键短语 in MODULE_NOTE_PROMPT, f"MODULE_NOTE_PROMPT 缺少{说明}：{关键短语}"
 
-    # 2) 版式规范标志性要求必须在位；且必须明令不再写「速查卡 / 一句话总纲」
-    for 关键短语 in ("一句话主旨", "知识拓扑树", "来源: P03"):
-        assert 关键短语 in NOTE_VISUAL_SPEC, f"NOTE_VISUAL_SPEC 缺少「{关键短语}」要求"
-    assert "末尾不加收尾小节" in NOTE_VISUAL_SPEC, "NOTE_VISUAL_SPEC 未禁止末尾收尾小节"
+    # 2) 【排版】标志性要求必须在位：成品只有 H1 + 分节条目，且来源标注彻底不许出现
+    assert "不写目录、元信息引用块、知识拓扑树、节级主旨句、速查卡、总纲" in NOTE_VISUAL_SPEC, \
+        "【排版】未写明「成品只有 H1 + 按知识主题分节的条目」"
+    assert "来源: P03" not in NOTE_VISUAL_SPEC, "【排版】仍残留来源标注样例"
+    assert "```text" in NOTE_VISUAL_SPEC, "【排版】未要求字符画进围栏"
+    assert "字符画写在列表项里时，围栏整体缩进 4 空格" in NOTE_VISUAL_SPEC, \
+        "【排版】缺少「列表项内围栏缩进 4 空格」纪律"
 
-    # 2b) 两条最容易翻车的排版硬要求必须在位
-    assert "围栏整体缩进 4 个空格" in NOTE_VISUAL_SPEC, "版式规范缺少字符画围栏缩进要求"
-    assert "一个汉字按 2 列、一个 ASCII 字符按 1 列" in NOTE_VISUAL_SPEC, \
-        "版式规范缺少拓扑树按显示宽度对齐的要求"
+    # 2b) 标题纪律：层级最多到 `####`，且**不写序号**（阅读器会自动编号，手写会叠字）；
+    #      总量**不用数字配额**——写死配额会诱导模型机械凑数或粗暴削内容，反而失真。
+    assert "最多到 `####`" in MODULE_NOTE_PROMPT, "提示词未写明标题层级上限（最多到 ####）"
+    assert "标题里一律不要写序号" in MODULE_NOTE_PROMPT, "提示词缺少「标题不写序号」的要求"
+    for 数字配额 in ("8~12 节", "20~45 个", "2~3 条要点"):
+        assert 数字配额 not in MODULE_NOTE_PROMPT, f"提示词不得写死数字配额：{数字配额}"
+    # 旧版「只允许二级标题」随换版作废：留着会与「最多到 ####」正面打架
+    assert "不得出现 `###` 及更深的标题" not in MODULE_NOTE_PROMPT, \
+        "提示词回流了旧版「禁止 ###」措辞（与「最多到 ####」冲突）"
 
-    # 2c) 密度纪律：只写结论、不写推导
-    assert "只写结论，不写推导" in MODULE_NOTE_PROMPT, "MODULE_NOTE_PROMPT 缺少「只写结论不写推导」纪律"
-    assert "标题用技术文档的朴素写法" in MODULE_NOTE_PROMPT, "MODULE_NOTE_PROMPT 缺少朴素标题要求"
+    # 2c) 骨架与内容纪律：嵌套 `*` 骨架、只写结论、标题朴素
+    assert "逐级 4 空格缩进的 `*` 列表" in MODULE_NOTE_PROMPT, "MODULE_NOTE_PROMPT 缺少嵌套 * 骨架说明"
+    assert "只写结论" in MODULE_NOTE_PROMPT, "MODULE_NOTE_PROMPT 缺少「只写结论」纪律"
+    assert "标题只写术语或名词短语" in MODULE_NOTE_PROMPT, "MODULE_NOTE_PROMPT 缺少朴素标题要求"
+    assert "每个 `###` 至少两条条目" in MODULE_NOTE_PROMPT, \
+        "MODULE_NOTE_PROMPT 缺少「每个 ### 至少两条条目」要求"
+    assert "```text" in MODULE_NOTE_PROMPT, "MODULE_NOTE_PROMPT 缺少围栏要求"
 
-    # 2d) 子标题规则必须**双向**：既要命令「节内并列成体系时用 ###」，又要下限「只剩一两条就并回」。
-    #     只用「不许硬造」的单向措辞会压掉全部 ###（实测：8 个 ## / 0 个 ###、最挤一节 53 条，
-    #     笔记在 Markmap 里那一节只是一个节点），所以这条断言守的是双向措辞而不是旧文案。
-    assert "节内并列成体系时就要用 `###` 分开" in MODULE_NOTE_PROMPT, \
-        "MODULE_NOTE_PROMPT 缺少「节内成体系要用 ###」的命令式要求"
-    assert "每个 `###` 底下至少两条条目" in MODULE_NOTE_PROMPT, \
-        "MODULE_NOTE_PROMPT 缺少「### 至少两条」的下限（防止拆碎）"
-    assert "```text" in MODULE_NOTE_PROMPT, "MODULE_NOTE_PROMPT 缺少 ### 的正向范例"
-    # 而「不要硬造/不要凑 ###」这类单向禁令不得回流到笔记提示词
-    for 单向禁令 in ("不许硬造子标题", "不要凑成 `###`"):
-        assert 单向禁令 not in MODULE_NOTE_PROMPT, \
-            f"MODULE_NOTE_PROMPT 回流了单向子标题禁令（会压掉全部 ###）：{单向禁令}"
+    # 2d) 事实边界：禁外部知识，缺口写「长文未说明」（换版后不再有补充规范入口）
+    assert "禁止引入外部知识" in MODULE_NOTE_PROMPT, "MODULE_NOTE_PROMPT 缺少「禁止引入外部知识」"
+    assert "长文未说明" in MODULE_NOTE_PROMPT, "MODULE_NOTE_PROMPT 缺少「长文未说明」缺口约定"
+    for 已取消 in ("NOTE_SUPPLEMENT_RULES", "六、补充规范", "严格限量，宁缺勿补"):
+        assert 已取消 not in MODULE_NOTE_PROMPT, \
+            f"补充规范已随换版取消，提示词仍残留：{已取消}"
+
+    # 2e) 结构门禁必须与提示词同步：标题序号与层级上限都要有可复算的检查项
+    from src.core.deliverable_lint import STRUCTURE_KEYS as _STRUCTURE_KEYS
+    from src.core.deliverable_lint import check_note_structure as _check_note_structure
+    for key in ("has_h1", "has_sections", "no_h5plus_headings",
+                "no_numbered_headings", "no_redundant_tail"):
+        assert key in _STRUCTURE_KEYS, f"STRUCTURE_KEYS 缺少结构项：{key}"
+    assert "has_metadata_block" not in _STRUCTURE_KEYS, \
+        "抬头元信息引用块已取消，不得再作为结构项"
+    合规 = _check_note_structure(
+        "# 标题\n\n## 主题一\n\n* **术语**\n\n    * 条目一。\n\n### 子题\n\n    * 条目二。\n\n"
+        "#### 更深一层\n\n    * 条目三。\n\n## 主题二\n\n    * 条目四。\n"
+    )
+    assert 合规["no_h5plus_headings"] and 合规["no_numbered_headings"], f"合规笔记被误判：{合规}"
+    违规 = _check_note_structure("# 标题\n\n## 1. 手写序号\n\n#### 可以\n\n##### 太深\n")
+    assert not 违规["no_numbered_headings"], "带手写序号的标题未被检出（会导致与阅读器编号叠字）"
+    assert not 违规["no_h5plus_headings"], "`#####` 未被检出（笔记标题上限应为 ####）"
 
     # 3) 旧版八种笔记风格必须已彻底删除（含标签与指令文案）
     for 已删除 in ("NOTE_STYLES", "minimal", "detailed", "academic", "tutorial",
@@ -1253,11 +1278,15 @@ def check_module_note_contract():
         text = (SKILL_ROOT / "src" / "generator" / "prompt_templates.py").read_text(encoding="utf-8")
         assert 已删除 not in text, f"prompt_templates.py 仍残留旧笔记风格痕迹：{已删除}"
 
-    # 4) 任务书渲染：必须带上版式规范与语料清单
+    # 4) 任务书渲染：必须带上【排版】一节与语料清单
+    #    注：不能用 `NOTE_VISUAL_SPEC in prompt` 判定——它内含 `{block_title}` 占位符，
+    #    渲染时已被替换成真实主题名，整段字面串必然对不上。
     block_meta = {"block_id": 3, "block_title": "关系数据库", "episodes": [6, 7], "core_theme": "关系模型"}
     样例文章 = SKILL_ROOT / "SKILL.md"  # 仅需一个存在的文件来渲染字节数
     prompt = BlockSynthesizer.build_synthesis_prompt(block_meta, [样例文章])
-    assert NOTE_VISUAL_SPEC in prompt, "任务书未注入版式规范"
+    assert "【排版】" in prompt, "任务书未注入【排版】一节"
+    assert "字符画写在列表项里时，围栏整体缩进 4 空格" in prompt, "任务书未注入围栏缩进纪律"
+    assert "# 关系数据库" in prompt, "H1 占位符未被替换为真实主题名"
     assert "SKILL.md" in prompt, "任务书未渲染语料清单"
 
     # 5) 知识元默认不参与：不传 kernel_index 时不得出现知识元索引段
@@ -2069,6 +2098,20 @@ def check_two_pass_planning_contract():
         (ws.notes_dir / "笔记01_旧主题A_笔记.md").write_text("成品" * 400, encoding="utf-8")
         assert BlockSynthesizer._prune_superseded_tasks(ws, merged_notes) == 0, \
             "成品已落盘的笔记任务书被误删"
+
+    # 11) 笔记**不做体积切分**：一篇笔记与 note_plan.json 的一条严格一一对应；
+    #     体积上限只作用于教材分册。实测（同模块 23 篇/310KB 对拍）：按体积切笔记会让
+    #     知识点覆盖不升反降（96.1% → 94.7%）、体积涨 39%、多出 22 处跨篇重复
+    #     （切点由字节数决定，两半互不知道对方写了什么），并让笔记编号与模块映射错位。
+    import inspect as _inspect
+    assert not hasattr(P, "enforce_note_size_cap"), \
+        "笔记侧不得再出现按体积切分笔记的入口（enforce_note_size_cap 已移除，勿回加）"
+    assert "enforce_note_size_cap" not in _inspect.getsource(BlockSynthesizer), \
+        "笔记派发路径不得再调用笔记体积切分"
+    assert "enforce_size_cap" not in _inspect.getsource(BlockSynthesizer.dispatch_notes), \
+        "笔记派发路径不得再做模块体积归一（那会连带把一篇笔记切成多篇）"
+    assert "enforce_size_cap" in _inspect.getsource(P), \
+        "教材分册必须保留体积归一（cluster-articles 依赖它）"
 
 
 def check_fsutil_contract():

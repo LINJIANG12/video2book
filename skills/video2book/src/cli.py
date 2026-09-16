@@ -618,6 +618,7 @@ def cmd_cluster_notes(args):
 def cmd_cluster_articles(args):
     """Consolidates single-episode articles in articles/ into modular chapter textbooks in textbooks/."""
     from src.generator.integrator import ArticleIntegrator
+    from src.generator.topic_planner import SemanticTopicPlanner
 
     info = resolve_target_info(
         args.url,
@@ -640,9 +641,21 @@ def cmd_cluster_articles(args):
     print(f"[*] 目标教材目录: {ws.root_dir / 'textbooks'}")
     print("=" * 65)
 
+    # 语料体积归一：**教材分册**的模块边界除语义外还受体积约束（超限模块就地按集切开），
+    # 否则一本教材会把上百 KB 的语料一次性灌给子智能体，产出质量断崖式下滑。
+    # 笔记侧不做这种切分——一篇笔记与 note_plan.json 的一条严格一一对应（见
+    # topic_planner.SIZE_CAP_BYTES 处的对拍依据）。
+    # 只读盘上规划、绝不改写它；真规划补齐后重跑即自动换边界。没有规划时保持原有回退分组。
+    raw_blocks = SemanticTopicPlanner.load_cached_plan(ws)
+    blocks, cap_diag = (
+        SemanticTopicPlanner.enforce_size_cap(raw_blocks, ws) if raw_blocks else ([], [])
+    )
+    for line in cap_diag:
+        print(f"[i] {line}")
+
     integrator = ArticleIntegrator(ws.root_dir)
     force = bool(getattr(args, "force", False))
-    results = integrator.run(course_title=course_title, force=force, parts=parts)
+    results = integrator.run(course_title=course_title, force=force, parts=parts, plan=blocks or None)
 
     # Update manifest（textbooks 属列表型路径字段，save_manifest 会自动反向相对化）
     manifest = ws.load_manifest(absolute=True)

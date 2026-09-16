@@ -188,18 +188,33 @@ def lint_note(text: str) -> Dict[str, Any]:
 def check_note_structure(text: str) -> Dict[str, Any]:
     """结构完备性：笔记版式规范要求的必备构件是否齐备。
 
-    注意：现行笔记风格**不含**「速查卡 / 一句话总纲」（与树、条目重复，已废弃），
-    因此结构项里不再检查它们，改为要求「末尾没有多余收尾小节」。
+    现行笔记版式（换版后）：只有 H1 + 按知识主题分节的条目，**不写抬头元信息引用块、
+    不写知识拓扑树、不写节级主旨句**（这些是因与标题/内容重复而被刻意删掉的，所以
+    不再是结构项）；标题层级最多到 `####`，且**不得手写序号**——阅读器会自动编号，
+    手写序号会与它叠成 `1.1.` 那种乱码。外加原有的「末尾没有多余收尾小节」。
     """
-    quote_lines = sum(1 for ln in text.splitlines() if ln.strip().startswith(">"))
     heading_texts = re.findall(r"^#{1,6}\s+(.*)$", text, re.M)
+
+    # 逐行扫、跳过代码围栏——代码块里以 # 开头的注释不是标题。
+    deep_headings = 0        # `#####` / `######`：超出「最多到 `####`」的上限
+    numbered_headings = 0    # 手写序号：`## 1. …` / `### 1.1 …`
+    in_fence = False
+    for line in text.splitlines():
+        if FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if re.match(r"^#{5,6}\s+\S", line):
+            deep_headings += 1
+        if re.match(r"^#{1,6}\s+\d+(?:\.\d+)*[.、]?\s+\S", line):
+            numbered_headings += 1
+
     return {
         "has_h1": bool(re.search(r"^#\s+\S", text, re.M)),
-        "has_metadata_block": quote_lines >= 2,
-        "has_topology_tree": "```text" in text,
         "has_sections": len(re.findall(r"^##\s+\S", text, re.M)) >= 2,
-        "has_oneline_theme": "一句话主旨" in text,
-        "has_source_marks": bool(re.search(r">\s*来源\s*[:：]\s*P\d+", text)),
+        "no_h5plus_headings": deep_headings == 0,
+        "no_numbered_headings": numbered_headings == 0,
         "no_redundant_tail": not any(
             ("速查卡" in h) or ("一句话总纲" in h) for h in heading_texts
         ),
@@ -248,14 +263,12 @@ def lint_render(text: str) -> Dict[str, Any]:
 
 # 致命项：两套合格语料均为 0，坏样本大量命中 → 作为门禁
 FATAL_NOTE_KEYS = ("boilerplate", "hollow_headings", "episode_headings", "inline_quote", "episode_voice")
-# 结构缺件同样只提示（基准语料缺 v2 新增的主旨行与总纲）
+# 结构缺件同样只提示（换版前的笔记按旧规范生成，必然缺新构件，不回溯达标）
 STRUCTURE_KEYS = (
     "has_h1",
-    "has_metadata_block",
-    "has_topology_tree",
     "has_sections",
-    "has_oneline_theme",
-    "has_source_marks",
+    "no_h5plus_headings",       # 标题最多到 `####`，不得出现 `#####` / `######`
+    "no_numbered_headings",     # 标题不得手写序号（阅读器会自动编号，会叠字）
     "no_redundant_tail",
 )
 
