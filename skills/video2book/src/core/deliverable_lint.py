@@ -16,6 +16,9 @@
 import re
 from typing import Any, Dict, List
 
+from src.core.heading_numbers import is_numbered_heading
+from src.core.heading_numbers import iter_lines as _heading_lines
+
 # ── 套话黑名单：无信息量的填充句（每条陈述都必须携带具体信息，否则不许写） ────────────
 BOILERPLATE_PHRASES = (
     "概念属性与边界",
@@ -197,28 +200,37 @@ def check_note_structure(text: str) -> Dict[str, Any]:
 
     # 逐行扫、跳过代码围栏——代码块里以 # 开头的注释不是标题。
     deep_headings = 0        # `#####` / `######`：超出「最多到 `####`」的上限
-    numbered_headings = 0    # 手写序号：`## 1. …` / `### 1.1 …`
-    in_fence = False
-    for line in text.splitlines():
-        if FENCE_RE.match(line):
-            in_fence = not in_fence
-            continue
+    numbered = 0             # 手写序号（判定规则与去号共用 src/core/heading_numbers）
+    for _line_no, line, in_fence in _heading_lines(text):
         if in_fence:
             continue
         if re.match(r"^#{5,6}\s+\S", line):
             deep_headings += 1
-        if re.match(r"^#{1,6}\s+\d+(?:\.\d+)*[.、]?\s+\S", line):
-            numbered_headings += 1
+        if is_numbered_heading(line):
+            numbered += 1
 
     return {
         "has_h1": bool(re.search(r"^#\s+\S", text, re.M)),
         "has_sections": len(re.findall(r"^##\s+\S", text, re.M)) >= 2,
         "no_h5plus_headings": deep_headings == 0,
-        "no_numbered_headings": numbered_headings == 0,
+        "no_numbered_headings": numbered == 0,
         "no_redundant_tail": not any(
             ("速查卡" in h) or ("一句话总纲" in h) for h in heading_texts
         ),
     }
+
+
+def lint_heading_numbers(text: str) -> List[Dict[str, Any]]:
+    """标题手写序号明细（跳过代码围栏）。
+
+    长文与教材同样适用：它们曾经带 `## 第 N 章：…` 与继承自长文的 `## 2.1 …`，
+    与阅读器的自动编号叠成双号。教材整编现已幂等去号，这里给出可复算的抽查口径。
+    """
+    hits: List[Dict[str, Any]] = []
+    for line_no, line, in_fence in _heading_lines(text):
+        if not in_fence and is_numbered_heading(line):
+            hits.append({"line": line_no, "text": line.strip()[:120]})
+    return hits
 
 
 def lint_render(text: str) -> Dict[str, Any]:

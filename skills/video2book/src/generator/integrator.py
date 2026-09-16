@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from src.core.heading_numbers import strip_heading_number
 from src.core.workspace import sanitize_filename
 
 
@@ -180,11 +181,12 @@ class ArticleIntegrator:
             "",
         ]
 
-        # TOC
+        # TOC：用有序列表（序号由渲染器生成）。正文标题一律不写序号——写了会与阅读器的
+        # 自动编号叠成「1. 第 1 章」这种双号，笔记侧已踩过同一个坑。
         for i, ep in enumerate(episodes, 1):
             title = ep.get("title", "")
             clean_t = re.sub(r"^\d+\.\s*", "", title)
-            lines.append(f"- **第 {i} 章**：{clean_t}")
+            lines.append(f"{i}. {clean_t}")
         lines.extend(["", "---", ""])
 
         # Chapters
@@ -196,7 +198,7 @@ class ArticleIntegrator:
             if not matches:
                 matches = [f for f in self.articles_dir.glob(f"P{page:02d}_*.md") if not f.name.endswith("_TASK.md")]
             
-            lines.append(f"## 第 {i} 章：{clean_t}")
+            lines.append(f"## {clean_t}")
             lines.append(f"> 对应分集：P{page:02d} | 原始标题：《{title}》")
             lines.append("")
 
@@ -233,13 +235,15 @@ class ArticleIntegrator:
                     break
                 art_content = "\n".join(head_lines[head_idx:])
                 
-                # Demote existing H2 (##) to H3 (###) and H3 to H4 for hierarchical consistency
+                # 先剥号、再降级（##→###、###→####）：存量长文标题带 `## 2.1 …` 这类手写序号，
+                # 不剥会与阅读器的自动编号叠成双号；新长文已由提示词要求不写序号，所以这一步幂等。
                 demoted = []
                 in_code = False
                 for line in art_content.strip().splitlines():
                     if line.startswith("```"):
                         in_code = not in_code
                     if not in_code:
+                        line = strip_heading_number(line)
                         if line.startswith("#### "):
                             line = "#" + line  # becomes #####
                         elif line.startswith("### "):

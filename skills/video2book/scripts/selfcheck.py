@@ -1847,8 +1847,14 @@ def check_regression_fixes():
         out_lines = text.splitlines()
         assert "微型计算机概述" not in text, "长文 H1 未被剥离"
         assert "目标：讲清体系结构" not in text and "来源：P01 单集精读长文" not in text, "多行抬头未被剥净"
-        assert "### 1. 体系结构" in out_lines, "章内 H2 未降级为 H3"
-        assert "## 1. 体系结构" not in out_lines, "章内 H2 仍以 H2 层级残留（与教材章标题同级）"
+        # 长文标题现要求不写序号；存量带号标题在整编时被幂等剥掉：`## 1. 体系结构` → `### 体系结构`
+        assert "### 体系结构" in out_lines, "章内 H2 未降级为 H3（或未剥掉手写序号）"
+        assert "## 体系结构" not in out_lines, "章内 H2 仍以 H2 层级残留（与教材章标题同级）"
+        assert "### 1. 体系结构" not in out_lines, "整编未剥掉继承自长文的标题序号"
+        # 教材章标题与目录都不再写序号（否则与阅读器自动编号叠字）
+        assert "## 绪论" in out_lines, "教材章标题未按「主题名」渲染"
+        assert "第 1 章" not in text, "教材仍在章标题或目录里写「第 N 章」"
+        assert "1. 绪论" in out_lines, "教材目录未改为有序列表"
         assert "正文内容。" in text, "正文被误删"
 
         out.write_text(text + "\n<!-- MARK -->\n", encoding="utf-8")
@@ -2114,6 +2120,76 @@ def check_two_pass_planning_contract():
         "教材分册必须保留体积归一（cluster-articles 依赖它）"
 
 
+def check_heading_number_discipline():
+    """标题序号纪律：判定与去号同源、长文与教材不再写号、批量清理脚本可跑且幂等。
+
+    背景（实测踩过两轮）：阅读器（Typora）会**自动**给标题编号，标题里再手写一套
+    （笔记的 `## 1. …`、教材的 `## 第 3 章：…` 与继承来的 `## 2.1 …`）就会叠成双号。
+    所以口径统一为「标题不写序号」：长文提示词不写号、教材整编幂等去号，
+    存量产物由 `scripts/strip_heading_numbers.py` 就清理。
+    """
+    import importlib.util
+
+    from src.core.deliverable_lint import lint_heading_numbers
+    from src.core.heading_numbers import is_numbered_heading, strip_heading_number
+    from src.generator.prompt_templates import ARTICLE_LEARNING_PROMPT
+
+    # 1) 长文提示词：不得再要求编号，且必须明说「标题里不要写序号」
+    assert "编号加术语" not in ARTICLE_LEARNING_PROMPT, "学习版长文提示词仍在要求标题编号"
+    assert "标题里不要写序号" in ARTICLE_LEARNING_PROMPT, "学习版长文提示词缺少「标题不写序号」"
+    assert "编号连续" not in ARTICLE_LEARNING_PROMPT, "学习版长文提示词残留「编号连续」"
+
+    # 2) 去号规则：常见形态都剥、内容型数字不剥、幂等、围栏内不动
+    for before, after in (
+        ("## 1. 列表标签的三大分类", "## 列表标签的三大分类"),
+        ("### 2.1 无序列表的语义", "### 无序列表的语义"),
+        ("#### 1 这一阶段要拿下的三件事", "#### 这一阶段要拿下的三件事"),
+        ("#### 1.3 大小写书写规范", "#### 大小写书写规范"),
+        ("### 1 层次化的看问题方法", "### 层次化的看问题方法"),
+        ("### 2 类属性", "### 类属性"),
+        ("#### 3.7 点击 Install 并等待", "#### 点击 Install 并等待"),
+        ("#### 1.1 年月日与时分秒的独立获取", "#### 年月日与时分秒的独立获取"),
+        ("## 第 3 章：关系模型", "## 关系模型"),
+        ("## 3、工程定位", "## 工程定位"),
+    ):
+        got = strip_heading_number(before)
+        assert got == after, f"去号失败：{before} → {got}"
+        assert strip_heading_number(after) == after, f"去号不幂等：{after}"
+    for keep in ("## 3 种方案的取舍", "## 1.5 倍速播放", "## 2025 年路线图",
+                 "### 1963 年火星火箭：一句 Fortran 循环语句的录入错误",
+                 "#### 5.7 与 8.0 版本元数据呈现差异",
+                 "#### 0、1 与 NULL 的三值逻辑闭包",
+                 "# 篇名", "普通正文行"):
+        assert strip_heading_number(keep) == keep, f"内容型数字被误剥：{keep}"
+        assert not is_numbered_heading(keep), f"内容型数字被误判为序号：{keep}"
+    assert is_numbered_heading("## 1. 带序号的标题"), "带序号的标题未被判定为手写序号"
+    assert lint_heading_numbers("```text\n## 1. 围栏内的井号不是标题\n```\n") == [], \
+        "围栏内的行被当成标题统计了"
+
+    # 3) 教材整编：章标题与目录都不再写号，且必须调用去号
+    src = (SKILL_ROOT / "src" / "generator" / "integrator.py").read_text(encoding="utf-8")
+    assert '"## 第 {i} 章：' not in src, "教材仍在章标题里写「第 N 章」"
+    assert "- **第 {i} 章**" not in src, "教材目录仍在写「第 N 章」"
+    assert "strip_heading_number" in src, "教材整编未对继承来的长文标题去号"
+
+    # 4) 批量清理脚本：真跑一遍（临时文本），去号正确、正文不动、再跑零改动
+    script = SKILL_ROOT / "scripts" / "strip_heading_numbers.py"
+    assert script.is_file(), "缺少标题去号脚本 scripts/strip_heading_numbers.py"
+    spec = importlib.util.spec_from_file_location("_strip_heading_numbers", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    sample = "# 篇名\n\n## 1. 第一节\n\n正文一。\n\n### 2.1 子节\n\n正文二。\n"
+    new_text, headings, toc, _changes, _suspects = module.clean_text(sample)
+    assert (headings, toc) == (2, 0), f"脚本去号条数不对：headings={headings} toc={toc}"
+    assert "## 1." not in new_text and "### 2.1" not in new_text, "脚本未剥掉标题序号"
+    assert "正文一。" in new_text and "正文二。" in new_text, "脚本动了正文"
+    again_text, headings2, toc2, _c2, _s2 = module.clean_text(new_text)
+    assert (headings2, toc2) == (0, 0) and again_text == new_text, "脚本不幂等"
+    toc_text, _h3, toc3, _c3, _s3 = module.clean_text("- **第 1 章**：绪论\n")
+    assert toc_text == "1. 绪论\n" and toc3 == 1, f"教材目录行归一失败：{toc_text!r}"
+
+
 def check_fsutil_contract():
     """文件系统健壮性契约：不可访问的条目必须降级为「跳过」，绝不抛异常。
 
@@ -2201,6 +2277,7 @@ def main():
     check("交付物渲染兼容约束（Typora）", check_render_compat_rules)
     check("长文提示词风格契约（学习/旧版 + 未确认即终止）", check_article_prompt_types)
     check("模块笔记契约（文章直供/只写结论/版式规范/任务书回收）", check_module_note_contract)
+    check("标题序号纪律（长文/教材不写号 + 清理脚本幂等）", check_heading_number_discipline)
     check("交付物机器门禁（告警块/围栏配对）", check_deliverable_lint_gate)
     check("文档无已删除笔记风格残留", check_docs_style_matrix_clean)
     check("交付矩阵长文类型表齐备", check_delivery_matrix_article_types)
