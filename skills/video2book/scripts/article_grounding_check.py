@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""长文依据级校验：这篇文章到底有没有基于本集逐字稿写。
+"""长文依据级校验：这篇**模块长文**到底有没有基于本**块**的逐字稿写。
 
 **为什么需要它**：SKILL.md §4.5 长期把「是否真的听了音频」列为**不可校验**的纪律条款——
 工具层只能看文件在不在、字节够不够，看不了内容来源。块级转录流水线改变了这一点：写作的
-事实依据从「子智能体听过的音频」变成了**盘上的一份逐字稿**，于是「文章是否基于这份逐字稿」
-第一次可以用纯脚本、零 token 地量出来。
+事实依据从「子智能体听过的音频」变成了**盘上的一份块级逐字稿**，于是「长文是否基于这份
+逐字稿」第一次可以用纯脚本、零 token 地量出来。
+
+配对口径随块级链路收紧（v2.8）：**一块一验**——`articles/模块XX_*_精读长文.md`
+↔ `subtitles/BLKXX_*_逐字稿.md`。旧版按「集」配对（单集长文 ↔ 分集逐字稿），
+在块级链路上两头都不存在，配对必然落空。
 
 **量什么**：从逐字稿里抽「技术实体」——英文标识符（寄存器名、指令名、API 名）与多位数字，
 要求它在逐字稿里出现至少 `--min-freq` 次（滤掉 ASR 噪声），再看有多少个出现在长文里。
@@ -16,7 +20,7 @@
    一篇完全用中文表述、却忠实于逐字稿的长文，得分也会偏低。
 2. 它只能证明「用了语料」，不能证明「用得对」——取舍是否恰当、有没有过度展开，仍需抽样复核。
 3. 逐字稿是 ASR 产物，本身可能有识别错误；实体频率下限就是为了压掉这类噪声。
-4. 没有逐字稿的集**不参与判定**，单独计入 `unverifiable`（老工作区、未转录的集都属此类），
+4. 没有逐字稿的块**不参与判定**，单独计入 `unverifiable`（还没转录的块都属此类），
    不会因此判失败。
 
 用法：
@@ -36,10 +40,11 @@ from typing import Any, Dict, List
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.core.audio_merger import AudioMerger  # noqa: E402
 from src.core.console import enable_utf8_console  # noqa: E402
 from src.core.task_cleanup import find_workspaces  # noqa: E402
 from src.core.transcript_splitter import TranscriptSplitter  # noqa: E402
-from src.core.workspace import TaskWorkspace  # noqa: E402
+from src.core.workspace import TaskWorkspace, find_module_article  # noqa: E402
 
 # 时间戳要先把整段抹掉再抽实体：否则「00:12:35」会被当成三个数字实体灌进统计
 _TIMESTAMP_BLOCK_RE = re.compile(r"[\[【]\s*(?:\d{1,3}:)?\d{1,2}:\d{2}(?:[.,]\d{1,3})?\s*[\]】]")
@@ -65,15 +70,17 @@ def extract_entities(text: str, min_freq: int) -> Counter:
     return Counter({token: n for token, n in counter.items() if n >= min_freq})
 
 
-def check_episode(
-    ws: TaskWorkspace, page: int, min_freq: int, min_coverage: float
+def check_block(
+    ws: TaskWorkspace, block: Dict[str, Any], min_freq: int, min_coverage: float
 ) -> Dict[str, Any]:
-    """校验单集：返回覆盖率与缺失实体明细。"""
-    from src.core.kernel_extractor import KernelExtractor
-
-    article = KernelExtractor.find_article(ws, page)
+    """校验单个块：返回覆盖率与缺失实体明细。"""
+    block_id = int(block.get("block_id") or 0)
+    article = find_module_article(ws.articles_dir, block)
     entry: Dict[str, Any] = {
-        "page": page,
+        "block_id": block_id,
+        "span": str(block.get("span") or ""),
+        "title": str(block.get("title") or ""),
+        "episodes": [int(p) for p in (block.get("episodes") or [])],
         "article": str(article) if article else "",
         "article_bytes": 0,
         "transcript": "",
@@ -95,12 +102,8 @@ def check_episode(
         entry["error"] = str(err)
         return entry
 
-    part = next((p for p in (ws.load_parts() or []) if int(p.get("page", -1)) == page), None)
-    from src.core.workspace import sanitize_filename
-
-    clean_title = sanitize_filename(str((part or {}).get("title") or f"P{page:02d}"))
-    transcript = TranscriptSplitter.existing_episode_transcript(ws, page, clean_title)
-    if transcript is None:
+    transcript = TranscriptSplitter.block_path(ws, block)
+    if not transcript.exists():
         # 没有逐字稿就没有比对基准：计入不可校验，绝不因此判失败
         entry["status"] = "unverifiable"
         return entry
@@ -132,9 +135,12 @@ def check_episode(
 
 
 def check_workspace(ws: TaskWorkspace, min_freq: int, min_coverage: float) -> Dict[str, Any]:
-    """校验整个工作区的长文依据覆盖率。"""
-    pages = sorted(int(p["page"]) for p in (ws.load_parts() or []) if p.get("page") is not None)
-    entries = [check_episode(ws, page, min_freq, min_coverage) for page in pages]
+    """校验整个工作区的模块长文依据覆盖率（一块一验）。"""
+    blocks = (AudioMerger.load_manifest(ws) or {}).get("blocks") or []
+    entries = [
+        check_block(ws, b, min_freq, min_coverage)
+        for b in blocks if isinstance(b, dict)
+    ]
     checked = [e for e in entries if e["status"] in ("ok", "low_coverage")]
     low = [e for e in checked if e["status"] == "low_coverage"]
     unverifiable = [e for e in entries if e["status"] == "unverifiable"]
@@ -147,6 +153,7 @@ def check_workspace(ws: TaskWorkspace, min_freq: int, min_coverage: float) -> Di
         "low_coverage": len(low),
         "unverifiable": len(unverifiable),
         "no_article": len([e for e in entries if e["status"] == "no_article"]),
+        "no_entities": len([e for e in entries if e["status"] == "no_entities"]),
         "avg_coverage": avg,
         "min_coverage": min_coverage,
         "min_freq": min_freq,
@@ -157,7 +164,7 @@ def check_workspace(ws: TaskWorkspace, min_freq: int, min_coverage: float) -> Di
 
 def main() -> int:
     enable_utf8_console()
-    parser = argparse.ArgumentParser(description="长文依据级校验（长文 ↔ 逐字稿实体覆盖率）")
+    parser = argparse.ArgumentParser(description="长文依据级校验（模块长文 ↔ 块级逐字稿实体覆盖率）")
     parser.add_argument("--dir", default=None, help="工作区目录（缺省扫描产物根下全部工作区）")
     parser.add_argument("--base-dir", default=None, help="产物根（缺省由 src/core/paths.py 解析）")
     parser.add_argument("--task", default=None, help="按工作区名关键字过滤")
@@ -166,7 +173,7 @@ def main() -> int:
     parser.add_argument("--min-coverage", type=float, default=DEFAULT_MIN_COVERAGE, dest="min_coverage",
                         help=f"覆盖率下限，低于即报警（默认 {DEFAULT_MIN_COVERAGE}）")
     parser.add_argument("--json", action="store_true", help="JSON 输出")
-    parser.add_argument("--strict", action="store_true", help="存在低于覆盖率下限的集即返回非零")
+    parser.add_argument("--strict", action="store_true", help="存在低于覆盖率下限的块即返回非零")
     args = parser.parse_args()
 
     if args.dir:
@@ -192,35 +199,36 @@ def main() -> int:
         print(json.dumps({"reports": reports, "strict": bool(args.strict)}, ensure_ascii=False, indent=2))
     else:
         print("=" * 72)
-        print("[*] 长文依据级校验（长文 ↔ 逐字稿 技术实体覆盖率）")
+        print("[*] 长文依据级校验（模块长文 ↔ 块级逐字稿 技术实体覆盖率）")
         print(f"[*] 口径：实体出现次数 ≥ {args.min_freq}；覆盖率下限 {args.min_coverage:.0%}；"
-              f"无逐字稿的集不参与判定")
+              f"无逐字稿的块不参与判定")
         print("[i] 这是启发式：只测英文标识符与数字，中文表述为主但忠实于语料的长文也会偏低；"
               "它证明「用了语料」，不证明「用得对」")
         print("=" * 72)
         for report in reports:
             print(f"\n▶ {report['workspace']}")
             avg = f"{report['avg_coverage']:.1%}" if report["avg_coverage"] is not None else "—"
-            print(f"    可校验 {report['checked']}/{report['total']} 集（另 {report['unverifiable']} 集无逐字稿、"
-                  f"{report['no_article']} 集无长文）")
+            print(f"    可校验 {report['checked']}/{report['total']} 块（另 {report['unverifiable']} 块无逐字稿、"
+                  f"{report['no_article']} 块无模块长文、{report['no_entities']} 块逐字稿无重复技术实体）")
             print(f"    达标 {report['ok']} | 低于下限 {report['low_coverage']} | 平均覆盖 {avg}")
             for entry in report["low_entries"][:12]:
-                print(f"    [✗] P{entry['page']:02d} 覆盖 {entry['coverage']:.1%} "
+                print(f"    [✗] BLK{entry['block_id']:02d} {entry['span']} 覆盖 {entry['coverage']:.1%} "
                       f"（{entry['covered']}/{entry['entities']} 个实体）"
                       f" 长文 {entry['article_bytes']:,}B / 逐字稿 {entry['transcript_bytes']:,}B")
                 if entry["missing"]:
                     print(f"         └ 逐字稿里高频但长文未出现：{'、'.join(entry['missing'][:8])}")
             if report["low_coverage"] > 12:
-                print(f"    … 其余 {report['low_coverage'] - 12} 集见 --json 输出")
+                print(f"    … 其余 {report['low_coverage'] - 12} 块见 --json 输出")
             if report["checked"] and report["low_coverage"] == 0:
                 print("    ── 全部达标")
             if not report["checked"]:
-                print("    ── 无可校验的集（尚无逐字稿，或尚无长文）")
+                print("    ── 无可校验的块（尚无块级逐字稿 / 尚无模块长文 / 逐字稿里没有重复出现的"
+                      "英文标识符与多位数字——纯中文口语讲述的块会落在这里，不等于长文有问题）")
         print("\n" + "=" * 72)
 
     any_low = any(r["low_coverage"] > 0 for r in reports)
     if any_low and args.strict:
-        print("[FAIL] 存在长文未达依据覆盖率下限（详见上方 [✗]）")
+        print("[FAIL] 存在模块长文未达依据覆盖率下限（详见上方 [✗]）")
         return 1
     if not args.json:
         print("[OK] 依据级校验完成" + ("（提示级：加 --strict 可纳入门禁）" if any_low else ""))

@@ -84,7 +84,7 @@ class IngestionCoordinator:
                 probe_err = err
 
         # 离线自愈与本地工作区缓存重试（支持 B 站等历史任务）
-        from src.core.pipeline import _offline_candidate_dirs, _parts_from_articles, _workspace_title
+        from src.core.pipeline import _offline_candidate_dirs, _parts_from_audio, _workspace_title
         from src.core.parser import BilibiliParser
 
         bvid = BilibiliParser.extract_bvid(target) or ""
@@ -114,7 +114,7 @@ class IngestionCoordinator:
                         cached_parts = []
 
                 if not cached_parts:
-                    cached_parts = _parts_from_articles(cd)
+                    cached_parts = _parts_from_audio(cd)
 
                 if cached_parts:
                     print(f"\n[!] 在线元数据提取受阻（{probe_err}），已自动从本地缓存加载分集拓扑离线运行: {cd.name}")

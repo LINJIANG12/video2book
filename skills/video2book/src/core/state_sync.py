@@ -1,14 +1,16 @@
 """State Sync: 以磁盘为唯一真相回填 manifest.json（对账）。
 
 问题背景：`manifest.json` 只记录**工具自己派发**的活。宿主 Agent 事后写进 `articles/` 的成品
-永远不会回填，于是三门课的清单里都写着「一集都没完成 / 全流程未完成」，而硬盘上成品早已齐全——
+永远不会回填，于是清单里写着「一集都没完成 / 全流程未完成」，而硬盘上成品早已齐全——
 账本与仓库脱节，任何依赖清单的自动判断都会误判。
 
 本模块做一件事：**数硬盘，然后改账本**。
-- 分集完成度：以 `articles/` 中合格长文（≥ `min_article_bytes`）为准，兼容旧工作区的宽松命名；
+- 阶段一完成度：**按块**统计——块清单（`audio/_blocks/blocks.json`）里每块是否已有模块长文
+  （`articles/模块XX_*_精读长文.md`，≥ `min_article_bytes`）。集号只作为「块覆盖了哪些集」的
+  派生视图写进 `details`，不再是完成单位；
 - 模块资产：以 `notes/`、`textbooks/` 实际文件为准（排除任务书）；
-- 规划：优先采用 `topic_plan.json`（Agent 语义产出的权威边界）；
-- 失败/跳过名单：原样保留，不因对账而抹掉历史故障记录。
+- 老格式工作区（没有块清单，即块级链路之前建的）：**不做阶段一判定**，返回 `stage1_unit="none"`
+  与提示语——新链路按块对账，这类工作区要先用 `merge-audio` 重装块才能纳入统一会计。
 """
 
 import json
@@ -17,7 +19,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from . import fsutil
-from .kernel_extractor import KernelExtractor
+from .audio_merger import AudioMerger
+from .workspace import find_module_article, module_article_path
 
 MIN_ARTICLE_BYTES = 1000
 
@@ -45,6 +48,7 @@ def reconcile_workspace_manifest(
 
     manifest = ws.load_manifest(absolute=True)
     parts = ws.load_parts() or []
+    blocks = (AudioMerger.load_manifest(ws) or {}).get("blocks") or []
 
     details: Dict[Any, Dict[str, Any]] = {}
     for entry in manifest.get("details", []):
@@ -60,55 +64,69 @@ def reconcile_workspace_manifest(
             "cid": part.get("cid", 0),
         })
 
+    # ---- 阶段一：按块判定 ----
+    block_entries: List[Dict[str, Any]] = []
     success_pages: List[int] = []
-    pending_pages: List[int] = []
+    for block in blocks:
+        article = find_module_article(ws.articles_dir, block, min_article_bytes)
+        pages = [int(p) for p in (block.get("episodes") or [])]
+        block_entries.append({
+            "block_id": int(block.get("block_id") or 0),
+            "span": str(block.get("span") or ""),
+            "title": str(block.get("title") or ""),
+            "episodes": pages,
+            "duration_min": float(block.get("duration_min") or 0.0),
+            "status": "success" if article is not None else "need-agent-article",
+            "article": str(article) if article is not None else "",
+            "target_article": str(module_article_path(ws.articles_dir, block)),
+        })
+        if article is not None:
+            success_pages.extend(pages)
+    success_pages = sorted(set(success_pages))
+
+    skipped_pages = [p for p in manifest.get("skipped_pages", []) if p is not None]
+    done_blocks = [b for b in block_entries if b["status"] == "success"]
+    total = len(parts) or len(details)
+    effective_total = max(0, total - len(skipped_pages))
+
     for page in sorted(details, key=lambda x: (x is None, x)):
-        article = KernelExtractor.find_article(ws, page)
         entry = details[page]
-        if article is not None and fsutil.file_size(article) >= min_article_bytes:
-            entry["status"] = "success"
-            entry["article"] = str(article)
-            # 任务书已回收时不再留悬空引用
-            task_prompt = entry.get("task_prompt")
-            if task_prompt and not Path(str(task_prompt)).exists():
-                entry.pop("task_prompt", None)
-            success_pages.append(page)
+        if blocks:
+            # 逐集视图由「覆盖它的块是否完成」派生：块完成即本集已被教材覆盖
+            entry["status"] = "success" if page in success_pages else "need-agent-article"
+            if entry["status"] == "success":
+                task_prompt = entry.get("task_prompt")
+                if task_prompt and not Path(str(task_prompt)).exists():
+                    entry.pop("task_prompt", None)
+            else:
+                entry.pop("article", None)
         else:
             entry["status"] = "need-agent-article"
             entry.pop("article", None)
-            pending_pages.append(page)
 
-    total = len(parts) or len(details)
+    pending_pages = [p for p in details if p not in set(success_pages)]
+
     note_files = _list_products(ws.notes_dir)
     textbook_files = _list_products(ws.root_dir / "textbooks")
 
-    plan: Optional[List[Dict[str, Any]]] = None
-    plan_file = ws.root_dir / "topic_plan.json"
-    if plan_file.exists():
-        try:
-            loaded = json.loads(plan_file.read_text(encoding="utf-8"))
-            if isinstance(loaded, list) and loaded:
-                plan = loaded
-        except Exception:
-            plan = None
-
     failed_entries = [d for d in manifest.get("failed_episodes", []) if isinstance(d, dict)]
-    skipped_pages = [p for p in manifest.get("skipped_pages", []) if p is not None]
-    effective_total = max(0, total - len(skipped_pages))
-
-    # 整编完成证据：优先看权威规划文件；历史工作区（旧架构）没有 topic_plan.json，
-    # 但已有笔记与教材落盘，同样视为整编完成，不应被误判为「未完工」。
-    consolidation_evidence = plan is not None or total == 1 or (len(note_files) > 0 and len(textbook_files) > 0)
+    consolidation_evidence = bool(note_files) and bool(textbook_files)
+    stage1_unit = "module" if blocks else "none"
+    stage1_complete = bool(blocks) and len(done_blocks) == len(blocks)
     completed = (
-        effective_total > 0
-        and len([p for p in success_pages if p not in skipped_pages]) >= effective_total
+        stage1_complete
         and not failed_entries
         and consolidation_evidence
+        and effective_total > 0
     )
 
     updated: Dict[str, Any] = {
         "details": [details[k] for k in sorted(details, key=lambda x: (x is None, x))],
-        "processed_episodes": len(success_pages),
+        "blocks": block_entries,
+        "blocks_total": len(blocks),
+        "blocks_done": len(done_blocks),
+        "stage1_unit": stage1_unit,
+        "processed_episodes": len([p for p in success_pages if p not in skipped_pages]),
         "episode_total": total,
         "episode_pending": len([p for p in pending_pages if p not in skipped_pages]),
         "pipeline_completed": bool(completed),
@@ -116,8 +134,6 @@ def reconcile_workspace_manifest(
         "textbooks": [TaskWorkspace.to_relative(p) for p in textbook_files],
         "reconciled_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
-    if plan is not None:
-        updated["knowledge_blocks_plan"] = plan
 
     if not dry_run:
         merged = dict(manifest)
@@ -127,14 +143,16 @@ def reconcile_workspace_manifest(
     return {
         "workspace": ws.root_dir.name,
         "workspace_path": str(ws.root_dir),
+        "stage1_unit": stage1_unit,
         "total": total,
-        "success": len(success_pages),
+        "success": len([p for p in success_pages if p not in skipped_pages]),
         "pending": len([p for p in pending_pages if p not in skipped_pages]),
         "skipped": len(skipped_pages),
         "failed": len(failed_entries),
+        "blocks_total": len(blocks),
+        "blocks_done": len(done_blocks),
         "notes": len(note_files),
         "textbooks": len(textbook_files),
-        "plan_blocks": len(plan) if plan else 0,
         "pipeline_completed": bool(completed),
         "dry_run": bool(dry_run),
         "updated_fields": sorted(updated.keys()),

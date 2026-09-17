@@ -63,14 +63,11 @@ video2book cluster-articles "https://www.bilibili.com/video/BV14VqVBrEhc" --forc
 
 ```bash
 # 复习笔记只有一种风格，无需 --style
-# 两趟规划（模块划分 ➔ 归并成笔记）都由 Agent 产出；缺规划不会卡住，命令始终正常退出
+# 归并（块 ➔ 成篇笔记）由 Agent 产出；缺归并不会卡住，命令始终正常退出
 video2book cluster-notes "https://www.bilibili.com/video/BV14VqVBrEhc"
 
 # --force：强制重导全部笔记任务书（已产出笔记成品的篇默认自动复用）
 video2book cluster-notes "https://www.bilibili.com/video/BV14VqVBrEhc" --force
-
-# --force-plan：强制重出两趟规划任务书（忽略盘上旧规划，重新做模块划分与笔记归并）
-video2book cluster-notes "https://www.bilibili.com/video/BV14VqVBrEhc" --force-plan
 ```
 
 ## 场景五：查看与监控任务队列状态
@@ -115,8 +112,7 @@ python src/cli.py sync
 ```
 
 > **任务书是临时派发物**：`*_TASK.md` 在成品产出后由 `cleanup`（或 pipeline 收尾）自动回收，
-> 每个类别保留编号最小的 1 份作为提示词范本；`topic_plan_TASK.md` / `note_plan_TASK.md`
-> 属课程级规划任务书，永不回收。
+> 每个类别保留编号最小的 1 份作为提示词范本；`note_plan_TASK.md` 属课程级规划任务书，永不回收。
 
 ---
 

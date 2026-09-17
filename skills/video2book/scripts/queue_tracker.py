@@ -178,12 +178,40 @@ def load_parts(ws: Path) -> List[Dict]:
     )
 
 
+def _load_blocks(ws: Path) -> List[Dict]:
+    """读块清单（`audio/_blocks/blocks.json`）；没有块级链路的老工作区返回空表。"""
+    path = ws / "audio" / "_blocks" / "blocks.json"
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    blocks = data.get("blocks") if isinstance(data, dict) else None
+    return [b for b in blocks if isinstance(b, dict)] if isinstance(blocks, list) else []
+
+
+def _module_article_path(articles_dir: Path, block: Dict) -> Path:
+    """块对应的模块长文路径（唯一命名来源在 `src/core/workspace.py`）。"""
+    from src.core.workspace import module_article_path
+
+    return module_article_path(articles_dir, block)
+
+
+def _find_module_article(articles_dir: Path, block: Dict) -> Optional[Path]:
+    """磁盘上已就绪的模块长文（唯一命名来源在 `src/core/workspace.py`）。"""
+    from src.core.workspace import find_module_article
+
+    return find_module_article(articles_dir, block)
+
+
 def scan_status(ws: Path, min_article_bytes: int = 1000) -> Dict:
     """Scans workspace disk state and returns detailed progress statistics.
 
-    Stage-1 completion is decided solely by the presence of a valid single-episode
-    article: the zero-transcript pipeline writes articles/ directly and produces
-    no intermediate subtitle files.
+    完成单位是**块**：一块一篇模块长文（`articles/模块XX_*_精读长文.md`，≥ 1000 字节）。
+    集号只作「块覆盖了哪些集」的派生视图。没有块清单的工作区**不做阶段一判定**
+    （`stage1_unit="none"`）：旧链路按逐集长文 `PXX_*_精读文章.md` 判进度，那种产物在
+    块级链路里已经不存在，照它判定只会永远判「未完成」。
     """
     parts = load_parts(ws)
 
@@ -193,30 +221,34 @@ def scan_status(ws: Path, min_article_bytes: int = 1000) -> Dict:
     textbooks_dir = ws / "textbooks"
     notes_dir = ws / "notes"
 
+    blocks = _load_blocks(ws)
+    blocks_done: List[Dict] = []
+    invalid_articles: Dict[int, Any] = {}
     done_pages: Set[int] = set()
-    art_map = {}
-    invalid_articles = {}
-
-    if articles_dir.exists():
-        for f in articles_dir.glob("*.md"):
-            # 任务书（*_TASK.md）与长文同目录、同以 PXX_ 开头且体积同样远超门禁，必须排除
-            if f.name.endswith("_TASK.md"):
+    for block in blocks:
+        block_id = int(block.get("block_id") or 0)
+        article = _find_module_article(articles_dir, block)
+        if article is not None:
+            blocks_done.append({
+                "block_id": block_id,
+                "span": block.get("span") or "",
+                "title": block.get("title") or "",
+                "article": str(article),
+            })
+            done_pages.update(int(p) for p in (block.get("episodes") or []))
+            continue
+        # 有文件但没达标（空壳）必须单独报出来：否则「写了但不够」会表现为「什么都没写」。
+        # 任务书（*_TASK.md）与长文同目录同前缀，且体积同样远超门禁，必须先排除。
+        for cand in sorted(articles_dir.glob(f"模块{block_id:02d}_*.md")):
+            if cand.name.endswith("_TASK.md"):
                 continue
-            m = re.match(r"^P(\d+)_", f.name)
-            if m:
-                p_num = int(m.group(1))
-                if f.stat().st_size >= min_article_bytes:
-                    art_map[p_num] = f
-                else:
-                    invalid_articles[p_num] = (f, f.stat().st_size)
-
-    for p in parts:
-        p_num = p["page"]
-        # Single-stage direct-to-article completion gate: valid article >= 1000 bytes
-        if p_num in art_map:
-            done_pages.add(p_num)
+            size = cand.stat().st_size
+            if size < min_article_bytes:
+                invalid_articles[block_id] = (cand, size)
+            break
 
     pending = [p for p in parts if p["page"] not in done_pages]
+    stage1_complete = bool(blocks) and len(blocks_done) == len(blocks)
 
     textbooks = list(textbooks_dir.glob("*.md")) if textbooks_dir.exists() else []
     # 任务书（*_TASK.md）是派发用的临时产物，不计入交付资产，否则会把计数虚高
@@ -239,16 +271,23 @@ def scan_status(ws: Path, min_article_bytes: int = 1000) -> Dict:
         "invalid_articles": invalid_articles,
         "textbooks_count": len(textbooks),
         "notes_count": len(notes),
-        "is_stage1_complete": len(pending) == 0 and len(parts) > 0,
+        "blocks_total": len(blocks),
+        "blocks_done": blocks_done,
+        "stage1_unit": "module" if blocks else "none",
+        "is_stage1_complete": stage1_complete,
     }
 
 
 def scan_transcript_status(ws: Path) -> Dict:
     """块级转录与逐字稿进度。
 
-    为什么单独算一份：块清单（`audio/_blocks/blocks.json`）与逐字稿是**新链路独有**的产物。
-    老工作区（听音链路）没有它们，这里返回空统计即可，绝不能让它影响 STAGE1_DONE——
+    为什么单独算一份：块清单（`audio/_blocks/blocks.json`）与逐字稿是**块级链路独有**的产物。
+    老工作区（逐集链路）没有它们，这里返回空统计即可，绝不能让它影响 STAGE1_DONE——
     那条门禁的语义始终是「长文是否齐备」，混入逐字稿条件会让全部历史工作区一夜之间不再完工。
+
+    就绪口径是**块**（`BLKxx_*_逐字稿.md` 存在且非空）：写作按块成文，块稿在即语料在。
+    `episode_transcripts` 只是「事后按集查阅」时用 split-transcript 切出来的可选产物，
+    缺了它不代表转录没做——它不进任何派发门禁。
     """
     from src.core.audio_merger import AudioMerger
     from src.core.transcript_splitter import TranscriptSplitter
@@ -297,7 +336,7 @@ def scan_transcript_status(ws: Path) -> Dict:
         blocks_info.append({
             "block_id": int(block.get("block_id") or 0),
             "episodes": episodes,
-            "span": AudioMerger.block_stem(episodes),
+            "span": AudioMerger.block_span(block),
             "audio": str(Path(tws.root_dir) / str(block.get("audio") or "")),
             "duration_min": float(block.get("duration_min") or 0.0),
             "block_transcript": str(raw),
@@ -388,80 +427,35 @@ def _budget_summary(status: Dict) -> Dict:
     return info
 
 
-def _dispatch_payload(status: Dict, n: int, require_transcript: bool = False) -> List[Dict]:
-    """可直接转交给子智能体的派发载荷（主 Agent 无需再自行拼路径）。
+def _module_payload(ws: Path, n: int) -> List[Dict]:
+    """模块长文的派发载荷（写作侧取载荷入口）：只返回「块逐字稿已就绪且模块长文缺失」的块。
 
-    `require_transcript=True` 时只返回**逐字稿已就绪**的集：这是转录流水线里写作侧的取载荷
-    入口。转录与写作是交错推进的（不等全部转录完才开工），写作角色只该领到已经有语料的那几
-    集，否则拿到的任务书指向一份还不存在的逐字稿，子智能体只能空转或凭空编造。
+    一个块一篇、读块逐字稿写——这是块级链路对写作角色的全部约束，载荷里给全路径与语料状态，
+    主 Agent 不需要自己拼文件名。
     """
-    from src.core import budget
-    from src.core.transcript_splitter import TranscriptSplitter
-    from src.core.workspace import TaskWorkspace, sanitize_filename
-
-    audio_dir = Path(status["audio_dir"])
-    articles_dir = Path(status["articles_dir"])
     items: List[Dict] = []
-
-    try:
-        tws = TaskWorkspace.from_existing(Path(status["workspace"]))
-    except Exception:
-        tws = None
-    blocks_by_page = _blocks_by_page(tws)
-
-    for p in status["pending_parts"]:
-        page = p["page"]
-        duration = float(p.get("duration", 0) or 0)
-
-        matched = sorted(audio_dir.glob(f"P{page:02d}_*.m4a"))
-        if matched:
-            audio_f = matched[0]
-            clean_title = audio_f.stem[len(f"P{page:02d}_"):]
-        else:
-            clean_title = sanitize_filename(p["title"])
-            audio_f = audio_dir / f"P{page:02d}_{clean_title}.m4a"
-
-        transcript_f = None
-        expected_transcript = None
-        if tws is not None:
-            transcript_f = TranscriptSplitter.existing_episode_transcript(tws, page, clean_title)
-            # 尚无逐字稿时，把「将来该落在哪」一并交给调用方，便于排障与预热
-            expected_transcript = TranscriptSplitter.episode_path(tws, page, clean_title)
-
-        if require_transcript and transcript_f is None:
+    articles_dir = ws / "articles"
+    subtitles_dir = ws / "subtitles"
+    for block in _load_blocks(ws):
+        block_id = int(block.get("block_id") or 0)
+        span = str(block.get("span") or "")
+        transcript = subtitles_dir / f"BLK{block_id:02d}_{span}_逐字稿.md"
+        if not transcript.exists() or transcript.stat().st_size <= 0:
             continue
-
-        task_file = articles_dir / f"P{page:02d}_{clean_title}_TASK.md"
-        target_article = articles_dir / f"P{page:02d}_{clean_title}_精读文章.md"
-
-        block = blocks_by_page.get(int(page)) or {}
-        segment_in_block = ""
-        for seg in block.get("segments") or []:
-            if int(seg.get("page") or 0) == int(page):
-                segment_in_block = f"{seg.get('start') or ''}-{seg.get('end') or ''}"
-                break
-        block_audio = (
-            str(Path(status["workspace"]) / str(block.get("audio"))) if block.get("audio") else ""
-        )
-
+        if _find_module_article(articles_dir, block) is not None:
+            continue
+        target = _module_article_path(articles_dir, block)
         items.append({
-            "page": page,
-            "title": p["title"],
-            "duration_sec": duration,
-            "est_audio_tokens": budget.est_audio_tokens(duration),
-            "est_episode_prefill_tokens": budget.est_episode_prefill_tokens(duration),
-            "task_file": str(task_file),
-            "task_file_exists": task_file.exists(),
-            "audio_file": str(audio_f),
-            "audio_exists": audio_f.exists(),
-            "block_id": int(block.get("block_id") or 0),
-            "block_audio": block_audio,
-            "block_duration_min": float(block.get("duration_min") or 0.0),
-            "segment_in_block": segment_in_block,
-            "target_article": str(target_article),
-            "transcript_file": str(transcript_f) if transcript_f is not None else "",
-            "transcript_ready": transcript_f is not None,
-            "expected_transcript": str(expected_transcript) if expected_transcript else "",
+            "block_id": block_id,
+            "span": span,
+            "title": str(block.get("title") or ""),
+            "episodes": block.get("episodes") or [],
+            "duration_min": float(block.get("duration_min") or 0.0),
+            "block_audio": str(ws / str(block.get("audio") or "")),
+            "transcript_file": str(transcript),
+            "transcript_bytes": transcript.stat().st_size,
+            "task_file": str(articles_dir / f"{target.name[:-len('_精读长文.md')]}_TASK.md"),
+            "target_article": str(target),
         })
         if len(items) >= n:
             break
@@ -469,9 +463,9 @@ def _dispatch_payload(status: Dict, n: int, require_transcript: bool = False) ->
 
 
 def _log_dispatch(status: Dict, requested: int, payload: List[Dict], budget_info: Dict) -> None:
-    """把本次建议的分集追加写入 <task>/.dispatch_log.jsonl（派发台账，观察性证据）。
+    """把本次建议派发的**块**追加写入 <task>/.dispatch_log.jsonl（派发台账，观察性证据）。
 
-    注意：本台账记录的是「工具建议派发了哪些集」，不是「谁真的写了」——执行者身份
+    注意：本台账记录的是「工具建议派发了哪些块」，不是「谁真的写了」——执行者身份
     无法在工具层验证；它的用途是事后复盘派发节奏（例如某工作区从未出现台账，
     说明阶段一没有走派发流程）。
     """
@@ -479,7 +473,7 @@ def _log_dispatch(status: Dict, requested: int, payload: List[Dict], budget_info
     entry = {
         "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
         "requested": requested,
-        "suggested": [i["page"] for i in payload],
+        "suggested_blocks": [int(i.get("block_id") or 0) for i in payload],
         "suggest_workers": budget_info.get("suggest_workers"),
         "suggest_batch": budget_info.get("suggest_batch"),
         "audio_tokens_per_sec": budget_info.get("audio_tokens_per_sec"),
@@ -497,13 +491,12 @@ def main():
     parser.add_argument("--base-dir", default=None,
                         help="产物根（默认：由 src/core/paths.py 解析——默认 <当前工作目录>/output，在容器内工作时为 <容器根>/output）")
     parser.add_argument("--pattern", default=None, help="Workspace directory name keyword filter")
-    parser.add_argument("--next", type=int, default=0, dest="next_n", help="Show next N pending episodes for dispatch")
-    parser.add_argument("--next-article", type=int, default=0, dest="next_article_n",
-                        help="写作侧取载荷：只返回「逐字稿已就绪且长文缺失」的集（块级转录流水线）")
+    parser.add_argument("--next-module", type=int, default=0, dest="next_module_n",
+                        help="写作侧取载荷（块级链路）：只返回「块逐字稿已就绪且模块长文缺失」的块")
     parser.add_argument("--next-transcribe", type=int, default=0, dest="next_transcribe_n",
                         help="转录侧取载荷：返回尚未转录的块（含块音频、块内时间表与逐字稿目标路径）")
     parser.add_argument("--log-dispatch", action="store_true", dest="log_dispatch",
-                        help="把本次建议的分集追加写入 <task>/.dispatch_log.jsonl（派发台账；默认关闭，--next N 时才有内容）")
+                        help="把本次建议派发的块追加写入 <task>/.dispatch_log.jsonl（派发台账；默认关闭）")
     parser.add_argument("--json", action="store_true", help="Output in JSON format")
     parser.add_argument("--summary", action="store_true", help="Output one-line summary for scripting")
     args = parser.parse_args()
@@ -530,20 +523,19 @@ def main():
             f"BLOCKS={tstatus['blocks_total']};"
             f"BLOCKS_TRANSCRIBED={tstatus['blocks_transcribed']};"
             f"BLOCKS_PENDING={tstatus['blocks_pending']};"
-            f"TRANSCRIPT_READY={tstatus['transcript_ready']};"
-            f"TRANSCRIPT_PENDING={len(tstatus['transcript_pending'])}"
+            # 转录就绪按块计（分集稿是可选切分产物，不计入）
+            f"TRANSCRIPT_READY={tstatus['blocks_transcribed']};"
+            f"TRANSCRIPT_PENDING={tstatus['blocks_pending']}"
         )
         return
 
-    # 取载荷：转录侧与写作侧互斥，各自只返回「还没做完」的那批
+    # 取载荷：转录侧（块）与写作侧（模块长文）互斥，各自只返回「还没做完」的那批
     transcribe_payload: List[Dict] = []
     if args.next_transcribe_n > 0:
         transcribe_payload = _transcribe_payload(tstatus, args.next_transcribe_n)
     payload: List[Dict] = []
-    if args.next_article_n > 0:
-        payload = _dispatch_payload(status, args.next_article_n, require_transcript=True)
-    elif args.next_n > 0:
-        payload = _dispatch_payload(status, args.next_n)
+    if args.next_module_n > 0:
+        payload = _module_payload(Path(status["workspace"]), args.next_module_n)
 
     if args.json:
         out = {
@@ -604,19 +596,14 @@ def main():
             print(f"    - 切分后产出: {len(item['episode_transcripts'])} 份分集逐字稿")
 
     if payload:
-        print(f"\n【待派发队列 Next {len(payload)} 个分集】：")
+        print(f"\n【待派发模块长文 Next {len(payload)} 个块（一个块一篇）】：")
         for item in payload:
-            dur_m = item["duration_sec"] / 60.0
-            print(f"  • P{item['page']:02d} [{dur_m:.1f}m]: {item['title']}")
+            print(f"  • BLK{item['block_id']:02d} {item['span']} [{item['duration_min']:.1f}m /"
+                  f" {len(item['episodes'])} 集]: {item['title']}")
             print(f"    - 任务书:  {item['task_file']}")
-            if item.get("transcript_ready"):
-                print(f"    - 逐字稿:  {item['transcript_file']}")
-            else:
-                print(f"    - 逐字稿:  未就绪（待生成 {item.get('expected_transcript') or '（未知）'}）")
-            if item.get("block_audio"):
-                _seg = f"（本集在块内 {item['segment_in_block']}）" if item.get("segment_in_block") else ""
-                print(f"    - 块音频:  BLK{item['block_id']:02d} {item['block_audio']}{_seg}")
-            print(f"    - Article: {item['target_article']}")
+            print(f"    - 逐字稿:  {item['transcript_file']}（{item['transcript_bytes']:,} 字节）")
+            print(f"    - 块音频:  {item['block_audio']}")
+            print(f"    - 目标长文: {item['target_article']}")
         if args.log_dispatch:
             print(f"\n[i] 已追加派发台账: {Path(status['workspace']) / '.dispatch_log.jsonl'}")
 

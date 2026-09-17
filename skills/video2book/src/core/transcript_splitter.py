@@ -1,13 +1,13 @@
-"""把块级逐字稿切回「一集一份」的内核（块级转录流水线的第二步）。
+"""把块级逐字稿切回「一集一份」的内核（块级流水线的**可选**环节）。
 
-**为什么必须切回去**：块只是为了少调用几次取音接口，长文仍是一集一篇、下游（模块规划 /
-教材分册 / 笔记 / 思维导图）仍按集号锚定。所以转录完必须把块级文本按 `blocks.json` 里的
-时间表还原成分集逐字稿，`subtitles/PXX_*_逐字稿.md` 就是转录与写作两类角色之间的**接口**。
+**为什么保留切分能力**：长文**按块**写（一块一篇模块长文），切分不再是写作的前置动作，
+只服务于「事后按集查阅」：`subtitles/PXX_*_逐字稿.md` 是从块级稿机械还原出来的分集视图。
+默认链路不切，写作、门禁与派发都不依赖它。
 
 **切分为什么不能靠猜**：块内每集的起止时间是合并时实测出来的（见 `audio_merger`），
 只要逐字稿带时间戳，切分就是**机械的、确定性的**——不依赖模型理解，也不会有语义漂移。
-拿不到时间戳时**不硬切**：落块级逐字稿并标记 `unsplit`，由写作角色照着时间表自己定位，
-门禁据此区分「确定性切分」与「人工定位」，避免把错位的文本当成分集语料喂给下游。
+拿不到时间戳时**不硬切**：落块级逐字稿并标记 `unsplit`，门禁据此区分「确定性切分」与
+「无法定位」，避免把错位的文本当成分集语料喂给下游。
 """
 
 from __future__ import annotations
@@ -214,7 +214,7 @@ class TranscriptSplitter:
 
     @staticmethod
     def _prefix_for(page: int, clean_title: str) -> str:
-        """与 `export_article_task` 同一套前缀规则：标题已带 `Pxx_` 就不重复加。"""
+        """分集稿的前缀规则：标题已带 `Pxx_` 就不重复加（避免 `P03_P03_标题`）。"""
         return "" if re.match(r"^P\d{2}_", clean_title) else f"P{page:02d}_"
 
     @classmethod
@@ -233,42 +233,40 @@ class TranscriptSplitter:
         return path.with_name(path.name + TranscriptSplitter.SUSPECT_SUFFIX).is_file()
 
     @classmethod
-    def legacy_path(cls, ws: Any, page: int, clean_title: str) -> Path:
-        """历史语料路径 `PXX_<标题>_clean.txt`（人工清洗稿或旧链路的逐集文本）。"""
-        return Path(ws.subtitles_dir) / f"{cls._prefix_for(page, clean_title)}{clean_title}_clean.txt"
-
-    @classmethod
     def existing_episode_transcript(
         cls, ws: Any, page: int, clean_title: str
     ) -> Optional[Path]:
-        """本集**已有**的可用逐字稿：优先新链路产物，其次历史 `_clean.txt` 语料。
+        """本集若已被 split-transcript 切出逐字稿则返回它，否则 None。
 
-        为什么要认历史语料：本改造之前的工作区里已经有 `subtitles/PXX_*_clean.txt`（人工清洗
-        稿或旧链路逐集文本，实测某课 64 份）。它们与逐字稿同义，直接拿来写长文即可——没必要
-        为了「统一格式」把已经存在的语料再转录一遍（那是纯烧钱）。返回 None 表示尚无逐字稿，
-        该集必须先等转录。
+        块级链路**不依赖分集稿**（长文按块写），这个入口只服务于「事后想按集查阅」的可选动作。
+        历史 `subtitles/PXX_*_clean.txt` 一律不认：那是旧链路的放行口，任何一段来路不明的文本
+        顶着这个名字就能被当成语料喂下去（2026-09 的伪逐字稿事故正是从这里进入流水线的）。
         """
-        for candidate in (cls.episode_path(ws, page, clean_title), cls.legacy_path(ws, page, clean_title)):
-            try:
-                if candidate.exists() and candidate.stat().st_size > 0 and not cls._is_suspect(candidate):
-                    return candidate
-            except OSError:
-                continue
+        candidate = cls.episode_path(ws, page, clean_title)
+        try:
+            if candidate.exists() and candidate.stat().st_size > 0 and not cls._is_suspect(candidate):
+                return candidate
+        except OSError:
+            pass
         return None
 
     @classmethod
     def block_path(cls, ws: Any, block: Dict[str, Any]) -> Path:
         """块级原始逐字稿的路径。
 
-        优先用「块号 + 集号区间」（`BLK03_P18-P22_逐字稿.md`）：它只取决于清单里的块结构，
-        与块音频落在哪无关。这一点在**无收益装箱**（每块仅一集、块音频直接指向该集原音频）时
-        尤其重要——否则块级稿会跟分集稿同名（都成 `P08_标题_逐字稿.md`）而互相覆盖。
-        清单缺块号/集号时退回按音频文件名取名（兼容手写的旧清单）。
+        优先用「块号 + 覆盖范围」（`BLK03_P18-P22_逐字稿.md`，含劈分腿时为 `BLK03_P12上-P13_逐字稿.md`）：
+        它只取决于清单里的块结构，与块音频落在哪无关。这一点在**无收益装箱**（每块仅一集、
+        块音频直接指向该集原音频）时尤其重要——否则块级稿会跟分集稿同名（都成
+        `P08_标题_逐字稿.md`）而互相覆盖。清单缺块号/覆盖范围时退回按音频文件名取名（兼容手写的旧清单）。
         """
         block_id = int(block.get("block_id") or 0)
         pages = sorted(int(p) for p in (block.get("episodes") or []))
-        if block_id and pages:
-            span = f"P{pages[0]:02d}" if len(pages) == 1 else f"P{pages[0]:02d}-P{pages[-1]:02d}"
+        span = str(block.get("span") or "")
+        if not span:
+            labels = [str(u.get("label") or "") for u in (block.get("units") or []) if u.get("label")]
+            span = labels[0] if len(labels) == 1 else (f"{labels[0]}-{labels[-1]}" if labels else "")
+        if block_id and (span or pages):
+            span = span or (f"P{pages[0]:02d}" if len(pages) == 1 else f"P{pages[0]:02d}-P{pages[-1]:02d}")
             return Path(ws.subtitles_dir) / f"BLK{block_id:02d}_{span}{cls.SUFFIX}"
         stem = Path(str(block.get("audio") or "")).stem or f"BLK{block_id:02d}"
         return Path(ws.subtitles_dir) / f"{stem}{cls.SUFFIX}"

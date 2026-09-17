@@ -7,7 +7,7 @@ Defines:
    stable version, restored verbatim). Four further video forms are registered without a prompt, so an
    unmatched input still terminates the task with the style menu.
 3. NOTE_VISUAL_SPEC + MODULE_NOTE_PROMPT: the single note style — module notes only, generated from
-   that module's single-episode articles, conclusions only (no derivations).
+   that module's long-form article (one block = one module), conclusions only (no derivations).
 """
 
 import re
@@ -42,15 +42,15 @@ RENDER_COMPAT_RULES = """【渲染兼容硬性要求（交付物默认以 Typora
 #   ④ **不写抬头元信息引用块、不写知识拓扑树**，也**不再补课程外知识**——
 #      长文没讲的就不写，同一主题下关键字段缺失时写「长文未说明」。
 #
-# 规则隔离（务必保持）：本组常量只服务**笔记**；单集长文的提示词是 ARTICLE_LEARNING_PROMPT，
+# 规则隔离（务必保持）：本组常量只服务**笔记**；模块长文的提示词是 ARTICLE_LEARNING_PROMPT，
 # 它同样「禁止外部知识」，两套规则**互不继承**。
-# 「一篇笔记可以装多个知识模块」的口径与 topic_planner 的第二趟归并一致，所以这里只说「笔记」。
-NOTE_ROLE_AND_SCOPE = """任务：把下列单集精读长文整理成一份高密度速查笔记。
+# 「一篇笔记可以装多个块」的口径与 note_planner 的归并一致，所以这里只说「笔记」。
+NOTE_ROLE_AND_SCOPE = """任务：把下列模块长文整理成一份高密度速查笔记。
 
 【笔记信息】
 - 笔记编号: {block_id}
 - 笔记主题: {block_title}
-- 涵盖模块: {blocks_str}
+- 涵盖块: {blocks_str}
 - 涵盖分集: {episodes_str}
 - 核心议题: {core_theme}
 
@@ -368,7 +368,6 @@ def render_article_prompt_menu() -> str:
         for sig in meta.get("signals", []):
             lines.append(f"       适用信号：{sig}")
     lines.append("用法：python src/cli.py pipeline \"<链接>\" --all --article-type learning")
-    lines.append("      python src/cli.py transcribe \"<链接>\" --page N --article-type legacy")
     return "\n".join(lines)
 
 

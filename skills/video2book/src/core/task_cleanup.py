@@ -1,13 +1,17 @@
 """Task-file Reclaim: 回收已完成的派发任务书（*_TASK.md）。
 
-架构定位：任务书（`PXX_*_TASK.md` / `PXX_*_KERNEL_TASK.md` / `笔记XX_*_TASK.md`）是工具层
-写给宿主 Agent 的**临时派发物**；Agent 读完后把成品落到 `articles/` / `subtitles/kernels/` / `notes/`。旧版本只负责写、不负责收，于是任务书从第一门课
-堆到第 N 门课，目录里混着大量废纸，并且把 `queue_tracker` 的「模块笔记 N 部」计数也带偏了。
+架构定位：任务书（`模块XX_*_TASK.md` / `笔记XX_*_TASK.md`）是工具层写给宿主 Agent 的
+**临时派发物**；Agent 读完后把成品落到 `articles/` / `notes/`。旧版本只负责写、不负责收，
+于是任务书从第一门课堆到第 N 门课，目录里混着大量废纸，并且把 `queue_tracker` 的
+「模块笔记 N 部」计数也带偏了。
+
+两类的完成单位都是**块**：模块长文任务书 ↔ `articles/模块XX_*_精读长文.md`，
+笔记任务书 ↔ `notes/笔记XX_*_笔记.md`。
 
 本模块补齐「收」的这一半：
 - **只回收成品已落盘**的任务书；成品未产出的任务书一律保留；
 - 每个类别保留编号最小的 1 份作为**提示词范本**（供人/Agent 随时翻阅写法）；
-- `topic_plan_TASK.md` / `note_plan_TASK.md` 全库唯一，永不回收。
+- `note_plan_TASK.md` 全库唯一，永不回收。
 """
 
 import re
@@ -18,75 +22,61 @@ from . import fsutil
 
 # 类别标识
 CATEGORY_ARTICLES = "articles"
-CATEGORY_KERNELS = "kernels"
 CATEGORY_NOTES = "notes"
 
 CATEGORY_LABELS = {
-    CATEGORY_ARTICLES: "单集文章任务书",
-    CATEGORY_KERNELS: "知识元任务书",
+    CATEGORY_ARTICLES: "模块长文任务书",
     CATEGORY_NOTES: "笔记任务书",
 }
 
 # 成品体积门槛：与阶段一门禁一致，避免把空壳文件误判为成品
 MIN_PRODUCT_BYTES = 1000
 
-_EPISODE_RE = re.compile(r"^P(\d+)_")
-# 笔记任务书/成品统一为 `笔记XX_…`（两趟归并后的粒度）：旧命名「模块XX_…」已不再兼容
-_MODULE_RE = re.compile(r"^笔记(\d+)_")
+# 模块长文任务书/成品统一为 `模块XX_…`（一个块一篇）：逐集命名 `PXX_…` 已不再存在
+_MODULE_ARTICLE_RE = re.compile(r"^模块(\d+)_")
+# 笔记任务书/成品统一为 `笔记XX_…`（块归并后的粒度）
+_NOTE_RE = re.compile(r"^笔记(\d+)_")
 
 
-def _episode_no(name: str) -> Optional[int]:
-    m = _EPISODE_RE.match(name)
+def _article_module_no(name: str) -> Optional[int]:
+    m = _MODULE_ARTICLE_RE.match(name)
     return int(m.group(1)) if m else None
 
 
-def _module_no(name: str) -> Optional[int]:
-    m = _MODULE_RE.match(name)
+def _note_no(name: str) -> Optional[int]:
+    m = _NOTE_RE.match(name)
     return int(m.group(1)) if m else None
 
 
 def _iter_tasks(ws: Any, category: str) -> List[Path]:
     """列出某类别的任务书，按编号升序（编号缺失者排到最后）。"""
     if category == CATEGORY_ARTICLES:
-        files = [f for f in ws.articles_dir.glob("P*_TASK.md") if _episode_no(f.name) is not None]
-    elif category == CATEGORY_KERNELS:
-        kernels_dir = ws.subtitles_dir / "kernels"
-        if not kernels_dir.exists():
-            return []
-        files = [f for f in kernels_dir.glob("P*_KERNEL_TASK.md") if _episode_no(f.name) is not None]
+        files = [f for f in ws.articles_dir.glob("模块*_TASK.md")
+                 if _article_module_no(f.name) is not None]
     elif category == CATEGORY_NOTES:
-        files = [f for f in ws.notes_dir.glob("笔记*_TASK.md") if _module_no(f.name) is not None]
+        files = [f for f in ws.notes_dir.glob("笔记*_TASK.md")
+                 if _note_no(f.name) is not None]
     else:  # pragma: no cover - 防御式分支
         return []
 
     def 排序键(f: Path) -> int:
-        num = _module_no(f.name) if category == CATEGORY_NOTES else _episode_no(f.name)
+        num = _note_no(f.name) if category == CATEGORY_NOTES else _article_module_no(f.name)
         return num if num is not None else 10**9
 
     return sorted(files, key=排序键)
 
 
 def _article_product_ready(ws: Any, task_file: Path) -> bool:
-    """文章成品是否已落盘（复用宽容定位，兼容旧工作区无 `_精读文章` 后缀的命名）。"""
-    from .kernel_extractor import KernelExtractor
+    """模块长文是否已落盘（按 `模块XX_` 前缀宽容定位，与队列、对账、门禁同口径）。"""
+    from .workspace import find_module_article
 
-    page = _episode_no(task_file.name)
-    if page is None:
+    module_no = _article_module_no(task_file.name)
+    if module_no is None:
         return False
-    article = KernelExtractor.find_article(ws, page)
-    return article is not None and article.stat().st_size >= MIN_PRODUCT_BYTES
-
-
-def _kernel_product_ready(ws: Any, task_file: Path) -> bool:
-    """知识元成品是否已落盘（契约：合法 JSON + status == extracted + 含实质条目）。"""
-    from .kernel_extractor import KernelExtractor
-
-    # P01_xxx_KERNEL_TASK.md -> P01_xxx_kernel.json（同名换后缀）
-    stem = task_file.name
-    if stem.endswith("_KERNEL_TASK.md"):
-        stem = stem[: -len("_KERNEL_TASK.md")]
-    kernel_json = (ws.subtitles_dir / "kernels") / f"{stem}_kernel.json"
-    return KernelExtractor.load_kernel(kernel_json) is not None
+    article = find_module_article(
+        ws.articles_dir, {"block_id": module_no}, min_bytes=MIN_PRODUCT_BYTES
+    )
+    return article is not None
 
 
 def find_module_note(
@@ -132,14 +122,12 @@ def _note_product_ready(ws: Any, task_file: Path) -> bool:
     preferred = None
     if task_file.name.endswith("_TASK.md"):
         preferred = task_file.name[: -len("_TASK.md")] + "_笔记.md"
-    return find_module_note(ws, _module_no(task_file.name), preferred_name=preferred) is not None
+    return find_module_note(ws, _note_no(task_file.name), preferred_name=preferred) is not None
 
 
 def _product_ready(ws: Any, category: str, task_file: Path) -> bool:
     if category == CATEGORY_ARTICLES:
         return _article_product_ready(ws, task_file)
-    if category == CATEGORY_KERNELS:
-        return _kernel_product_ready(ws, task_file)
     return _note_product_ready(ws, task_file)
 
 
@@ -180,7 +168,7 @@ def cleanup_completed_tasks(
     def 相对(p: Path) -> str:
         return TaskWorkspace.to_relative(p)
 
-    for category in (CATEGORY_ARTICLES, CATEGORY_KERNELS, CATEGORY_NOTES):
+    for category in (CATEGORY_ARTICLES, CATEGORY_NOTES):
         tasks = _iter_tasks(ws, category)
         cat_kept: List[str] = []
         cat_deleted = 0
@@ -221,23 +209,12 @@ def cleanup_completed_tasks(
     }
 
 
-def reclaim_kernel_task(ws: Any, page: int, keep_episode: int = 1) -> Optional[str]:
-    """单集知识元任务书即时回收（知识元成品已落盘且非范本时）。"""
-    if page <= keep_episode:
-        return None
-    for task_file in _iter_tasks(ws, CATEGORY_KERNELS):
-        if _episode_no(task_file.name) == page and _kernel_product_ready(ws, task_file):
-            if reclaim_task_file(task_file):
-                return str(task_file)
-    return None
-
-
 def reclaim_module_note_task(ws: Any, block_id: int, keep_module: int = 1) -> Optional[str]:
     """模块笔记任务书即时回收（笔记成品已落盘且非范本时）。"""
     if block_id <= keep_module:
         return None
     for task_file in _iter_tasks(ws, CATEGORY_NOTES):
-        if _module_no(task_file.name) == block_id and _note_product_ready(ws, task_file):
+        if _note_no(task_file.name) == block_id and _note_product_ready(ws, task_file):
             if reclaim_task_file(task_file):
                 return str(task_file)
     return None

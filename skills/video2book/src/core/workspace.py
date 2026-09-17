@@ -493,12 +493,11 @@ class TaskWorkspace:
         ]
 
     def sync_duplicate_assets(self, dry_run: bool = False) -> List[Dict[str, Any]]:
-        """检测并自动复用重复音频的字幕与长文产物，实现 0 Token 零成本去重同步。
+        """检测并复用重复音频已切出的**分集逐字稿**，实现 0 Token 零成本去重同步。
 
-        链路的最终产物是 `articles/` 长文；`subtitles/` 是**逐字稿与人工语料的正式存放位置**
-        （通道 B 代读回来的转录、以及课程音频抓不到时人工粘贴的文本都放这里）。
-        但平台本身不强制产出逐字稿，因此字幕只作「有则顺带同步」的可选产物，
-        **不充当长文复用的前提**。
+        块级链路里交付长文是**按块**的（`articles/模块XX_*_精读长文.md`），同一个块内部的两集
+        本就用同一份块级逐字稿成文，没有「一集一篇」可复用；而分集逐字稿只是事后按集查阅的
+        可选产物（`split-transcript` 的产出），重复集之间彼此等价，同步它是这里唯一还成立的动作。
         """
         import shutil
         fingerprints = self.scan_audio_fingerprints()
@@ -513,50 +512,80 @@ class TaskWorkspace:
             if p_page is None:
                 continue
 
-            prim_art = self._final_artifacts(self.articles_dir, p_page, ".md")
-            prim_sub = self._final_artifacts(self.subtitles_dir, p_page, "_clean.txt")
-
-            if not prim_art and not prim_sub:
+            prim_sub = self._final_artifacts(self.subtitles_dir, p_page, "_逐字稿.md")
+            if not prim_sub:
                 continue
-
-            src_art = prim_art[0] if prim_art else None
-            src_sub = prim_sub[0] if prim_sub else None
+            src_sub = prim_sub[0]
 
             for dup in items_sorted[1:]:
                 d_page = dup["page"]
                 if d_page is None:
                     continue
 
-                target_art = self._final_artifacts(self.articles_dir, d_page, ".md")
-                target_sub = self._final_artifacts(self.subtitles_dir, d_page, "_clean.txt")
+                target_sub = self._final_artifacts(self.subtitles_dir, d_page, "_逐字稿.md")
+                need_sub = not target_sub or target_sub[0].stat().st_size == 0
+                if not need_sub:
+                    continue
 
-                need_art = src_art is not None and (not target_art or target_art[0].stat().st_size == 0)
-                need_sub = src_sub is not None and (not target_sub or target_sub[0].stat().st_size == 0)
+                m_d = re.match(r"P\d+_(.*)\.[^.]+", dup["name"])
+                d_title = m_d.group(1) if m_d else f"P{d_page:02d}"
+                dst_sub = self.subtitles_dir / f"P{d_page:02d}_{d_title}_逐字稿.md"
 
-                if need_art or need_sub:
-                    m_d = re.match(r"P\d+_(.*)\.[^.]+", dup["name"])
-                    d_title = m_d.group(1) if m_d else f"P{d_page:02d}"
+                if not dry_run:
+                    shutil.copy2(src_sub, dst_sub)
 
-                    dst_sub = self.subtitles_dir / f"P{d_page:02d}_{d_title}_clean.txt"
-                    dst_art = self.articles_dir / f"P{d_page:02d}_{d_title}_精读文章.md"
-
-                    if not dry_run:
-                        if need_sub:
-                            shutil.copy2(src_sub, dst_sub)
-                        if need_art:
-                            content = src_art.read_text(encoding="utf-8")
-                            dst_art.write_text(content, encoding="utf-8")
-
-                    synced.append({
-                        "src_page": p_page,
-                        "dst_page": d_page,
-                        "hash": h[:12],
-                        "synced_sub": need_sub,
-                        "synced_art": need_art,
-                    })
+                synced.append({
+                    "src_page": p_page,
+                    "dst_page": d_page,
+                    "hash": h[:12],
+                    "synced_transcript": True,
+                })
 
         return synced
 
+
+
+MODULE_ARTICLE_SUFFIX = "_精读长文.md"
+
+
+def module_article_stem(block: Dict[str, Any]) -> str:
+    """模块长文与任务书的主干名：`模块XX_<语义组合标题>`（标题来自块清单）。
+
+    这是块级链路对「块 → 交付物」命名的**唯一来源**：工具、队列、对账、门禁、阶段二都调它，
+    避免各处各写一套正则与拼接规则（旧链路正是这样散开后才出现口径漂移）。
+    """
+    block_id = int(block.get("block_id") or 0)
+    title = str(block.get("title") or "").strip() or str(block.get("span") or f"BLK{block_id:02d}")
+    return f"模块{block_id:02d}_{sanitize_filename(title, max_len=40)}"
+
+
+def module_article_path(articles_dir: Union[str, Path], block: Dict[str, Any]) -> Path:
+    """块对应的模块长文正式路径（`articles/模块XX_<标题>_精读长文.md`）。"""
+    return Path(articles_dir) / f"{module_article_stem(block)}{MODULE_ARTICLE_SUFFIX}"
+
+
+def module_task_path(articles_dir: Union[str, Path], block: Dict[str, Any]) -> Path:
+    """块对应的模块长文任务书路径（`articles/模块XX_<标题>_TASK.md`）。"""
+    return Path(articles_dir) / f"{module_article_stem(block)}_TASK.md"
+
+
+def find_module_article(
+    articles_dir: Union[str, Path], block: Dict[str, Any], min_bytes: int = 1000
+) -> Optional[Path]:
+    """磁盘上已就绪的模块长文（按 `模块XX_` 前缀宽容定位，容忍标题微调与后缀差异）。"""
+    root = Path(articles_dir)
+    if not root.is_dir():
+        return None
+    block_id = int(block.get("block_id") or 0)
+    for candidate in sorted(root.glob(f"模块{block_id:02d}_*.md")):
+        if candidate.name.endswith("_TASK.md"):
+            continue
+        try:
+            if candidate.stat().st_size >= min_bytes:
+                return candidate
+        except OSError:
+            continue
+    return None
 
 
 def sanitize_filename(name: str, max_len: int = 80) -> str:

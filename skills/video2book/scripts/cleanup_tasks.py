@@ -98,7 +98,7 @@ def main() -> int:
     verb = "可回收" if args.dry_run else "已回收"
     print(f"[✓] {verb}任务书 {total_deleted} 份 | 保留范本 {total_kept} 份 | "
           f"成品未产出仍保留 {total_skipped} 份 | 删除失败 {total_failed_delete} 份")
-    print("[i] topic_plan_TASK.md 属课程级规划任务书，唯一存在，永不回收。")
+    print("[i] note_plan_TASK.md 属课程级规划任务书，唯一存在，永不回收。")
     print("=" * 68)
     return 0
 

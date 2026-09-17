@@ -77,7 +77,7 @@ The three deliverable tracks land in separate directories and never overwrite ea
 
 ```text
 output/<course_workspace>/
-├── articles/      PXX_<title>_精读文章.md     # per-episode deep-dive article
+├── articles/      模块XX_<block title>_精读长文.md  # module article (one per block)
 ├── textbooks/     模块XX_<theme>_精读全书.md   # compiled modular textbook
 ├── notes/         笔记XX_<theme>_笔记.md       # cross-module review note
 ├── audio/         PXX_*.m4a                  # 16 kHz mono audio slices
@@ -192,7 +192,7 @@ flowchart TD
 
 - **Audio is read only by the transcriber roles, and block by block**: audio is packed into blocks along **episode boundaries** (`audio/_blocks/`, configurable target, 60 min by default; an episode is never split across blocks). A block is transcribed in one pass with line-leading timestamps, then the toolchain **mechanically splits** it back into per-episode transcripts. Writer roles read transcripts only and never touch audio.
 - **Dispatch thresholds live in `src/core/budget.py`**: under 60 minutes total the main agent handles work serially; over 60 minutes it must dispatch — two transcriber roles consuming the block queue, plus writer roles picking up blocks (one sub-agent per block, writing its episodes in order). The window fallback applies only to transcriber roles on Channel A: a block whose computed audio tokens exceed 60% of the context window must be read in continuation chunks.
-- **Stage 2 runs in two passes and never stalls on imperfect plans**: the first pass splits episodes into knowledge modules (`topic_plan.json`, feeding textbooks); the second merges modules into a number of notes (`note_plan.json`, one note may span several modules). Out-of-range, missing or duplicate entries are rescued in place (trimmed, filled, first-come-wins), the command always exits normally, and on-disk plan files are never overwritten by fallback results.
+- **Module level needs no plan, and note merging never stalls**: a block *is* the knowledge module (audio is packed into 40–60 minute blocks, each block titled by semantically combining its episodes' names), so textbooks simply compile block articles in block order; notes merge blocks into a number of notes (`note_plan.json`, one note may span several blocks). Unknown or duplicate block claims are rescued in place (first-come-wins, orphan blocks get fallback notes), the command always exits normally, and the on-disk `note_plan.json` is never overwritten by fallback results.
 - **Stage 1 and Stage 2 are decoupled by content boundaries**, so a long course can resume from a breakpoint.
 - **The tool layer only prepares task files, dispatch payloads and gates**; writing the articles and notes is done by the host agent (usually sub-agents). "Who wrote it" and "did it really listen" are discipline clauses the tool layer cannot verify.
 
@@ -245,7 +245,7 @@ python scripts/queue_tracker.py --pattern "keyword" --next 5     # pick a worksp
 ```bash
 python src/cli.py cluster-articles "https://www.bilibili.com/video/BV14VqVBrEhc"           # modular book
 python src/cli.py cluster-notes "https://www.bilibili.com/video/BV14VqVBrEhc"              # two-pass aggregation → note task files
-python src/cli.py cluster-notes "https://www.bilibili.com/video/BV14VqVBrEhc" --force-plan # re-generate both plans
+python src/cli.py cluster-notes "https://www.bilibili.com/video/BV14VqVBrEhc" --force      # re-export all note task-files
 ```
 
 ### Quality checks and reconciliation
@@ -382,8 +382,6 @@ Three equivalent entry points with identical behaviour:
 | `--task` | all | Workspace directory name | the most recently active one |
 | `--sessdata` | all | Credential for this run, overrides the local store | stored copy |
 | `--dry-run` | `dedup` / `cleanup` / `sync` | Report only, write nothing | off |
-| `--force-plan` | `cluster-notes` | Re-generate both semantic plans | off |
-| `--kernel-index` | `cluster-notes` | Optional: inject historical knowledge kernels as a locating index | off |
 | `--json` | `parse` / `audio` / scripts | JSON output | off |
 
 ### Quality and operations scripts
@@ -451,7 +449,7 @@ The article style is confirmed by the user. Two prompts are provided: `learning`
 
 ### Will an imperfect Stage 2 plan stall the pipeline?
 
-No. Neither pass stalls: out-of-range blocks are trimmed, unclaimed episode numbers are filled as placeholders, and a fallback granularity keeps things moving — the command always exits normally, and on-disk `topic_plan.json` / `note_plan.json` are never overwritten by fallback results. Re-running after filling in the plan replaces them automatically.
+No. Merging never stalls: claims referencing unknown blocks are dropped, duplicate claims are first-come-wins, and unclaimed blocks each get a fallback note — the command always exits normally, and the on-disk `note_plan.json` is never overwritten by fallback results. Re-running after filling in the plan replaces them automatically.
 
 ### How do I confirm channels and products?
 

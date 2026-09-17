@@ -61,7 +61,7 @@ Video2Book 是一个面向 AI 编程助手的技能，用来把一门课写成�
 
 长课程的直接难点是听不完、也记不住。这个技能把音频按**集边界**装箱成块（一集绝不劈进两块），交给听音通道把整块转成逐字稿，再按块内时间表**机械切回**一集一份；写作角色只读逐字稿写长文，不再接触音频。取音调用次数因此从「每集一次」降到「每块一次」（实测 9 门课 936 集 → 381 块，降 2.46 倍）。
 
-产出分三轨，各自落在独立目录，可以单独取用：单集精读长文、模块合辑教材、跨模块复习笔记。每个产物在交付前都要过一遍机器门禁——套话填充、空壳标题、分集平铺标题这类问题会被脚本拦下，而不是留给你在阅读时发现。
+产出分三轨，各自落在独立目录，可以单独取用：模块精读长文、模块合辑教材、跨块复习笔记。每个产物在交付前都要过一遍机器门禁——套话填充、空壳标题、分集平铺标题这类问题会被脚本拦下，而不是留给你在阅读时发现。
 
 你需要准备的只有一个听音通道，它由配套仓库 [omni-media][link-omni-media] 提供：宿主自带音频模态时用它的 `mcp/`（`read_audio`，零凭证），只有文本能力时用它的 `mcp-ext/`（`read_media`，由外部模型代读）。这个通道是工作流的必需环节，缺了它阶段一取不到音频事实，流水线会停下提示你挂载。装好之后，一条命令就能跑完一门课。
 
@@ -77,7 +77,7 @@ Video2Book 是一个面向 AI 编程助手的技能，用来把一门课写成�
 
 ```text
 output/<课程工作区>/
-├── articles/      PXX_<标题>_精读文章.md     # 单集精读教材长文
+├── articles/      模块XX_<块标题>_精读长文.md  # 模块精读长文（一个块一篇）
 ├── textbooks/     模块XX_<主题>_精读全书.md   # 按模块整编的合辑教材
 ├── notes/         笔记XX_<主题>_笔记.md       # 跨模块聚合的复习笔记
 ├── audio/         PXX_*.m4a                 # 16kHz 单声道音频切片
@@ -174,9 +174,9 @@ flowchart TD
     D --> F[块级转录<br/>read_audio / read_media]
     E --> F
     F --> S[按时间表切回分集逐字稿<br/>subtitles/PXX_*_逐字稿.md]
-    S --> W[写作角色读逐字稿<br/>一集一篇长文]
+    S --> W[写作角色读块逐字稿<br/>一块一篇模块长文]
     W --> G[单集教材长文<br/>articles/]
-    G --> H[阶段二两趟语义聚合<br/>模块规划 → 笔记归并]
+    G --> H[阶段二：块 → 笔记归并<br/>+ 块序整编教材]
     H --> I[模块教材 textbooks/<br/>复习笔记 notes/]
 
     classDef start fill:#3B82F6,stroke:#2563EB,color:#fff,stroke-width:2px
@@ -192,7 +192,7 @@ flowchart TD
 
 - **取音只发生在转录角色身上，且按块取**：音频先按**集边界**装箱成块（`audio/_blocks/`，目标时长可配、默认 60 分钟，一集绝不劈进两块），转录角色一次读完整块、按行首时间戳产出逐字稿，再由工具按块内时间表**机械切回**分集逐字稿；写作角色只读逐字稿，不再接触音频。
 - **派发阈值写在 `src/core/budget.py`**：课程总时长在 60 分钟以内时由主 Agent 串行处理，超过则必须派发——转录角色建议 2 个并行消费块队列，写作角色按块领集（一个子智能体领一个块、依次写块内各集）。窗口兜底只对**走通道 A 的转录角色**成立：实算音频 token 超过上下文窗口 60% 的块必须分卷续读。
-- **阶段二分两趟，且缺规划不停机**：第一趟把集号切成知识模块（`topic_plan.json`，供教材），第二趟把模块归并成若干篇笔记（`note_plan.json`，一篇可跨多个模块）。越界／缺失／重复的规划都当场抢救（裁剪、补齐、先到先得），命令始终正常退出，盘上的规划文件不会被兜底结果覆盖。
+- **模块层没有规划，只有归并一趟，且缺归并不停机**：块就是知识模块（音频按 40–60 分钟装箱，块标题由块内分集名语义组合而来），教材直接按块序整编块长文；笔记侧把块归并成若干篇（`note_plan.json`，一篇可跨多个块）。漏认领／重复认领／引用不存在的块都当场抢救，命令始终正常退出，盘上的 `note_plan.json` 不会被兜底结果覆盖。
 - **阶段一与阶段二按内容边界解耦**，较长课程也能在断点后续跑。
 - **工具层只产出任务书、派发载荷与门禁**，长文与笔记的撰写由宿主 Agent（通常为子智能体）完成；「谁写的」「是否真听了音频」属纪律条款，工具层无法校验。
 
@@ -244,8 +244,8 @@ python scripts/queue_tracker.py --pattern "微机原理" --next 5      # 多课�
 
 ```bash
 python src/cli.py cluster-articles "https://www.bilibili.com/video/BV14VqVBrEhc"           # 模块全书
-python src/cli.py cluster-notes "https://www.bilibili.com/video/BV14VqVBrEhc"              # 两趟语义聚合 → 笔记任务书
-python src/cli.py cluster-notes "https://www.bilibili.com/video/BV14VqVBrEhc" --force-plan # 强制重出两趟规划
+python src/cli.py cluster-notes "https://www.bilibili.com/video/BV14VqVBrEhc"              # 块 → 笔记归并 → 笔记任务书
+python src/cli.py cluster-notes "https://www.bilibili.com/video/BV14VqVBrEhc" --force      # 强制重导笔记任务书
 ```
 
 ### 交付前质检与对账
@@ -364,7 +364,7 @@ skill/
 | `transcribe` | 导出单集长文任务书，不落中间逐字稿 | `python src/cli.py transcribe "<链接>" --page 1 --article-type learning` |
 | `pipeline` | 执行完整流水线 | `python src/cli.py pipeline "<链接>" --all --article-type learning` |
 | `cluster-articles` | 把单集长文整编为模块教材 | `python src/cli.py cluster-articles "<链接>"` |
-| `cluster-notes` | 两趟语义聚合，导出笔记任务书 | `python src/cli.py cluster-notes "<链接>"` |
+| `cluster-notes` | 块 → 笔记归并，导出笔记任务书 | `python src/cli.py cluster-notes "<链接>"` |
 | `dedup` | 同步重复音频资产以节省 token | `python src/cli.py dedup --dry-run` |
 | `cleanup` | 回收已产出的任务书，每类保留样本 | `python src/cli.py cleanup --dry-run` |
 | `sync` | 以磁盘产物为准回填 manifest.json | `python src/cli.py sync --dry-run` |
@@ -383,8 +383,6 @@ skill/
 | `--task` | 全部 | 指定课程工作区目录名 | 最近活动的那个 |
 | `--sessdata` | 全部 | 本次执行的凭证，优先于本地存档 | 已保存的存档 |
 | `--dry-run` | `dedup` / `cleanup` / `sync` | 只报告不落盘 | 关 |
-| `--force-plan` | `cluster-notes` | 强制重出两趟规划任务书 | 关 |
-| `--kernel-index` | `cluster-notes` | 可选：注入历史知识元作定位索引 | 关 |
 | `--json` | `parse` / `audio` / 脚本 | 以 JSON 输出 | 关 |
 
 ### 质检与运维脚本
@@ -452,7 +450,7 @@ skill/
 
 ### 阶段二规划写得不完美会卡住吗
 
-不会。两趟规划都不停机：越界块裁掉、无人认领的集号补占位、缺规划用兜底粒度继续，命令始终正常退出，且盘上的 `topic_plan.json` / `note_plan.json` 不会被兜底结果覆盖，补齐后重跑即自动替换。
+不会。归并不停机：引用了不存在块的认领丢掉、重复认领先到先得、没人认领的块各补成一篇兜底笔记，命令始终正常退出，且盘上的 `note_plan.json` 不会被兜底结果覆盖，补齐后重跑即自动替换。
 
 ### 怎么确认挂载与产物状态
 

@@ -4,11 +4,12 @@
 
 Commands:
   parse            - Parse URL/BVID, classify video type, and inspect sub-videos
-  audio            - Fetch audio stream URL, download m4a, and optionally chunk via ffmpeg
-  transcribe       - Export per-episode ARTICLE_TASK (zero intermediate transcript)
-  pipeline         - Two-stage orchestration: gather audio, then dispatch task-files
-  cluster-notes    - Export module synthesis task-files from extracted knowledge kernels
-  cluster-articles - Consolidate single-episode articles into modular textbooks
+  audio            - Fetch audio stream URL and download 16kHz mono m4a per episode
+  pipeline         - Two-stage orchestration: gather audio, pack blocks, then dispatch task-files
+  merge-audio      - (Re)pack per-episode audio into blocks and export block task files
+  split-transcript - Optional: split a block transcript into per-episode transcripts
+  cluster-notes    - Two-pass aggregation: blocks -> review notes (task files)
+  cluster-articles - Consolidate module long-forms into modular textbooks
   dedup            - Synchronize duplicate audio assets to save LLM tokens
   login / logout   - Persist or clear the Bilibili SESSDATA credential
   info             - Show environment & toolchain readiness status
@@ -34,7 +35,6 @@ from src.core.console import enable_utf8_console
 from src.core.local_media import LocalMediaParser
 from src.core.fetcher import AudioFetcher
 from src.core.workspace import TaskWorkspace, sanitize_filename
-from src.core.kernel_extractor import KernelExtractor
 from src.core.credentials import (
     DouyinCookieStore,
     SessdataStore,
@@ -48,7 +48,6 @@ from src.core.pipeline import (
     PipelineCoordinator,
     PipelineGateError,
     _STATUS_FILE,
-    export_article_task,
     export_block_transcribe_task,
     get_audio_stream,
     parse_range_string,
@@ -129,21 +128,6 @@ def _confirm_article_prompt_style(args) -> str:
     print('    python src/cli.py pipeline "<链接>" --all --article-type learning   # 学习（推荐）', file=sys.stderr)
     print('    python src/cli.py pipeline "<链接>" --all --article-type legacy     # 旧版（原稳定版）', file=sys.stderr)
     sys.exit(4)
-
-
-def _export_article_task_guarded(ws, page_num, clean_title, **kwargs):
-    """单集长文任务书导出的唯一出口：提示词风格未命中已提供预设时，打印风格菜单并终止任务。
-
-    工具层刻意不做关键词猜测、不做默认兜底——风格由用户确认。
-    """
-    from src.generator.prompt_templates import ArticlePromptTypeError
-
-    try:
-        return export_article_task(ws, page_num, clean_title, **kwargs)
-    except ArticlePromptTypeError as err:
-        print("\n" + err.report, file=sys.stderr)
-        print("去向：确认使用哪种提示词风格后，用 --article-type 重跑本命令。", file=sys.stderr)
-        sys.exit(4)
 
 
 def _owner_line(info) -> str:
@@ -478,98 +462,6 @@ def cmd_audio(args):
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
-def _require_episode_transcript(ws, page: int, clean_title: str):
-    """取本集逐字稿；没有就报错退出——逐字稿链路的任务书不允许在无语料时派发。
-
-    取音只发生在块级转录角色身上：先 `pipeline`（或 `merge-audio`）装箱并导出块级转录任务书，
-    再由转录角色按块转录出块级逐字稿，最后 `split-transcript` 切出本集逐字稿。
-    """
-    from src.core.transcript_splitter import TranscriptSplitter
-
-    found = TranscriptSplitter.existing_episode_transcript(ws, page, clean_title)
-    if found is None:
-        print(f"[✗] P{page:02d} 逐字稿未就绪，不导出长文任务书：{ws.subtitles_dir}", file=sys.stderr)
-        print("去向：① pipeline 收音频并装箱 → ② 转录角色按块转录（read_media）落块级逐字稿 → "
-              "③ split-transcript 切出分集逐字稿 → ④ 重跑本命令", file=sys.stderr)
-        sys.exit(2)
-    return found
-
-
-def _block_for_page(ws, page: int) -> dict:
-    """从块清单取本集所属的块；没有块清单时返回空字典（任务书照常导出，只是缺出处信息）。"""
-    from src.core.audio_merger import AudioMerger
-
-    manifest = AudioMerger.load_manifest(ws) or {}
-    for block in manifest.get("blocks") or []:
-        if int(page) in [int(p) for p in (block.get("episodes") or [])]:
-            return block
-    return {}
-
-
-def cmd_transcribe(args):
-    """导出单集精读文章任务书（**逐字稿链路**：语料必须是本集逐字稿）。
-
-    本命令不再产出「听音任务书」——取音只发生在块级转录角色身上。逐字稿未就绪时直接报错
-    退出，绝不派发一份没有语料的任务书。
-    """
-    target_p = Path(args.target).resolve()
-    if target_p.exists() and target_p.is_file():
-        ws0 = TaskWorkspace.create(title=target_p.stem, bvid="", custom_name=args.task, base_dir=args.base_dir)
-        # 该分支的任务书落盘名带 P01_ 前缀，复用判定须走宽容定位而非裸文件名
-        existing_article = KernelExtractor.find_article(ws0, 1)
-        if existing_article is not None and existing_article.stat().st_size >= 1000:
-            print(f"[✓] 单集精读长文已存在，无需重新派发: {existing_article}")
-            if args.output:
-                out_p = Path(args.output).resolve()
-                out_p.parent.mkdir(parents=True, exist_ok=True)
-                out_p.write_text(existing_article.read_text(encoding="utf-8"), encoding="utf-8")
-                print(f"[✓] 长文已复制至: {out_p}")
-            return
-
-        _require_episode_transcript(ws0, 1, target_p.stem)
-        tf = _export_article_task_guarded(
-            ws0, 1, target_p.stem, title=target_p.stem,
-            article_type=_confirm_article_prompt_style(args),
-        )
-        print(f"[✓] 已导出单集精读文章任务书（读逐字稿撰写）: {tf} (status=need-agent-article)")
-        return
-
-    # Polymorphically resolve metadata (Local directory course or Bilibili URL/BVID)
-    info = resolve_target_info(args.target, sessdata=args.sessdata)
-    bvid = info["bvid"]
-    ws = TaskWorkspace.create(title=info["title"], bvid=bvid, custom_name=args.task, base_dir=args.base_dir, info_name=info.get("workspace_name"))
-
-    target_part = 1
-    target_cid = info["cid"]
-    p_title = info["title"]
-    req_page = args.page if args.page is not None else (info.get("url_page") or 1)
-    if info["has_multi_pages"]:
-        target_part = max(1, min(req_page, len(info["parts"])))
-        matched = info["parts"][target_part - 1]
-        target_cid = matched["cid"]
-        p_title = matched["title"]
-
-    clean_p_title = sanitize_filename(p_title)
-    # 复用判定走宽容定位，兼容历史工作区无 _精读文章 后缀的长文
-    existing_article = KernelExtractor.find_article(ws, target_part)
-    if existing_article is not None and existing_article.stat().st_size >= 1000:
-        print(f"[✓] 单集精读长文已存在，无需重新派发: {existing_article}")
-        if args.output:
-            out_p = Path(args.output).resolve()
-            out_p.parent.mkdir(parents=True, exist_ok=True)
-            out_p.write_text(existing_article.read_text(encoding="utf-8"), encoding="utf-8")
-            print(f"[✓] 长文已复制至: {out_p}")
-        return
-
-    _require_episode_transcript(ws, target_part, clean_p_title)
-    tf = _export_article_task_guarded(
-        ws, target_part, clean_p_title, title=info["title"], cid=target_cid,
-        block_info=_block_for_page(ws, target_part),
-        article_type=_confirm_article_prompt_style(args),
-    )
-    print(f"[✓] 已导出单集精读文章任务书（读逐字稿撰写）: {tf} (status=need-agent-article)")
-
-
 def cmd_pipeline(args):
     """两阶段流水线：调度编排委托领域服务 PipelineCoordinator，CLI 仅负责参数解析与退出码转换。"""
     article_type = _confirm_article_prompt_style(args)
@@ -667,7 +559,7 @@ def cmd_merge_audio(args):
 
     print(f"[✓] 块清单：{AudioMerger.manifest_path(ws)}")
     print(f"[✓] 块级转录任务书 {len(result['blocks'])} 份 → {Path(ws.subtitles_dir).name}/")
-    print("[i] 下一步：专职转录角色照任务书转录出块级逐字稿，再跑 split-transcript 切回分集")
+    print("[i] 下一步：转录角色照任务书用 read_media 出块级逐字稿；写作角色读它写模块长文（一个块一篇）")
 
 
 def cmd_split_transcript(args):
@@ -695,7 +587,7 @@ def cmd_split_transcript(args):
     print("=" * 65)
     done = pending = unsplit = suspect = 0
     for block in blocks:
-        label = f"BLK{int(block.get('block_id') or 0):02d} {AudioMerger.block_stem(block.get('episodes') or [])}"
+        label = f"BLK{int(block.get('block_id') or 0):02d} {AudioMerger.block_span(block)}"
         raw = TranscriptSplitter.block_path(ws, block)
         if not raw.exists() or raw.stat().st_size == 0:
             print(f"[skip] {label} 尚无块级逐字稿（{raw.name}）")
@@ -741,41 +633,15 @@ def cmd_cluster_notes(args):
     ws = TaskWorkspace.create(title=info["title"], bvid=bvid, custom_name=args.task, base_dir=args.base_dir, info_name=info.get("workspace_name"))
 
     # 集号基准以工作区为准（在线解析只用于首次建工作区），标题同理（离线也拿得到）
-    # 再滤掉非视频作品：它们没有长文，留着会让模块规划出现「有集号没内容」的空洞。
+    # 再滤掉非视频作品：它们没有长文，留着会让归并出现「有集号没内容」的空洞。
     parts = [p for p in resolve_scope_parts(info, ws) if part_kind(p) == KIND_VIDEO]
     course_title = resolve_course_title(info, ws)
 
     print("=" * 65)
-    print(f"[*] 启动两趟语义聚合流水线（模块规划 → 笔记归并）")
+    print(f"[*] 启动笔记流水线（块清单 → 语义归并 → 笔记任务书）")
     print(f"[*] 课程标题: 《{course_title}》 (共 {len(parts)} 个分集)")
     print(f"[*] 任务工作区: {ws.root_dir}")
     print("=" * 65)
-
-    # 语料摘要：仅供第一趟规划提示词参考（长文开头优先，逐字稿次之）
-    summaries = {}
-    for p in parts:
-        p_num = int(p["page"])
-        art = KernelExtractor.find_article(ws, p_num)
-        if art is not None:
-            try:
-                summaries[p_num] = art.read_text(encoding="utf-8")[:400]
-            except Exception:
-                pass
-    for p in parts:
-        p_num = int(p["page"])
-        if p_num in summaries:
-            continue
-        clean_t = sanitize_filename(p["title"])
-        clean_f = ws.subtitles_dir / f"P{p_num:02d}_{clean_t}_clean.txt"
-        if clean_f.exists() and clean_f.stat().st_size > 50:
-            summaries[p_num] = clean_f.read_text(encoding="utf-8")[:300]
-
-    if not summaries:
-        print("=" * 65)
-        print("[!] 当前工作区尚无任何语料（articles/ 与 subtitles/ 均为空）。")
-        print("[*] 请先让 Agent 完成单集长文（articles/PXX_*_精读文章.md），再运行 cluster-notes。")
-        print("=" * 65)
-        sys.exit(2)
 
     # 过滤：--block-id / --start-block / --end-block 按**笔记序号**筛选（参数名保留兼容）
     _filter_active = bool(args.block_id or args.start_block or args.end_block)
@@ -795,9 +661,6 @@ def cmd_cluster_notes(args):
         parts,
         course_title=course_title,
         force=args.force,
-        force_plan=args.force_plan,
-        transcript_summaries=summaries,
-        use_kernel_index=getattr(args, "kernel_index", False),
         # 全量派发时才传 None：分批派发下「本轮没派到的任务书」仍是有效待办，
         # 传个恒真函数会让下游误以为本轮就是全部，从而把待办当废纸清掉。
         select=_selected if _filter_active else None,
@@ -805,30 +668,27 @@ def cmd_cluster_notes(args):
 
     # 加载转绝对、保存转相对（TaskWorkspace 原生支持）
     manifest = ws.load_manifest(absolute=True)
-    if outcome["block_status"] != "placeholder":
-        # 占位切分不入账：integrator 会拿 manifest 里的规划当兜底分组依据，
-        # 把占位块写进去等于让教材也按占位边界分章。
-        manifest["knowledge_blocks_plan"] = outcome["blocks"]
+    if outcome["note_status"] != "no-blocks":
         manifest["note_plan"] = outcome["notes"]
-        manifest["knowledge_blocks_results"] = outcome["results"]
+        manifest["note_results"] = outcome["results"]
     ws.save_manifest(manifest)
 
     print("\n" + "=" * 65)
-    _gen = sum(1 for r in outcome["results"] if r.get("status") == "generated")
-    _cached = len(outcome["results"]) - _gen
-    if outcome.get("note_status") == "deferred":
-        print(f"[✓] 本命令已正常结束（未派发笔记）：待 Agent 完成第一趟模块规划后重跑。")
+    if outcome["note_status"] == "no-blocks":
+        print(f"[✓] 本命令已正常结束（未派发笔记）：块清单缺失，界面已给出装箱命令。")
     else:
-        print(f"[✓] 两趟语义聚合执行完毕！{len(outcome['blocks'])} 个模块 → {len(outcome['notes'])} 篇笔记")
+        _gen = sum(1 for r in outcome["results"] if r.get("status") == "generated")
+        _cached = len(outcome["results"]) - _gen
+        print(f"[✓] 笔记流水线执行完毕！{len(outcome['blocks'])} 个块 → {len(outcome['notes'])} 篇笔记")
         print(f"[✓] 已导出 {_gen} 份笔记任务书（另有 {_cached} 篇成品已存在，跳过派发）")
     print(f"[✓] 任务书目录: {ws.notes_dir}")
     print("=" * 65)
 
 
 def cmd_cluster_articles(args):
-    """Consolidates single-episode articles in articles/ into modular chapter textbooks in textbooks/."""
+    """把各块的**模块长文**按块序整编成分册教材（textbooks/）。"""
+    from src.core.audio_merger import AudioMerger
     from src.generator.integrator import ArticleIntegrator
-    from src.generator.topic_planner import SemanticTopicPlanner
 
     info = resolve_target_info(
         args.url,
@@ -838,34 +698,27 @@ def cmd_cluster_articles(args):
     )
     bvid = info["bvid"]
     ws = TaskWorkspace.create(title=info["title"], bvid=bvid, custom_name=args.task, base_dir=args.base_dir, info_name=info.get("workspace_name"))
-
-    # 集号基准与标题都以工作区为准（在线解析只用于首次建工作区，离线也拿得到）
-    # 再滤掉非视频作品：它们没有长文，留着会让教材整编出现空壳章节。
-    parts = [p for p in resolve_scope_parts(info, ws) if part_kind(p) == KIND_VIDEO]
     course_title = resolve_course_title(info, ws)
 
     print("=" * 65)
-    print(f"[*] 启动单集精读教材整编模块全书流水线 (Modular Textbook Integration)")
-    print(f"[*] 课程标题: 《{course_title}》 (共 {len(parts)} 个分集)")
+    print(f"[*] 启动模块教材整编流水线 (Modular Textbook Integration)")
+    print(f"[*] 课程标题: 《{course_title}》")
     print(f"[*] 任务工作区: {ws.root_dir}")
     print(f"[*] 目标教材目录: {ws.root_dir / 'textbooks'}")
     print("=" * 65)
 
-    # 语料体积归一：**教材分册**的模块边界除语义外还受体积约束（超限模块就地按集切开），
-    # 否则一本教材会把上百 KB 的语料一次性灌给子智能体，产出质量断崖式下滑。
-    # 笔记侧不做这种切分——一篇笔记与 note_plan.json 的一条严格一一对应（见
-    # topic_planner.SIZE_CAP_BYTES 处的对拍依据）。
-    # 只读盘上规划、绝不改写它；真规划补齐后重跑即自动换边界。没有规划时保持原有回退分组。
-    raw_blocks = SemanticTopicPlanner.load_cached_plan(ws)
-    blocks, cap_diag = (
-        SemanticTopicPlanner.enforce_size_cap(raw_blocks, ws) if raw_blocks else ([], [])
-    )
-    for line in cap_diag:
-        print(f"[i] {line}")
+    # 模块边界 = 块边界（`audio/_blocks/blocks.json`）：音频按 40–60 分钟装箱，一块一篇模块长文。
+    # 没有块清单就没有模块可整编——提示先装箱，而不是退回按标题前缀硬分组（那正是被废除的老路）。
+    blocks = (AudioMerger.load_manifest(ws) or {}).get("blocks") or []
+    if not blocks:
+        print(f"[!] 本工作区没有块清单，无法整编教材：模块边界来自音频装箱。")
+        print(f"[*] 请先跑：python src/cli.py merge-audio \"{Path(ws.root_dir).as_posix()}\"")
+        print("=" * 65)
+        sys.exit(2)
 
     integrator = ArticleIntegrator(ws.root_dir)
     force = bool(getattr(args, "force", False))
-    results = integrator.run(course_title=course_title, force=force, parts=parts, plan=blocks or None)
+    results = integrator.run(course_title=course_title, force=force, blocks=blocks)
 
     # Update manifest（textbooks 属列表型路径字段，save_manifest 会自动反向相对化）
     manifest = ws.load_manifest(absolute=True)
@@ -873,17 +726,17 @@ def cmd_cluster_articles(args):
     ws.save_manifest(manifest)
 
     print("\n" + "=" * 65)
-    print(f"[✓] 模块教材已就绪，共 {len(results)} 部模块精读全书"
+    print(f"[✓] 模块教材已就绪，共 {len(results)} 册（一块一册，源为模块长文）"
           f"（{'已按最新章节强制重编' if force else '已有教材默认复用，需重编请加 --force'}）:")
     for r in results:
         size_kb = round(r.stat().st_size / 1024, 1)
         print(f"    - [{size_kb} KB] {r.name}")
-    print(f"[✓] 单集微粒度文章保持完整: {ws.articles_dir} (未做任何删除)")
+    print(f"[✓] 模块长文保持完整: {ws.articles_dir} (未做任何删除)")
     print("=" * 65)
 
 
 def cmd_dedup(args):
-    """Scans and synchronizes duplicate audio assets to save 100% of redundant LLM token costs."""
+    """Scans duplicate audio and reuses the per-episode transcripts already cut from them."""
     info = resolve_target_info(
         args.url,
         sessdata=args.sessdata,
@@ -902,7 +755,7 @@ def cmd_dedup(args):
     if synced:
         print(f"\n[✓] 发现并同步了 {len(synced)} 组重复音频资产 (0 Token 消耗):")
         for item in synced:
-            print(f"    - P{item['src_page']:02d} ──► P{item['dst_page']:02d} [Hash: {item['hash']}] (字幕: {item['synced_sub']}, 文章: {item['synced_art']})")
+            print(f"    - P{item['src_page']:02d} ──► P{item['dst_page']:02d} [Hash: {item['hash']}] (分集逐字稿: {item['synced_transcript']})")
     else:
         print("\n[✓] 未发现需要同步的重复分集（所有音频独一无二或已全部同步就绪）。")
     print("=" * 65)
@@ -952,7 +805,6 @@ def cmd_cleanup(args):
     verb = "可回收" if dry_run else "已回收"
     print(f"[✓] {verb}任务书 {total_deleted} 份 | 保留范本 {total_kept} 份 | "
           f"成品未产出仍保留 {total_skipped} 份 | 删除失败 {total_failed_delete} 份")
-    print("[i] topic_plan_TASK.md 属课程级规划任务书，唯一存在，永不回收。")
     if dry_run:
         print("[i] 当前为预演模式；去掉 --dry-run 即真正删除。")
     print("=" * 65)
@@ -974,16 +826,20 @@ def cmd_sync(args):
     dry_run = bool(getattr(args, "dry_run", False))
     print("=" * 65)
     print(f"[*] 任务账本对账（{'预演，不写盘' if dry_run else '写入 manifest.json'}）")
-    print("[*] 判定依据：articles/ 合格长文（≥1000 字节）+ notes/ + textbooks/ + topic_plan.json")
+    print("[*] 判定依据：块清单 + articles/ 合格模块长文（≥1000 字节）+ notes/ + textbooks/")
     print("=" * 65)
 
     for ws in workspaces:
         report = reconcile_workspace_manifest(ws, dry_run=dry_run)
         print(f"\n▶ {report['workspace']}")
-        print(f"    分集：{report['success']}/{report['total']} 集达标 | 待办 {report['pending']} | "
-              f"跳过 {report['skipped']} | 历史失败 {report['failed']}")
-        print(f"    模块资产：模块笔记 {report['notes']} 份 | 教材 {report['textbooks']} 部 | "
-              f"规划 {report['plan_blocks']} 块")
+        if report["stage1_unit"] == "module":
+            print(f"    阶段一（按块）：{report['blocks_done']}/{report['blocks_total']} 块已有模块长文")
+            print(f"    分集覆盖：{report['success']}/{report['total']} 集被模块长文覆盖 | "
+                  f"待办 {report['pending']} | 跳过 {report['skipped']} | 历史失败 {report['failed']}")
+        else:
+            print("    老格式工作区（无块清单）：新链路按块对账，"
+                  "请先 `cli.py merge-audio <工作区>` 重装块后再对账")
+        print(f"    模块资产：模块笔记 {report['notes']} 份 | 教材 {report['textbooks']} 部")
         print(f"    pipeline_completed = {report['pipeline_completed']}")
 
     print("\n" + "=" * 65)
@@ -1184,8 +1040,8 @@ def cmd_info(args):
     print("1. 物理层跑批: python src/cli.py pipeline \"<链接>\" --all --article-type learning")
     print("   - 长文提示词风格由用户确认：learning=学习（推荐）/ legacy=旧版；不确认即终止任务")
     print("2. 语料与任务书自动生成于 output/<任务名>/")
-    print("   - articles/PXX_*_TASK.md: 单集精读文章提示词")
-    print("   - notes/笔记XX_*_TASK.md: 知识块聚合复习笔记提示词")
+    print("   - articles/模块XX_*_TASK.md: 模块长文提示词（一个块一篇，读块级逐字稿撰写）")
+    print("   - notes/笔记XX_*_TASK.md: 块归并后的复习笔记提示词")
     print("3. 宿主 Agent 主程序以 5 个并发通道（Task子代理或并行生成）读取任务书，直接撰写落盘！")
     print("=" * 65)
     print("【可复制的断点续跑命令示例】：")
@@ -1223,22 +1079,6 @@ def main():
     p_audio.add_argument("--url-only", action="store_true", help="Only print stream URL without downloading")
     p_audio.add_argument("--output", default=None, help="Optional explicit output directory override")
     p_audio.add_argument("--json", action="store_true", help="Output in JSON format")
-
-    # transcribe
-    p_tr = subparsers.add_parser("transcribe", help="Export one episode's ARTICLE_TASK (requires the episode transcript)")
-    p_tr.add_argument("target", help="Bilibili URL/BVID, local audio file, or local video file")
-    p_tr.add_argument("--page", type=int, default=None, help="Page index for Bilibili video or local course (auto-detects ?p=X from URL if omitted)")
-    p_tr.add_argument("--task", default=None, help="Custom task workspace folder name")
-    p_tr.add_argument("--base-dir", default=None, help=BASE_DIR_HELP)
-    p_tr.add_argument("--output", default=None, help="Optional custom output path (only used when the article already exists)")
-    p_tr.add_argument("--sessdata", help="Optional SESSDATA cookie", default=None)
-    p_tr.add_argument("--douyin-cookie", dest="douyin_cookie", default=None, help=DOUYIN_COOKIE_HELP)
-    p_tr.add_argument(
-        "--article-type", default=None, dest="article_type",
-        help="长文提示词风格（用户确认）：learning=学习（推荐，当前版）/ legacy=旧版（原稳定版）；"
-             "未指定时打印风格菜单并请用户确认，确认不了即终止任务。"
-             "另有 consulting/interview/review/livestream 四种形态已登记但提示词未提供，命中即终止。",
-    )
 
     # pipeline
     p_pipe = subparsers.add_parser("pipeline", help="Execute complete automated pipeline (Audio -> ASR -> Notes & Articles)")
@@ -1305,7 +1145,7 @@ def main():
     subparsers.add_parser("logout", help="Remove persisted credentials (SESSDATA + Douyin cookie)")
 
     # cluster-notes
-    p_cl = subparsers.add_parser("cluster-notes", help="Two-pass semantic aggregation: plan modules, merge them into notes, dispatch note task-files")
+    p_cl = subparsers.add_parser("cluster-notes", help="Merge audio blocks into notes (note_plan.json dispatch) and export note task-files")
     p_cl.add_argument("url", help="Bilibili URL or BV ID")
     p_cl.add_argument("--block-id", type=int, default=None, help="Only process this note number (second-pass note id; legacy flag name)")
     p_cl.add_argument("--start-block", type=int, default=None, help="Start note number")
@@ -1313,17 +1153,10 @@ def main():
     p_cl.add_argument("--task", default=None, help="Custom task workspace folder name")
     p_cl.add_argument("--base-dir", default=None, help=BASE_DIR_HELP)
     p_cl.add_argument("--force", action="store_true", help="Force re-exporting note task-files even if they exist")
-    p_cl.add_argument("--force-plan", action="store_true", help="Force re-generating both semantic plans (topic_plan.json / note_plan.json)")
-    p_cl.add_argument(
-        "--kernel-index",
-        action="store_true",
-        default=False,
-        help="Optional: also inject existing knowledge-kernel JSON as a locating index (long articles stay the source of truth)",
-    )
     p_cl.add_argument("--sessdata", help="Optional SESSDATA cookie", default=None)
 
     # cluster-articles
-    p_ca = subparsers.add_parser("cluster-articles", help="Consolidate single-episode articles into modular textbooks in textbooks/")
+    p_ca = subparsers.add_parser("cluster-articles", help="Compile each block's module article into a textbook volume in textbooks/")
     p_ca.add_argument("url", help="Bilibili URL or BV ID")
     p_ca.add_argument("--task", default=None, help="Custom task workspace folder name")
     p_ca.add_argument("--base-dir", default=None, help=BASE_DIR_HELP)
@@ -1396,7 +1229,6 @@ def main():
     dispatch = {
         "parse": cmd_parse,
         "audio": cmd_audio,
-        "transcribe": cmd_transcribe,
         "pipeline": cmd_pipeline,
         "merge-audio": cmd_merge_audio,
         "split-transcript": cmd_split_transcript,
