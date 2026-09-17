@@ -88,10 +88,12 @@ class IngestionCoordinator:
         from src.core.parser import BilibiliParser
 
         bvid = BilibiliParser.extract_bvid(target) or ""
+        season_ref = BilibiliParser.extract_season_ref(target) or {}
+        season_id = season_ref.get("season_id")
         out_base = _paths.resolve_base_dir(base_dir)
 
-        if bvid or custom_task:
-            cands = _offline_candidate_dirs(out_base, bvid, custom_task)
+        if bvid or custom_task or season_id:
+            cands = _offline_candidate_dirs(out_base, bvid, custom_task, season_id=season_id)
             for cd in cands:
                 parts_file = cd / "parts.json"
                 cached_parts = []
@@ -120,7 +122,7 @@ class IngestionCoordinator:
                         "video_type": "multi_page" if len(cached_parts) > 1 else "single",
                         "title": _workspace_title(cd, m_data),
                         "workspace_name": cd.name,
-                        "bvid": bvid or cd.name,
+                        "bvid": bvid or cached_parts[0].get("bvid") or cd.name,
                         "owner": "",
                         "owner_mid": 0,
                         "desc": "",

@@ -227,7 +227,10 @@ def _persist_parts_cache(ws, entries) -> None:
     try:
         clean = [
             {k: v for k, v in e.items()
-             if not k.startswith("_") and k in ("page", "title", "cid", "duration", "media_kind")}
+             if not k.startswith("_") and k in (
+                 "page", "title", "cid", "duration", "media_kind",
+                 "bvid", "aid", "season_id", "section_title", "episode_index", "url",
+             )}
             for e in (entries or [])
             if isinstance(e, dict) and e.get("page") is not None
         ]
@@ -273,6 +276,39 @@ def cmd_audio(args):
                   f"P{_non_video[0]['page']:02d} 等")
             selected_parts = [p for p in selected_parts if part_kind(p) == KIND_VIDEO]
             total_parts = len(selected_parts)
+
+        if args.url_only:
+            source_type = info.get("source_type") or ("local" if info.get("is_local") else "bilibili")
+            rows = []
+            for p in selected_parts:
+                if source_type == "bilibili":
+                    stream_info = get_audio_stream(
+                        p.get("bvid") or bvid,
+                        p["cid"],
+                        sessdata=args.sessdata,
+                        prefer_quality=getattr(args, "quality", "low"),
+                    )
+                    rows.append({
+                        "page": p["page"],
+                        "bvid": p.get("bvid") or bvid,
+                        "cid": p["cid"],
+                        "title": p["title"],
+                        "url": stream_info.get("best_stream_url"),
+                        "quality": stream_info.get("quality_desc"),
+                    })
+                else:
+                    rows.append({
+                        "page": p["page"],
+                        "title": p["title"],
+                        "path": p.get("filepath") or info.get("source_path"),
+                    })
+            if args.json:
+                print(json.dumps(rows, ensure_ascii=False, indent=2))
+            else:
+                for row in rows:
+                    print(row.get("url") or row.get("path") or "")
+            return
+
         print("=" * 65)
         print(f"[*] 批量提取与无损转换任务启动 (共 {total_parts} 个分集，并发 {prefetch_workers} 线程)")
         print(f"[*] 目标音轨存储目录: {target_audio_dir}")
@@ -377,6 +413,41 @@ def cmd_audio(args):
 
     source_type = info.get("source_type") or ("local" if info.get("is_local") else "bilibili")
     matched_part = matched if info.get("has_multi_pages") else (info.get("parts") or [{}])[0]
+    target_bvid = (
+        matched.get("bvid")
+        if info.get("has_multi_pages") and isinstance(matched, dict)
+        else bvid
+    ) or bvid
+
+    if args.url_only:
+        if source_type == "bilibili":
+            stream_info = get_audio_stream(
+                target_bvid,
+                target_cid,
+                sessdata=args.sessdata,
+                prefer_quality=getattr(args, "quality", "low"),
+            )
+            if args.json:
+                print(json.dumps({
+                    "bvid": target_bvid,
+                    "cid": target_cid,
+                    "title": target_title,
+                    "url": stream_info.get("best_stream_url"),
+                    "quality": stream_info.get("quality_desc"),
+                }, ensure_ascii=False, indent=2))
+            else:
+                print(stream_info.get("best_stream_url") or "")
+        else:
+            source_path = matched_part.get("filepath") or info.get("source_path") or ""
+            if args.json:
+                print(json.dumps({
+                    "title": target_title,
+                    "path": source_path,
+                }, ensure_ascii=False, indent=2))
+            else:
+                print(source_path)
+        return
+
     print(f"[*] 正在提取单集音频 ({source_type})...")
     from src.core.ingestion import get_coordinator
     coordinator = get_coordinator()
@@ -410,7 +481,7 @@ def cmd_audio(args):
 
     if args.json:
         result = {
-            "bvid": bvid,
+            "bvid": target_bvid,
             "cid": target_cid,
             "title": target_title,
             "quality": stream_info["quality_desc"],
@@ -483,7 +554,7 @@ def cmd_transcribe(args):
             print(f"[*] 音频未缓存，正在下载 P{target_part:02d} 音频...")
             # 中文注释：统一走 412 富化入口
             stream_info = get_audio_stream(
-                bvid,
+                target_bvid,
                 target_cid,
                 sessdata=args.sessdata,
                 prefer_quality=getattr(args, "quality", "low"),

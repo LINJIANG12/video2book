@@ -4,7 +4,7 @@ description: 把 B 站、YouTube、抖音长视频/系列网课或本地音视�
 license: MIT
 metadata:
   author: LINJIANG12
-  version: 2.5.1
+  version: 2.6.0
   category: learning-and-education
   compatibility: Python 3.10+；系统 ffmpeg 在 PATH；宿主需具备 read_audio 或 read_media 听音通道之一。
 ---
@@ -700,8 +700,10 @@ python src/cli.py logout
 > **处理范围**：流水线处理的是**当前稿件被选中的那批分 P**（即 `parts.json` 的内容）——`--range 9-87` 得到的就是 9..87 共 79 集，集号保持原样、不重排。
 > `cluster-notes` / `cluster-articles` 的集号基准**一律取工作区 `parts.json`**，不用在线解析出来的课程全集
 > （在线解析只用于首次建工作区）；课程标题同理，取 manifest → 工作区目录名，**离线也能跑**。
-> 若课程是「UGC 合集里每集独立 BV」，`parse` 会列出全季清单，但 `pipeline` / `cluster-*` **不会**跨稿件遍历，
-> 需要逐集指定 BV 号分别处理。
+> **B 站独立 BV 合集已原生支持**：`space.bilibili.com/<mid>/lists/<season_id>?type=season`、
+> `www.bilibili.com/list/<mid>?sid=<season_id>`、合集内任意单集视频链接，以及显式
+> `season:<id>` 都会归一到同一工作区；合集 episodes 会成为 P01..PN，下载时逐集使用自己的
+> `bvid + cid`。因此 `pipeline --all` / `cluster-*` 可以跨越独立 BV 完整处理整门课。
 
 > **工作区名的推导与找回**：工作区名是「清洗后的课程标题 + `_<BV号>`」，标题过长时**先给 BV 号留位再截标题**，
 > 因此新工作区的名字里总是带着完整 BV 号，命令能稳定找回它。更早建立的工作区可能把 BV 号一起截掉了

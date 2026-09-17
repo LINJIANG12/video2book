@@ -18,6 +18,11 @@
 # 处理整门 B 站网课合集（--article-type 必填，不传即 exit 4）
 video2book pipeline "https://www.bilibili.com/video/BV14VqVBrEhc" --all --article-type learning
 
+# 处理「每个分集都是独立 BV」的 B 站旧版合集（任一入口都可，自动展开整季）
+video2book pipeline "https://space.bilibili.com/87476569/lists/695667?type=season" --all --article-type learning
+video2book pipeline "https://www.bilibili.com/list/87476569?sid=695667&type=season" --all --article-type learning
+video2book pipeline "https://www.bilibili.com/video/BV1RV4y1T7jf" --all --article-type learning
+
 # 处理本地整套视频课程目录
 video2book pipeline "D:\courses\software_engineering\" --all --article-type learning
 

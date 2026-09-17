@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import shutil
+import urllib.parse
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -25,7 +26,14 @@ class BilibiliProvider(BaseMediaProvider):
         low = target.lower().strip()
         if "youtube.com" in low or "youtu.be" in low or "douyin.com" in low:
             return False
-        return bool(BilibiliParser.extract_bvid(target))
+        if BilibiliParser.extract_bvid(target):
+            return True
+        if not BilibiliParser.extract_season_ref(target):
+            return False
+        if low.startswith("season:"):
+            return True
+        host = (urllib.parse.urlparse(low).hostname or "").lower()
+        return host == "bilibili.com" or host.endswith(".bilibili.com") or host == "b23.tv"
 
     def probe(self, target: str, **kwargs: Any) -> Dict[str, Any]:
         sessdata = kwargs.get("sessdata") or resolve_sessdata()
@@ -43,7 +51,9 @@ class BilibiliProvider(BaseMediaProvider):
         progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
         **kwargs: Any,
     ) -> Path:
-        bvid = kwargs.get("bvid") or episode.get("bvid")
+        # 合集课程里每一集有自己的 BV 号；顶层 info["bvid"] 只是稳定入口键，
+        # 不能覆盖 episode 自身的 BV 号，否则 P02 以后会全部下载成第一集。
+        bvid = episode.get("bvid") or kwargs.get("bvid")
         cid = episode.get("cid")
         if not bvid or not cid:
             raise IngestionError(f"B站分集缺少 bvid 或 cid: {episode.get('title')}")

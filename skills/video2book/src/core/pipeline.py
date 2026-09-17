@@ -423,13 +423,20 @@ def export_block_transcribe_task(
     return task_file
 
 
-def _offline_candidate_dirs(out_base: Path, bvid: str, custom_task: Optional[str] = None) -> List[Path]:
+def _offline_candidate_dirs(
+    out_base: Path,
+    bvid: str,
+    custom_task: Optional[str] = None,
+    season_id: Optional[Any] = None,
+) -> List[Path]:
     """接口受阻时按 BV 号找回本地工作区目录（离线自愈的定位入口）。
 
-    两级定位，越靠前越可信：
+    三级定位，越靠前越可信：
 
     1. `--task` 显式指定的目录；
-    2. 目录名含完整 BV 号 / BV 号前缀——工作区名可能被 80 字符上限截断（如 `…_BV1P7b5z`）。
+    2. 目录名含完整 BV 号 / BV 号前缀——工作区名可能被 80 字符上限截断（如 `…_BV1P7b5z`）；
+    3. `parts.json` 中任一集的 BV 号或 ``season_id`` 命中——独立 BV 合集的工作区名只带
+       首集 BV，传合集内其它单集链接时必须靠拓扑缓存反查。
 
     只保留**确实有料**的目录（有 `parts.json` 或 `articles/` 下有长文）。
     """
@@ -446,6 +453,29 @@ def _offline_candidate_dirs(out_base: Path, bvid: str, custom_task: Optional[str
         if not found and len(bvid) > 6:
             found = [p for p in out_base.glob(f"*{bvid[:6]}*") if fsutil.is_dir(p) and _has_content(p)]
         cands.extend(found)
+        if bvid or season_id:
+            known = {str(p.resolve()).lower() for p in cands}
+            for candidate in fsutil.iter_child_dirs(out_base):
+                if str(candidate.resolve()).lower() in known or not _has_content(candidate):
+                    continue
+                parts_file = candidate / "parts.json"
+                if not parts_file.exists():
+                    continue
+                try:
+                    cached = json.loads(parts_file.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if not isinstance(cached, list):
+                    continue
+                for item in cached:
+                    if not isinstance(item, dict):
+                        continue
+                    item_bvid = str(item.get("bvid") or "")
+                    item_season = str(item.get("season_id") or "")
+                    if ((bvid and item_bvid.lower() == bvid.lower())
+                            or (season_id and item_season == str(season_id))):
+                        cands.append(candidate)
+                        break
     # 目录名里连 BV 号（或其前缀）都没有的工作区**无法**由 BV 号唯一确定：实测同一输出根下
     # 确有两个名字都不含 BV 号的 80 字符截断目录（NLP 课与另一门），任何按名字的猜法都会在
     # 它们之间摇摆。这类工作区请显式用 `--task "<工作区目录名>"` 指定——那条路是确定的。

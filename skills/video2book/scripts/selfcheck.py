@@ -2565,6 +2565,151 @@ def check_fsutil_contract():
                 "iter_child_dirs 必须跳过符号链接（否则同一工作区会被枚举两次）"
 
 
+def check_bilibili_independent_bv_collection_contract():
+    """B 站旧版合集：多种入口统一成一门课，且跨 BV 下载使用各自 BV/CID。
+
+    真实验收场景：``space.bilibili.com/<mid>/lists/<sid>?type=season`` 中的每个条目
+    都是独立 BV。旧的 details 接口虽然返回 ``ugc_season``，但 pipeline 只看当前稿件
+    的 pages；这次必须把合集 episodes 提升为 P01..PN，并保证 P02 以后不会误用 P01 的
+    BV 号取音。
+    """
+    import tempfile
+
+    from src.core.fetcher import AudioFetcher
+    from src.core.ingestion.bilibili import BilibiliProvider
+    from src.core.parser import BilibiliParser
+
+    samples = {
+        "https://space.bilibili.com/87476569/lists/695667?type=season":
+            {"mid": 87476569, "season_id": 695667},
+        "https://www.bilibili.com/list/87476569?sid=695667&type=season":
+            {"mid": 87476569, "season_id": 695667},
+        "https://www.bilibili.com/list/87476569?sid=695667&bvid=BV1RV4y1T7jf&oid=858000462&type=season":
+            {"mid": 87476569, "season_id": 695667},
+        "https://www.bilibili.com/medialist/play/87476569?business=space_collection&business_id=695667":
+            {"mid": 87476569, "season_id": 695667},
+        "season:695667":
+            {"mid": None, "season_id": 695667},
+    }
+    for url, expected in samples.items():
+        got = BilibiliParser.extract_season_ref(url)
+        assert got == expected, f"合集入口识别失败: {url} -> {got}"
+        assert BilibiliProvider().match(url), f"BilibiliProvider 未接受合集入口: {url}"
+    assert not BilibiliProvider().match("https://example.com/list/1?sid=2"), \
+        "非 B 站域名不应因通用 sid 参数被误识别"
+
+    def episode(section: str, idx: int, bvid: str, aid: int, cid: int, title: str, duration: int):
+        return {
+            "season_id": 695667,
+            "section_id": 1,
+            "episode_index": idx,
+            "aid": aid,
+            "cid": cid,
+            "bvid": bvid,
+            "title": title,
+            "duration": duration,
+            "page": {"cid": cid, "page": 1, "part": title, "duration": duration},
+            "pages": [{"cid": cid, "page": 1, "part": title, "duration": duration}],
+            "arc": {"duration": duration},
+            "_section": section,
+        }
+
+    raw = {
+        "title": "P02 临时单集标题",
+        "owner": {"name": "测试UP", "mid": 87476569},
+        "desc": "",
+        "duration": 30,
+        "pic": "cover",
+        "cid": 2002,
+        "aid": 1002,
+        "pages": [{"page": 1, "part": "P02 临时单集标题", "cid": 2002, "duration": 30}],
+        "ugc_season": {
+            "id": 695667,
+            "title": "测试独立BV合集",
+            "cover": "cover",
+            "intro": "测试简介",
+            "ep_count": 3,
+            "sections": [{
+                "title": "第一章",
+                "episodes": [
+                    episode("第一章", 1, "BV1Le4y1o7v5", 1001, 2001, "第1集", 10),
+                    episode("第一章", 2, "BV1Ge411u7d5", 1002, 2002, "第2集", 20),
+                    episode("第一章", 3, "BV1RV4y1T7jf", 1003, 2003, "第3集", 30),
+                ],
+            }],
+        },
+    }
+
+    original_fetch = BilibiliParser.fetch_video_view.__func__
+    original_resolve_seed = BilibiliParser.resolve_season_seed_bvid.__func__
+
+    def fake_fetch(cls, bvid, sessdata=None, wbi_keys_file=None, workspace=None):
+        return raw
+
+    def fake_resolve_seed(cls, season_ref, sessdata=None):
+        return "BV1Le4y1o7v5"
+
+    try:
+        BilibiliParser.fetch_video_view = classmethod(fake_fetch)
+        BilibiliParser.resolve_season_seed_bvid = classmethod(fake_resolve_seed)
+        info_from_list = BilibiliParser.parse_video(
+            "https://www.bilibili.com/list/87476569?sid=695667&bvid=BV1Ge411u7d5&type=season"
+        )
+        info_from_space = BilibiliParser.parse_video(
+            "https://space.bilibili.com/87476569/lists/695667?type=season"
+        )
+    finally:
+        BilibiliParser.fetch_video_view = classmethod(original_fetch)
+        BilibiliParser.resolve_season_seed_bvid = classmethod(original_resolve_seed)
+
+    for info in (info_from_list, info_from_space):
+        assert info["bvid"] == "BV1Le4y1o7v5", "合集工作区必须以首集 BV 作为稳定入口键"
+        assert info["title"] == "测试独立BV合集", f"未提升为课程标题: {info['title']}"
+        assert info["has_multi_pages"] is True and len(info["parts"]) == 3
+        assert info["duration"] == 60, f"合集总时长未求和: {info['duration']}"
+        assert [p["page"] for p in info["parts"]] == [1, 2, 3]
+        assert [p["bvid"] for p in info["parts"]] == [
+            "BV1Le4y1o7v5", "BV1Ge411u7d5", "BV1RV4y1T7jf",
+        ]
+        assert [p["cid"] for p in info["parts"]] == [2001, 2002, 2003]
+
+    assert info_from_list["url_page"] == 2, "合集内单集链接应定位到对应 P 序号"
+    assert info_from_list["selected_cid"] == 2002
+    assert info_from_space["url_page"] is None, "合集首页链接不应被误判为选中某一集"
+
+    seen = {}
+    original_stream = AudioFetcher.get_audio_stream_info.__func__
+    original_download = AudioFetcher.download_audio.__func__
+
+    def fake_stream(cls, bvid, cid, sessdata=None, prefer_quality="low", wbi_keys_file=None):
+        seen["bvid"] = bvid
+        seen["cid"] = cid
+        return {"best_stream_url": "https://example.invalid/audio.m4s"}
+
+    def fake_download(cls, stream_url, output_filepath, repackage_m4a=True, max_bytes=None, sessdata=None):
+        seen["downloaded"] = True
+        return str(output_filepath)
+
+    try:
+        AudioFetcher.get_audio_stream_info = classmethod(fake_stream)
+        AudioFetcher.download_audio = classmethod(fake_download)
+        with tempfile.TemporaryDirectory() as tmp:
+            BilibiliProvider().fetch_audio(
+                {"bvid": "BV1Ge411u7d5", "cid": 2002, "title": "第2集"},
+                Path(tmp) / "P02.m4a",
+                bvid="BV1Le4y1o7v5",
+            )
+    finally:
+        AudioFetcher.get_audio_stream_info = classmethod(original_stream)
+        AudioFetcher.download_audio = classmethod(original_download)
+
+    assert seen == {
+        "bvid": "BV1Ge411u7d5",
+        "cid": 2002,
+        "downloaded": True,
+    }, f"跨 BV 下载路由错误: {seen}"
+
+
 def main():
     print("=" * 62)
     print("video2book 技能自检（技能自包含 + 多宿主声明 + 三域分离）")
@@ -2612,6 +2757,7 @@ def main():
     check("源码无硬编码本机路径", check_no_hardcoded_machine_paths)
     check("Python 3.10+ 语法兼容", check_python_syntax_compat)
     check("文件系统健壮性契约（坏链接只跳过不崩）", check_fsutil_contract)
+    check("B站独立BV合集（多入口归一/跨BV取音）", check_bilibili_independent_bv_collection_contract)
     check("文档层无未证实平台痕迹（不留待确认记录）", check_no_unverified_platform_traces)
     check("阶段一派发纪律已写入文档", check_dispatch_discipline_documented)
     check("派发载荷与台账契约", check_dispatch_payload_shape)

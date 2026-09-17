@@ -206,6 +206,11 @@ flowchart TD
 # B 站合集
 python src/cli.py pipeline "https://www.bilibili.com/video/BV14VqVBrEhc" --all --article-type learning
 
+# B 站“每个分集都是独立 BV”的旧版合集：任一入口都会自动展开整季
+python src/cli.py pipeline "https://space.bilibili.com/87476569/lists/695667?type=season" --all --article-type learning
+python src/cli.py pipeline "https://www.bilibili.com/list/87476569?sid=695667&type=season" --all --article-type learning
+python src/cli.py pipeline "https://www.bilibili.com/video/BV1RV4y1T7jf" --all --article-type learning
+
 # 本地课程目录
 python src/cli.py pipeline "D:\courses\software_engineering\" --all --article-type learning
 

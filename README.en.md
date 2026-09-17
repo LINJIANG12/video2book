@@ -206,6 +206,11 @@ flowchart TD
 # Bilibili collection
 python src/cli.py pipeline "https://www.bilibili.com/video/BV14VqVBrEhc" --all --article-type learning
 
+# Legacy Bilibili collections where every episode is its own BV (any entry auto-expands the season)
+python src/cli.py pipeline "https://space.bilibili.com/87476569/lists/695667?type=season" --all --article-type learning
+python src/cli.py pipeline "https://www.bilibili.com/list/87476569?sid=695667&type=season" --all --article-type learning
+python src/cli.py pipeline "https://www.bilibili.com/video/BV1RV4y1T7jf" --all --article-type learning
+
 # Local course directory
 python src/cli.py pipeline "D:\courses\software_engineering\" --all --article-type learning
 
