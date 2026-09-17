@@ -34,7 +34,7 @@
 
 </div>
 
-Give it a course URL or a directory, and it packs the audio into blocks, transcribes each block, splits the transcript back per episode, writes one article per episode, then consolidates them into books and review notes.
+Give it a course URL or a directory, and it packs the audio into 40–60 minute blocks, transcribes each block, then writes **one module article per block** and compiles them into modular textbooks and review notes.
 
 > [!CAUTION]
 > This tool batch-fetches Bilibili video metadata and audio streams, and can store your login credential. Use it only on content you are entitled to access, and comply with Bilibili's terms of service and applicable law. `SESSDATA` grants access to your account: do not copy, upload or share it.
@@ -57,9 +57,9 @@ Give it a course URL or a directory, and it packs the audio into blocks, transcr
 
 ## Overview
 
-Video2Book is a skill for AI coding assistants that turns a course into a textbook. It accepts a Bilibili collection, a YouTube channel or playlist, a Douyin collection or a local course directory, writes one deep-dive article per episode, and consolidates those articles into a modular book and mindmap review notes.
+Video2Book is a skill for AI coding assistants that turns a course into a textbook. It accepts a Bilibili collection, a YouTube channel or playlist, a Douyin collection or a local course directory, writes **one deep-dive article per block** (a block covers consecutive episodes), and consolidates those articles into a modular book and mindmap review notes.
 
-The hard part of a long course is that you cannot finish listening to it, let alone remember it. This skill packs the audio into blocks along **episode boundaries** (an episode is never split across blocks), has a listening channel transcribe each block, then **mechanically splits** it back into one transcript per episode. Writer roles read the transcript and write the article — they never touch audio. The number of audio-reading calls therefore drops from "one per episode" to "one per block" (measured: 936 episodes of 9 courses → 381 blocks, a 2.46× reduction).
+The hard part of a long course is that you cannot finish listening to it, let alone remember it. This skill packs the audio into 40–60 minute blocks along episode boundaries (oversized episodes are split into upper/lower halves), has a listening channel transcribe each block, and writer roles read the block transcript to write **one module article per block** — they never touch audio. Per-episode splitting is an optional after-the-fact lookup, not part of the main chain. The number of audio-reading calls therefore drops from "one per episode" to "one per block" (measured: 936 episodes of 9 courses → 381 blocks, a 2.46× reduction).
 
 Output comes in three tracks, each in its own directory and usable on its own: per-episode articles, compiled modular textbooks, and cross-module review notes. Every deliverable passes a machine gate before delivery — filler prose, hollow headings and per-episode flat headings get caught by scripts rather than by you while reading.
 
@@ -173,9 +173,8 @@ flowchart TD
     C -->|No| E[Dispatch transcriber roles<br/>block by block]
     D --> F[Block transcription<br/>read_audio / read_media]
     E --> F
-    F --> S[Split back per episode<br/>subtitles/PXX_*_逐字稿.md]
-    S --> W[Writer roles read transcripts<br/>one article per episode]
-    W --> G[Per-episode articles<br/>articles/]
+    F --> W[Writer roles read block transcripts<br/>one article per block]
+    W --> G[Module articles<br/>articles/模块XX_*_精读长文.md]
     G --> H[Stage 2 two-pass aggregation<br/>module plan → note merge]
     H --> I[Modular textbooks textbooks/<br/>review notes notes/]
 
@@ -190,8 +189,8 @@ flowchart TD
     class G,I data
 ```
 
-- **Audio is read only by the transcriber roles, and block by block**: audio is packed into blocks along **episode boundaries** (`audio/_blocks/`, configurable target, 60 min by default; an episode is never split across blocks). A block is transcribed in one pass with line-leading timestamps, then the toolchain **mechanically splits** it back into per-episode transcripts. Writer roles read transcripts only and never touch audio.
-- **Dispatch thresholds live in `src/core/budget.py`**: under 60 minutes total the main agent handles work serially; over 60 minutes it must dispatch — two transcriber roles consuming the block queue, plus writer roles picking up blocks (one sub-agent per block, writing its episodes in order). The window fallback applies only to transcriber roles on Channel A: a block whose computed audio tokens exceed 60% of the context window must be read in continuation chunks.
+- **Audio is read only by the transcriber roles, and block by block**: audio is packed into 40–60 minute blocks along episode boundaries (`audio/_blocks/`, target configurable, 50 min by default; oversized episodes are split into upper/lower halves). Each block is titled by semantically combining its episodes' names and transcribed in one pass with line-leading timestamps; writer roles read the block transcript only and never touch audio.
+- **Dispatch thresholds live in `src/core/budget.py`**: under 60 minutes total the main agent handles work serially; over 60 minutes it must dispatch — two transcriber roles consuming the block queue, plus writer roles (one sub-agent per block, one module article per block). The window fallback applies only to transcriber roles on Channel A: a block whose computed audio tokens exceed 60% of the context window must be read in continuation chunks.
 - **Module level needs no plan, and note merging never stalls**: a block *is* the knowledge module (audio is packed into 40–60 minute blocks, each block titled by semantically combining its episodes' names), so textbooks simply compile block articles in block order; notes merge blocks into a number of notes (`note_plan.json`, one note may span several blocks). Unknown or duplicate block claims are rescued in place (first-come-wins, orphan blocks get fallback notes), the command always exits normally, and the on-disk `note_plan.json` is never overwritten by fallback results.
 - **Stage 1 and Stage 2 are decoupled by content boundaries**, so a long course can resume from a breakpoint.
 - **The tool layer only prepares task files, dispatch payloads and gates**; writing the articles and notes is done by the host agent (usually sub-agents). "Who wrote it" and "did it really listen" are discipline clauses the tool layer cannot verify.
@@ -235,9 +234,10 @@ python src/cli.py pipeline "https://www.bilibili.com/video/BV14VqVBrEhc" --range
 ### Inspect the dispatch queue and stage gate
 
 ```bash
-python scripts/queue_tracker.py --next 5 --log-dispatch --json   # dispatch payloads (task file / slices / target / budget)
+python scripts/queue_tracker.py --next-module 5 --log-dispatch --json  # writer payloads (block task file / transcript / target article)
+python scripts/queue_tracker.py --next-transcribe 2 --json             # transcriber payloads (block audio / timetable / transcript target)
 python scripts/queue_tracker.py --summary                        # one-line status incl. STAGE1_DONE
-python scripts/queue_tracker.py --pattern "keyword" --next 5     # pick a workspace when several coexist
+python scripts/queue_tracker.py --pattern "keyword" --next-module 5    # pick a workspace when several coexist
 ```
 
 ### Generate modular textbooks and review notes
@@ -323,7 +323,7 @@ skill/
 ├── skills/video2book/          # the skill itself; this is the only directory you install
 │   ├── SKILL.md                # skill contract, the single source of truth for the Agent
 │   ├── src/                    # toolchain
-│   │   ├── cli.py              # entry point: 12 subcommands
+│   │   ├── cli.py              # entry point: 13 subcommands
 │   │   ├── core/               # paths, audio budget, pipeline, fetching, deliverable lint
 │   │   │   └── ingestion/      # unified media engine (Bilibili / local / YouTube / Douyin)
 │   │   └── generator/          # task files, prompt templates and semantic aggregation
@@ -360,9 +360,10 @@ Three equivalent entry points with identical behaviour:
 |---|---|---|
 | `parse` | Parse video topology and list episodes | `python src/cli.py parse "<url>" --limit 10` |
 | `audio` | Download or extract the audio stream | `python src/cli.py audio "<url>" --all` |
-| `transcribe` | Export a per-episode article task file, no intermediate transcript | `python src/cli.py transcribe "<url>" --page 1 --article-type learning` |
 | `pipeline` | Run the complete pipeline | `python src/cli.py pipeline "<url>" --all --article-type learning` |
-| `cluster-articles` | Consolidate per-episode articles into modular textbooks | `python src/cli.py cluster-articles "<url>"` |
+| `merge-audio` | Re-run block packing alone (idempotent; also renames blocks after editing titles) | `python src/cli.py merge-audio "<workspace>"` |
+| `split-transcript` | Optional: split block transcripts back per episode | `python src/cli.py split-transcript "<workspace>" --block 1` |
+| `cluster-articles` | Compile module articles block by block into textbooks | `python src/cli.py cluster-articles "<url>"` |
 | `cluster-notes` | Two-pass semantic aggregation, export note task files | `python src/cli.py cluster-notes "<url>"` |
 | `dedup` | Synchronize duplicate audio assets to save tokens | `python src/cli.py dedup --dry-run` |
 | `cleanup` | Reclaim completed task files, keeping samples | `python src/cli.py cleanup --dry-run` |
@@ -375,7 +376,7 @@ Three equivalent entry points with identical behaviour:
 
 | Argument | Applies to | Description | Default |
 |---|---|---|---|
-| `--article-type` | `pipeline` / `transcribe` | Prompt style: `learning` (recommended) / `legacy` | missing ⇒ exit code 4 |
+| `--article-type` | `pipeline` | Prompt style: `learning` (recommended) / `legacy` | missing ⇒ exit code 4 |
 | `--all` / `--range X-Y` / `--page N` | `pipeline` / `audio` | Scope: all / a range / one episode | single episode |
 | `--force` | most commands | Force re-run, ignoring existing products | off |
 | `--base-dir` | all | Products root path | `BVB_OUTPUT_DIR`, or `<working_dir>/output` by default (`<container_root>/output` when working inside that container) |
@@ -388,7 +389,7 @@ Three equivalent entry points with identical behaviour:
 
 | Script | Description | Common arguments |
 |---|---|---|
-| `scripts/queue_tracker.py` | Pending episodes, stage gate, dispatch payload and ledger | `--next N` / `--summary` / `--pattern` / `--log-dispatch` / `--json` |
+| `scripts/queue_tracker.py` | Block progress, stage gate, dispatch payload and ledger | `--next-transcribe N` / `--next-module N` / `--summary` / `--pattern` / `--log-dispatch` / `--json` |
 | `scripts/note_quality_check.py` | Note quality check | `--strict`, `--require-structure`, `--max-truncated N` |
 | `scripts/render_compat_check.py` | Rendering compliance check | `--strict`, `--require-lang` |
 | `scripts/selfcheck.py` | The repository's single gate selfcheck | — |

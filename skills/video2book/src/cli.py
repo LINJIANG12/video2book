@@ -1094,7 +1094,7 @@ def main():
     p_pipe.add_argument("--skip-failed", action="store_true", default=False, help="Explicit opt-in: exempt failed episodes from transcription gate (recorded in manifest skip list)")
     p_pipe.add_argument(
         "--block-minutes", type=float, default=None,
-        help="块级转录的块时长目标（分钟）；缺省取环境变量 BVB_AUDIO_BLOCK_MINUTES，再缺省 60。"
+        help="块级转录的块时长目标（分钟）；缺省取环境变量 BVB_AUDIO_BLOCK_MINUTES，再缺省 50（落 40–60 带中段）。"
              "单块硬上限由 BVB_AUDIO_ONESHOT_LIMIT_MINUTES 控制（默认 75）",
     )
     p_pipe.add_argument("--sessdata", help="Optional SESSDATA cookie", default=None)
@@ -1113,7 +1113,7 @@ def main():
     p_merge.add_argument("workspace", help="Path to an existing course workspace (contains parts.json and audio/)")
     p_merge.add_argument(
         "--block-minutes", type=float, default=None,
-        help="块时长目标（分钟）；缺省取 BVB_AUDIO_BLOCK_MINUTES，再缺省 60",
+        help="块时长目标（分钟）；缺省取 BVB_AUDIO_BLOCK_MINUTES，再缺省 50（落 40–60 带中段）",
     )
     p_merge.add_argument("--force", action="store_true", help="Rebuild blocks even if the manifest signature matches")
 

@@ -154,6 +154,7 @@ def check_workspace(ws: TaskWorkspace, min_freq: int, min_coverage: float) -> Di
         "unverifiable": len(unverifiable),
         "no_article": len([e for e in entries if e["status"] == "no_article"]),
         "no_entities": len([e for e in entries if e["status"] == "no_entities"]),
+        "read_error": len([e for e in entries if e["status"] == "read_error"]),
         "avg_coverage": avg,
         "min_coverage": min_coverage,
         "min_freq": min_freq,
@@ -209,7 +210,8 @@ def main() -> int:
             print(f"\n▶ {report['workspace']}")
             avg = f"{report['avg_coverage']:.1%}" if report["avg_coverage"] is not None else "—"
             print(f"    可校验 {report['checked']}/{report['total']} 块（另 {report['unverifiable']} 块无逐字稿、"
-                  f"{report['no_article']} 块无模块长文、{report['no_entities']} 块逐字稿无重复技术实体）")
+                  f"{report['no_article']} 块无模块长文、{report['no_entities']} 块逐字稿无重复技术实体、"
+                  f"{report['read_error']} 块读取失败）")
             print(f"    达标 {report['ok']} | 低于下限 {report['low_coverage']} | 平均覆盖 {avg}")
             for entry in report["low_entries"][:12]:
                 print(f"    [✗] BLK{entry['block_id']:02d} {entry['span']} 覆盖 {entry['coverage']:.1%} "

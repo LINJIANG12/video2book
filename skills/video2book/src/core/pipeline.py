@@ -180,7 +180,7 @@ def export_block_article_task(
     )
     article_prompt = (
         resolved["prompt"]
-        .replace("{title}", course_title or clean_title)
+        .replace("{title}", course_title or stem)
         .replace("{part_title}", f"{stem}（{span}）")
         .replace("{content}", content_payload)
     )
@@ -544,7 +544,7 @@ class PipelineCoordinator:
 
         阶段一固定走**块级转录链路**：音频收齐后按集装箱成块、导出块级转录任务书，长文由
         写作角色读块级逐字稿撰写。块时长目标取 `block_minutes`，为 0 时用 `AudioMerger`
-        的默认值（环境变量 `BVB_AUDIO_BLOCK_MINUTES`，默认 60 分钟）。
+        的默认值（环境变量 `BVB_AUDIO_BLOCK_MINUTES`，默认 50 分钟，落 40–60 带中段）。
         """
         from concurrent.futures import ThreadPoolExecutor
 
@@ -764,6 +764,14 @@ class PipelineCoordinator:
         titles_by_page = {int(p["page"]): sanitize_filename(p["title"]) for p in effective_parts}
         from src.core.audio_merger import AudioMerger
 
+        # 装箱宇宙 = **工作区的全部分集**（parts.json ∩ 视频集），不是本次选中的那批：
+        # 块清单是模块边界的全局事实源，--range/--page 局部运行若以选中集重装箱，
+        # 会把范围外的块当成孤儿清场（块音频被删、范围外任务书被作废、已完成页翻回待办）。
+        _pack_pages = [
+            int(p["page"]) for p in (ws.load_parts() or [])
+            if isinstance(p, dict) and p.get("page") is not None and part_kind(p) == KIND_VIDEO
+        ] or [int(p["page"]) for p in effective_parts]
+
         print("=" * 65)
         print("[*] 阶段一点五：音频装箱合并（块级转录的前置步骤）")
         print("=" * 65)
@@ -771,7 +779,7 @@ class PipelineCoordinator:
         try:
             merged = AudioMerger.merge(
                 ws,
-                [int(p["page"]) for p in effective_parts],
+                _pack_pages,
                 target_minutes=(block_minutes or None),
             )
         except Exception as err:
@@ -830,7 +838,7 @@ class PipelineCoordinator:
         print("=" * 65)
 
         from src.core.transcript_splitter import TranscriptSplitter
-        from src.core.workspace import module_article_path
+        from src.core.workspace import find_module_article, module_article_path
 
         manifest_entries: List[Dict[str, Any]] = []
         page_titles = {
@@ -848,10 +856,8 @@ class PipelineCoordinator:
 
             existing_article = None
             if not force:
-                for candidate in sorted(ws.articles_dir.glob(f"模块{block_id:02d}_*.md")):
-                    if not candidate.name.endswith("_TASK.md") and candidate.stat().st_size >= 1000:
-                        existing_article = candidate
-                        break
+                # 与队列/对账/门禁同一套宽容定位（find_module_article），不再各写一套 glob
+                existing_article = find_module_article(ws.articles_dir, block)
             if existing_article is not None:
                 print(f"    [cached] 模块长文已存在，跳过派发: {existing_article.name}")
                 manifest_entries.append({
@@ -933,7 +939,9 @@ class PipelineCoordinator:
                 )
                 note_plan = outcome["notes"]
                 note_results = outcome["results"]
-                note_dispatched = bool(note_plan)
+                # planned/salvaged 才算「归并已成事」：unmerged 只是「一块一篇」的兜底粒度，
+                # 把它当终态会让 pipeline_completed 在归并规划还欠着时就被点亮。
+                note_dispatched = outcome["note_status"] in ("planned", "salvaged") and bool(note_plan)
                 if outcome["note_status"] == "unmerged":
                     print("[*] 阶段三后置：已导出归并任务书，待宿主 Agent 产出 note_plan.json 后重跑。")
                     print(f"[*] 任务书: {ws.root_dir / 'note_plan_TASK.md'}")

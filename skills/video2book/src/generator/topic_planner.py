@@ -252,9 +252,11 @@ class SemanticTopicPlanner:
             return False, "覆盖基准为空（parts.json 没有可用集号）"
 
         claimed: List[int] = []
+        note_ids: List[int] = []
         for n_idx, note in enumerate(note_plan, 1):
             if not isinstance(note, dict):
                 return False, f"笔记 {n_idx} 不是对象"
+            note_ids.append(int(note.get("note_id") or 0))
             raw = note.get("blocks")
             if not raw:
                 return False, f"笔记 {n_idx} 未认领任何块"
@@ -263,6 +265,10 @@ class SemanticTopicPlanner:
                     claimed.append(int(item))
                 except (TypeError, ValueError):
                     return False, f"笔记 {n_idx} 的块编号非法：{item!r}"
+
+        dup_ids = sorted({i for i in note_ids if note_ids.count(i) > 1})
+        if dup_ids:
+            return False, f"笔记编号重复（任务书与成品按编号命名，会互相覆盖）: {dup_ids}"
 
         unknown = sorted({b for b in claimed if b not in all_blocks})
         if unknown:
@@ -279,7 +285,11 @@ class SemanticTopicPlanner:
         covered: set = set()
         for note in note_plan:
             covered.update(cls.note_episodes(note, blocks))
-        gap = target - covered
+        # 覆盖基准收窄到「块实际覆盖的集号」：--skip-failed 豁免的失败集有集号无音频、
+        # 不进任何块，拿 parts 全集当基准会让按块口径完全合法的归并永远过不了校验
+        # （也就永远落不到 planned），与「补齐归并后重跑即自动替换」直接矛盾。
+        reachable = {int(e) for b in blocks for e in (b.get("episodes") or [])} & target
+        gap = reachable - covered
         if gap:
             return False, f"笔记规划未覆盖的集号: {cls.describe_pages(sorted(gap))}"
 

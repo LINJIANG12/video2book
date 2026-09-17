@@ -123,7 +123,9 @@ class BlockSynthesizer:
         block_id = block_meta.get("block_id", 1)
         raw_title = block_meta.get("block_title", "知识笔记")
         clean_title = "".join(c for c in raw_title if c.isalnum() or c in (" ", "-", "_")).strip()
-        return f"{NOTE_PREFIX}{block_id:02d}_{clean_title}_TASK.md"
+        from src.core.workspace import sanitize_filename
+
+        return f"{NOTE_PREFIX}{block_id:02d}_{sanitize_filename(clean_title, max_len=40)}_TASK.md"
 
     @classmethod
     def get_note_filename(cls, block_meta: Dict[str, Any]) -> str:
@@ -183,8 +185,17 @@ class BlockSynthesizer:
             "note_file": str(note_file),
         }
 
-        # 成品已存在：不再重复派发，并顺手回收残留任务书（保留编号最小的范本）
+        # 成品已存在：不再重复派发，并顺手回收残留任务书（保留编号最小的范本）。
+        # 归并态（盘上有 note_plan.json）下只认规范名命中：宽容前缀会把「同编号的旧粒度成品」
+        # （一块一篇时代的产物）误当成归并后的新笔记缓存，导致归并篇永远派不出去。
         cached_note = cls._find_existing_note(ws, block_meta)
+        merged_mode = (Path(ws.root_dir) / "note_plan.json").exists()
+        if (cached_note is not None
+                and cached_note.name != cls.get_note_filename(block_meta)
+                and merged_mode):
+            print(f"[i] 笔记 {block_meta['block_id']:02d} 已有同编号旧成品 {cached_note.name}，"
+                  f"但归并粒度已变：按新归并另派新篇（旧成品保留不动）")
+            cached_note = None
         if (
             cached_note is not None
             and cached_note.stat().st_size >= MIN_NOTE_BYTES

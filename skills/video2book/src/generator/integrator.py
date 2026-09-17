@@ -46,11 +46,13 @@ class ArticleIntegrator:
         course_title: str,
         force: bool = False,
         min_product_bytes: int = 200,
-    ) -> Path:
-        """把该块的模块长文整编成一册教材。
+    ) -> Optional[Path]:
+        """把该块的模块长文整编成一册教材；块缺模块长文时不落盘、返回 None（gate）。
 
         成品已存在且非 force 时直接复用（与 SKILL §7.2「模块教材自动复用」一致），
         需要按最新章节重编时显式传 force=True（CLI：`cluster-articles --force`）。
+        缺长文时不写⚠️占位册：占位文件体积远超成品门槛，下一次会被「成品已存在」缓存命中，
+        长文补齐后反而不重编——宁可这一册先缺席。
         """
         block_title = str(block.get("title") or "").strip() or f"块 {module_idx:02d}"
         clean_name = sanitize_filename(block_title)
@@ -64,14 +66,19 @@ class ArticleIntegrator:
         except OSError:
             pass
 
+        article = find_module_article(self.articles_dir, block)
+        if article is None:
+            print(f"    [gate] 块 {module_idx:02d} 尚无模块长文，跳过该册整编"
+                  f"（待 articles/模块{module_idx:02d}_*_精读长文.md 落盘后重跑本命令）")
+            return None
+
         pages = [int(p) for p in (block.get("episodes") or [])]
         page_range = f"P{min(pages):02d} ~ P{max(pages):02d}" if pages else "（无集号）"
         span = str(block.get("span") or page_range)
         minutes = float(block.get("duration_min") or 0.0)
 
-        article = find_module_article(self.articles_dir, block)
-
         # Header and TOC：目录只有一条（本册就一个块），序号由渲染器生成——正文标题一律不写序号，
+        # 写了会与阅读器的自动编号叠成「1. 第 1 章」这种双号。：目录只有一条（本册就一个块），序号由渲染器生成——正文标题一律不写序号，
         # 写了会与阅读器的自动编号叠成「1. 第 1 章」这种双号。
         lines = [
             f"# 模块 {module_idx:02d}：{block_title} 合辑教材",
@@ -95,10 +102,7 @@ class ArticleIntegrator:
         lines.append(f"> 对应块：BLK{module_idx:02d} | 覆盖分集：{span} | 块标题：《{block_title}》")
         lines.append("")
 
-        if article is None:
-            lines.append("> ⚠️ 模块长文暂未生成，可在后续流水线中补充。")
-        else:
-            lines.append(self._read_article_body(article))
+        lines.append(self._read_article_body(article))
 
         lines.extend([
             "",
@@ -123,7 +127,9 @@ class ArticleIntegrator:
         与章标题打架（旧实现只剥一行，多行引用块的第二行 `>` 会残留成章首的孤立引用）。
         为什么必须降级：长文的 `##` 与本册的章标题同级，不降级会与章标题并列成两个同层标题。
         """
-        text = article.read_text(encoding="utf-8")
+        # errors="replace"：个别长文混入非 UTF-8 字节时不让整个 cluster-articles 崩掉；
+        # 去 BOM：带 BOM 的长文首行是 \ufeff# 篇名，不去会漏过抬头剥离与去号规则。
+        text = article.read_text(encoding="utf-8", errors="replace").lstrip("\ufeff")
 
         # Normalize any unescaped literal \n in markdown text
         norm_lines = []
@@ -155,10 +161,12 @@ class ArticleIntegrator:
 
         # 先剥号、再降级（##→###、###→####）：存量长文标题带 `## 2.1 …` 这类手写序号，
         # 不剥会与阅读器的自动编号叠成双号；新长文已由提示词要求不写序号，所以这一步幂等。
+        # 围栏判定与上面的归一化循环保持同一口径（strip 后判定）：列表项内缩进的围栏
+        # 也是围栏，漏认会让围栏内的 `##` 被误降级、状态在两循环间失步。
         demoted = []
         in_code = False
         for line in body.strip().splitlines():
-            if line.startswith("```"):
+            if line.strip().startswith("```"):
                 in_code = not in_code
             if not in_code:
                 line = strip_heading_number(line)
@@ -183,10 +191,10 @@ class ArticleIntegrator:
         `blocks` 缺省时读盘上的块清单（`audio/_blocks/blocks.json`）。
         """
         blocks = list(blocks) if blocks else self.load_blocks()
-        results = []
+        results: List[Path] = []
         for idx, block in enumerate(blocks, 1):
             module_idx = int(block.get("block_id") or idx)
-            results.append(
-                self.integrate_module(module_idx, block, course_title, force=force)
-            )
+            path = self.integrate_module(module_idx, block, course_title, force=force)
+            if path is not None:  # 缺长文的块被 gate 跳过：清单里只记真实落盘的册
+                results.append(path)
         return results

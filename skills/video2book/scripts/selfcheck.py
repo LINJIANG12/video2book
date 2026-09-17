@@ -2391,6 +2391,116 @@ def check_state_sync_block_accounting():
         assert all(d["status"] == "success" for d in manifest["details"]), manifest["details"]
 
 
+def check_hardening_probes():
+    """三路审查（2026-09）发现缺陷的回归防线：Path 入参、畸形清单、占位教材、命名对称、旧成品遮蔽。"""
+    import json
+    import subprocess
+    import tempfile
+
+    from src.core.audio_merger import AudioMerger
+    from src.core.workspace import (
+        TaskWorkspace,
+        find_module_article,
+        module_article_stem,
+    )
+    from src.generator.block_synthesizer import BlockSynthesizer
+    from src.generator.integrator import ArticleIntegrator
+    from src.generator.topic_planner import SemanticTopicPlanner
+
+    def _write_blocks(ws, blocks, version=2):
+        block_dir = ws.audio_dir / "_blocks"
+        block_dir.mkdir(parents=True, exist_ok=True)
+        (block_dir / "blocks.json").write_text(json.dumps(
+            {"version": version, "target_minutes": 50.0, "min_minutes": 40.0, "max_minutes": 60.0,
+             "effective_limit_minutes": 75.0, "course_short": "探针", "noop": False,
+             "input_signature": "probe", "blocks": blocks}, ensure_ascii=False), encoding="utf-8")
+
+    # 1) 畸形/过期清单一律视为「无清单」：条目缺字段、非 dict、v1 旧版本、空表
+    with tempfile.TemporaryDirectory() as tmp:
+        ws = TaskWorkspace(task_name="hardening_probe", base_dir=tmp)
+        ws.save_parts([{"page": 1, "title": "绪论"}])
+        bad_dir = ws.audio_dir / "_blocks"
+        bad_dir.mkdir(parents=True, exist_ok=True)
+        for bad in ('{"version": 2, "blocks": [{"block_id": 1}]}',
+                    '{"version": 2, "blocks": [null]}',
+                    '{"version": 2, "blocks": [{"block_id": 0, "episodes": [1]}]}',
+                    '{"version": 1, "blocks": [{"block_id": 1, "episodes": [1]}]}',
+                    '{"version": 2, "blocks": []}'):
+            (bad_dir / "blocks.json").write_text(bad, encoding="utf-8")
+            assert AudioMerger.load_manifest(ws) is None, f"畸形清单未被拒: {bad}"
+        assert SemanticTopicPlanner.load_blocks(ws) == [], "畸形清单进了归并链路"
+        assert ArticleIntegrator(ws.root_dir).load_blocks() == [], "畸形清单进了整编链路"
+
+    # 2) integrator.run() 的缺省读盘路径：纯 Path 也能读块清单（block_dir 兼容 Path），
+    #    且块缺长文时 gate 跳过、不落占位教材（占位会被缓存永久留存）
+    with tempfile.TemporaryDirectory() as tmp:
+        ws = TaskWorkspace(task_name="path_probe", base_dir=tmp)
+        _write_blocks(ws, [{"block_id": 1, "title": "绪论", "span": "P01",
+                            "episodes": [1], "duration_min": 46.0,
+                            "audio": "audio/_blocks/探针_01_绪论(P01).m4a"}])
+        integrator = ArticleIntegrator(ws.root_dir)
+        assert integrator.load_blocks(), "纯路径入参读不到块清单（block_dir 未兼容 Path）"
+        results = integrator.run(course_title="探针课", blocks=None)
+        assert results == [], f"缺长文却落了教材: {results}"
+        assert not list((ws.root_dir / "textbooks").glob("*.md")), "占位教材被落盘"
+
+    # 3) 块号 >99：写（module_article_stem）与读（find_module_article）同一口径
+    with tempfile.TemporaryDirectory() as tmp:
+        ws = TaskWorkspace(task_name="id_overflow", base_dir=tmp)
+        big = {"block_id": 100, "title": "越界块", "span": "P100-P101", "episodes": [100]}
+        stem = module_article_stem(big)
+        assert stem.startswith("模块100_"), stem
+        target = ws.articles_dir / f"{stem}_精读长文.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("正文" * 400, encoding="utf-8")
+        assert find_module_article(ws.articles_dir, big) == target, "块号>99 的长文定位失灵"
+
+    # 4) salvage_notes：非法归并的抢救（重复认领先到先得、未知块忽略、孤块兜底）
+    blocks = [{"block_id": 1, "title": "A", "episodes": [1]},
+              {"block_id": 2, "title": "B", "episodes": [2]},
+              {"block_id": 3, "title": "C", "episodes": [3]}]
+    salvaged, diag = SemanticTopicPlanner.salvage_notes(
+        [{"note_id": 1, "note_title": "X", "blocks": [1, 2, 2, 99]}], blocks)
+    assert [n["blocks"] for n in salvaged] == [[1, 2], [3]], salvaged
+    assert [n["episodes"] for n in salvaged] == [[1, 2], [3]], "孤块兜底笔记的集号未推导"
+
+    # 5) 同编号旧成品遮蔽：进入归并态（盘上有 note_plan.json）后宽容命中失效
+    with tempfile.TemporaryDirectory() as tmp:
+        ws = TaskWorkspace(task_name="shadow_probe", base_dir=tmp)
+        ws.save_parts([{"page": 1, "title": "绪论"}, {"page": 2, "title": "数制"}])
+        _write_blocks(ws, [
+            {"block_id": 1, "title": "绪论", "span": "P01", "episodes": [1],
+             "duration_min": 46.0, "audio": "audio/a.m4a"},
+            {"block_id": 2, "title": "数制", "span": "P02", "episodes": [2],
+             "duration_min": 46.0, "audio": "audio/b.m4a"},
+        ])
+        for bid, title in ((1, "绪论"), (2, "数制")):
+            (ws.articles_dir / f"模块{bid:02d}_{title}_精读长文.md").write_text(
+                "正文" * 400, encoding="utf-8")
+        (ws.root_dir / "note_plan.json").write_text(json.dumps(
+            [{"note_id": 1, "note_title": "归并篇", "blocks": [1, 2], "core_theme": "x"}],
+            ensure_ascii=False), encoding="utf-8")
+        (ws.notes_dir / "笔记01_旧粒度主题_笔记.md").write_text("旧成品" * 400, encoding="utf-8")
+
+        res = BlockSynthesizer.dispatch_notes(ws, [{"page": 1}, {"page": 2}], course_title="探针课")
+        task_names = [Path(r["task_file"]).name for r in res["results"]]
+        assert task_names == ["笔记01_归并篇_TASK.md"], \
+            f"同编号旧成品被误当新归并笔记的缓存: {task_names}"
+
+    # 6) grounding 冒烟：脚本子进程跑通、exit 0、对「尚无模块长文」如实报告
+    with tempfile.TemporaryDirectory() as tmp:
+        ws = TaskWorkspace(task_name="grounding_probe", base_dir=tmp)
+        _write_blocks(ws, [{"block_id": 1, "title": "绪论", "span": "P01", "episodes": [1],
+                            "duration_min": 46.0, "audio": "audio/a.m4a", "segments": []}])
+        res = run_quiet(
+            [sys.executable, str(SKILL_ROOT / "scripts" / "article_grounding_check.py"),
+             "--dir", str(ws.root_dir)],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120,
+        )
+        assert res.returncode == 0, res.stdout[-300:] + res.stderr[-200:]
+        assert "无模块长文" in res.stdout, res.stdout[-300:]
+
+
 def check_block_note_merge_contract():
     """块即模块下的归并契约：归并单位是块，判据是块标题 + 模块长文主题，缺归并不终止。
 
@@ -2808,6 +2918,7 @@ def main():
     check("OMNI_STATUS 契约版本兼容", check_contract_parser)
     check("笔记归并契约（块即模块 / 按块号校验 / 无第一趟规划）", check_note_planner_contract)
     check("对账按块跑通（sync 的静默失败防线）", check_state_sync_block_accounting)
+    check("审查修复回归（Path/畸形清单/gate/命名对称/遮蔽）", check_hardening_probes)
     check("块级归并契约（块+长文主题为据 / 缺归并不终止 / 旧粒度任务书作废）",
           check_block_note_merge_contract)
     check("文档无悬空小节引用", check_docs_no_dangling_section_refs)

@@ -179,16 +179,16 @@ def load_parts(ws: Path) -> List[Dict]:
 
 
 def _load_blocks(ws: Path) -> List[Dict]:
-    """读块清单（`audio/_blocks/blocks.json`）；没有块级链路的老工作区返回空表。"""
-    path = ws / "audio" / "_blocks" / "blocks.json"
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-    blocks = data.get("blocks") if isinstance(data, dict) else None
-    return [b for b in blocks if isinstance(b, dict)] if isinstance(blocks, list) else []
+    """读块清单（唯一入口：`AudioMerger.load_manifest`，带版本与条目校验）。
+
+    为什么不再自己读 JSON：曾经放过 v1 旧清单进门（无 span/units/title），而 state_sync/pipeline
+    只认 v2——同一份清单在两边判出相反结论。统一走 `load_manifest` 后，任何「不合规清单」
+    一律按「没有块清单」处理（提示先 merge-audio 重装），绝不再产生第三种判定口径。
+    """
+    from src.core.audio_merger import AudioMerger
+
+    manifest = AudioMerger.load_manifest(ws)
+    return list(manifest.get("blocks") or []) if manifest else []
 
 
 def _module_article_path(articles_dir: Path, block: Dict) -> Path:
@@ -242,7 +242,10 @@ def scan_status(ws: Path, min_article_bytes: int = 1000) -> Dict:
         for cand in sorted(articles_dir.glob(f"模块{block_id:02d}_*.md")):
             if cand.name.endswith("_TASK.md"):
                 continue
-            size = cand.stat().st_size
+            try:
+                size = cand.stat().st_size
+            except OSError:
+                break  # 不可访问的条目不进异常清单（避免一门课的坏文件打断整轮统计）
             if size < min_article_bytes:
                 invalid_articles[block_id] = (cand, size)
             break
@@ -438,7 +441,8 @@ def _module_payload(ws: Path, n: int) -> List[Dict]:
     subtitles_dir = ws / "subtitles"
     for block in _load_blocks(ws):
         block_id = int(block.get("block_id") or 0)
-        span = str(block.get("span") or "")
+        # span 兜底走 block_span（units 标签 → 集号区间），手写清单缺 span 时也能对上真实稿名
+        span = str(block.get("span") or AudioMerger.block_span(block))
         transcript = subtitles_dir / f"BLK{block_id:02d}_{span}_逐字稿.md"
         if not transcript.exists() or transcript.stat().st_size <= 0:
             continue

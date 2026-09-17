@@ -88,7 +88,8 @@ def collect_files(ws: Any, only: str) -> List[Path]:
     if only in ("textbooks", "both"):
         picks += sorted((ws.root_dir / "textbooks").glob("*.md"))
     if only in ("articles", "both"):
-        picks += sorted((ws.root_dir / "articles").glob("*_精读文章.md"))
+        # 现行命名是模块长文（一块一篇）；逐集长文（PXX_*_精读文章.md）已随逐集链路废除
+        picks += sorted((ws.root_dir / "articles").glob("*_精读长文.md"))
     out = []
     for path in picks:
         if path.name.endswith(TASK_SUFFIX):

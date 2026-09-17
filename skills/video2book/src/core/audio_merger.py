@@ -400,9 +400,8 @@ class AudioMerger:
         override = (titles or {}).get("_course")
         if override:
             return sanitize_filename(str(override), max_len=24)
-        manifest = cls.load_manifest(ws) or {}
-        name = str(manifest.get("title") or Path(ws.root_dir).name)
-        name = re.split(r"_BV|_dy_|_yt_", name)[0].strip() or Path(ws.root_dir).name
+        name = Path(ws.root_dir).name
+        name = re.split(r"_BV|_dy_|_yt_", name)[0].strip() or name
         return sanitize_filename(name, max_len=24)
 
     @classmethod
@@ -413,7 +412,10 @@ class AudioMerger:
 
     @classmethod
     def block_dir(cls, ws: Any) -> Path:
-        return Path(ws.audio_dir) / cls.BLOCK_DIR_NAME
+        # 两类入参都要活：TaskWorkspace（有 .audio_dir）与纯路径（如 integrator 里的 task_dir）。
+        # 只认前者会让「读块清单」这个只读动作成为崩溃点（run(blocks=None) 的缺省分支）。
+        audio = getattr(ws, "audio_dir", None)
+        return (Path(audio) if audio else Path(ws) / "audio") / cls.BLOCK_DIR_NAME
 
     @classmethod
     def manifest_path(cls, ws: Any) -> Path:
@@ -431,8 +433,22 @@ class AudioMerger:
             return None
         if not isinstance(data, dict) or int(data.get("version") or 0) != cls.MANIFEST_VERSION:
             return None
-        if not isinstance(data.get("blocks"), list):
+        blocks = data.get("blocks")
+        if not isinstance(blocks, list) or not blocks:
             return None
+        # 条目级最小校验：一条不合法就整份按「无效清单」处理——上层会走「先 merge-audio 重装」
+        # 的提示路径。照单全收的后果实测过：条目缺 episodes/units 会让 block_stem 抛 IndexError，
+        # 装箱、队列、对账、整编一路崩穿，而报错点离根因隔了好几层。
+        for block in blocks:
+            if not isinstance(block, dict):
+                return None
+            try:
+                if int(block.get("block_id") or 0) <= 0:
+                    return None
+            except (TypeError, ValueError):
+                return None
+            if not isinstance(block.get("episodes"), list) or not block["episodes"]:
+                return None
         return data
 
     @classmethod
@@ -558,7 +574,10 @@ class AudioMerger:
 
         # 2) 命中缓存：清单指纹一致、块文件齐备（且非空），直接复用
         existing = cls.load_manifest(ws)
-        if existing and not force and str(existing.get("input_signature") or "") == signature:
+        signature_matches = (
+            bool(existing) and str(existing.get("input_signature") or "") == signature
+        )
+        if existing and not force and signature_matches:
             stale = []
             for block in existing["blocks"]:
                 audio_path = Path(ws.root_dir) / str(block.get("audio") or "")
@@ -571,6 +590,8 @@ class AudioMerger:
                 diag.append(f"[cached] 块清单与输入指纹一致，复用 {len(existing['blocks'])} 个块")
                 return result
             diag.append(f"[i] 块文件缺失或不完整（{stale}），本次重新拼接")
+        elif existing and not signature_matches:
+            diag.append("[i] 输入指纹已变化（音频替换/时长变化/标题或装箱参数调整），派生块音频全部重切")
 
         # 3) 装箱：先把「装箱单元」规划出来（超长集在这里劈成上下两半），再把单元装成块
         units = cls.plan_units(records, limits["min"], limits["max"])
@@ -608,9 +629,12 @@ class AudioMerger:
         expected_files: set = set()
         for block_id, group in enumerate(groups, 1):
             members = [units[index] for index in group]
+            # 同名复用派生块音频只有在**输入指纹未变**时才安全：指纹变了说明某个源音频内容
+            # 变了（如人工补音频后重装），此时同名文件是旧内容的残骸——照名跳过 ffmpeg 会让
+            # 块音频与新生成的段表错位，转录与时间表对不上。
             block = cls._build_block(
                 ws, block_dir, block_id, members, limits,
-                mixed_codecs=mixed_codecs, skip_existing=skip_existing,
+                mixed_codecs=mixed_codecs, skip_existing=skip_existing and signature_matches,
                 course_short=course_short, titles=titles, records=records, diag=diag,
             )
             expected_files.add(Path(block["audio"]).name)

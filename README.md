@@ -34,7 +34,7 @@
 
 </div>
 
-给出一门课的链接或目录，它按块转录、逐集成文，再把多集长文整编为模块教材与复习笔记。
+给出一门课的链接或目录，它把音频装箱成 40–60 分钟的块、按块转录后**一块成一篇**模块长文，再按块序整编出模块教材与复习笔记。
 
 > [!CAUTION]
 > 本工具会批量抓取 B 站视频的元数据与音频流，并可保存你的登录凭证。仅用于你自己有权访问的内容，遵守 B 站的服务条款与相关法律规定。`SESSDATA` 等同账号登录态，不要复制、上传或分享。
@@ -57,9 +57,9 @@
 
 ## 项目概述
 
-Video2Book 是一个面向 AI 编程助手的技能，用来把一门课写成教材。它接受 B 站合集、YouTube 频道/播放列表、抖音合集或本地课程目录，逐集产出精读长文，再把多集长文整编为模块教材与思维导图复习笔记。
+Video2Book 是一个面向 AI 编程助手的技能，用来把一门课写成教材。它接受 B 站合集、YouTube 频道/播放列表、抖音合集或本地课程目录，一块产出**一篇**模块精读长文（块覆盖连续的几集），再把各块长文整编为模块教材与思维导图复习笔记。
 
-长课程的直接难点是听不完、也记不住。这个技能把音频按**集边界**装箱成块（一集绝不劈进两块），交给听音通道把整块转成逐字稿，再按块内时间表**机械切回**一集一份；写作角色只读逐字稿写长文，不再接触音频。取音调用次数因此从「每集一次」降到「每块一次」（实测 9 门课 936 集 → 381 块，降 2.46 倍）。
+长课程的直接难点是听不完、也记不住。这个技能把音频按集边界装箱成 40–60 分钟的块（超长集劈上下），交给听音通道把整块转成逐字稿；写作角色读块级逐字稿，一块写一篇模块长文，不再接触音频。按集切分只是事后查阅的可选动作，不在主链上。取音调用次数因此从「每集一次」降到「每块一次」（实测 9 门课 936 集 → 381 块，降 2.46 倍）。
 
 产出分三轨，各自落在独立目录，可以单独取用：模块精读长文、模块合辑教材、跨块复习笔记。每个产物在交付前都要过一遍机器门禁——套话填充、空壳标题、分集平铺标题这类问题会被脚本拦下，而不是留给你在阅读时发现。
 
@@ -173,9 +173,8 @@ flowchart TD
     C -->|否| E[派发转录角色<br/>按块并行取音]
     D --> F[块级转录<br/>read_audio / read_media]
     E --> F
-    F --> S[按时间表切回分集逐字稿<br/>subtitles/PXX_*_逐字稿.md]
-    S --> W[写作角色读块逐字稿<br/>一块一篇模块长文]
-    W --> G[单集教材长文<br/>articles/]
+    F --> W[写作角色读块级逐字稿<br/>一块一篇模块长文]
+    W --> G[模块精读长文<br/>articles/模块XX_*_精读长文.md]
     G --> H[阶段二：块 → 笔记归并<br/>+ 块序整编教材]
     H --> I[模块教材 textbooks/<br/>复习笔记 notes/]
 
@@ -190,8 +189,8 @@ flowchart TD
     class G,I data
 ```
 
-- **取音只发生在转录角色身上，且按块取**：音频先按**集边界**装箱成块（`audio/_blocks/`，目标时长可配、默认 60 分钟，一集绝不劈进两块），转录角色一次读完整块、按行首时间戳产出逐字稿，再由工具按块内时间表**机械切回**分集逐字稿；写作角色只读逐字稿，不再接触音频。
-- **派发阈值写在 `src/core/budget.py`**：课程总时长在 60 分钟以内时由主 Agent 串行处理，超过则必须派发——转录角色建议 2 个并行消费块队列，写作角色按块领集（一个子智能体领一个块、依次写块内各集）。窗口兜底只对**走通道 A 的转录角色**成立：实算音频 token 超过上下文窗口 60% 的块必须分卷续读。
+- **取音只发生在转录角色身上，且按块取**：音频按集边界装箱成 40–60 分钟的块（`audio/_blocks/`，目标时长默认 50 分钟；超长集劈上/下两条腿分块转录），块标题由块内分集名语义组合而来、写进块音频文件名。转录角色一次读完整块、按行首时间戳产出块级逐字稿；写作角色只读逐字稿，一个块写一篇模块长文，不再接触音频。
+- **派发阈值写在 `src/core/budget.py`**：课程总时长在 60 分钟以内时由主 Agent 串行处理，超过则必须派发——转录角色建议 2 个并行消费块队列，写作角色**一个块一个子智能体**（一块一篇模块长文）。窗口兜底只对**走通道 A 的转录角色**成立：实算音频 token 超过上下文窗口 60% 的块必须分卷续读。
 - **模块层没有规划，只有归并一趟，且缺归并不停机**：块就是知识模块（音频按 40–60 分钟装箱，块标题由块内分集名语义组合而来），教材直接按块序整编块长文；笔记侧把块归并成若干篇（`note_plan.json`，一篇可跨多个块）。漏认领／重复认领／引用不存在的块都当场抢救，命令始终正常退出，盘上的 `note_plan.json` 不会被兜底结果覆盖。
 - **阶段一与阶段二按内容边界解耦**，较长课程也能在断点后续跑。
 - **工具层只产出任务书、派发载荷与门禁**，长文与笔记的撰写由宿主 Agent（通常为子智能体）完成；「谁写的」「是否真听了音频」属纪律条款，工具层无法校验。
@@ -235,9 +234,10 @@ python src/cli.py pipeline "https://www.bilibili.com/video/BV14VqVBrEhc" --range
 ### 查看派发队列与阶段门禁
 
 ```bash
-python scripts/queue_tracker.py --next 5 --log-dispatch --json   # 取派发载荷（含任务书/切片/目标路径/预算）
+python scripts/queue_tracker.py --next-module 5 --log-dispatch --json  # 写作侧取载荷（块任务书/逐字稿/目标长文）
+python scripts/queue_tracker.py --next-transcribe 2 --json             # 转录侧取载荷（块音频/时间表/逐字稿目标）
 python scripts/queue_tracker.py --summary                        # 单行状态：STAGE1_DONE 等
-python scripts/queue_tracker.py --pattern "微机原理" --next 5      # 多课程并存时指定工作区
+python scripts/queue_tracker.py --pattern "微机原理" --next-module 5   # 多课程并存时指定工作区
 ```
 
 ### 生成模块教材与复习笔记
@@ -323,7 +323,7 @@ skill/
 ├── skills/video2book/          # 技能本体，安装时只需这一个目录
 │   ├── SKILL.md                # 技能契约，Agent 的唯一事实源
 │   ├── src/                    # 工具链
-│   │   ├── cli.py              # 入口：12 个子命令
+│   │   ├── cli.py              # 入口：13 个子命令
 │   │   ├── core/               # 路径、音频预算、流水线、抓取、交付物质检
 │   │   │   └── ingestion/      # 多平台统一媒体内核（B 站 / 本地 / YouTube / 抖音）
 │   │   └── generator/          # 任务书、提示词模板与语义聚合
@@ -361,9 +361,10 @@ skill/
 |---|---|---|
 | `parse` | 解析视频拓扑并列分集 | `python src/cli.py parse "<链接>" --limit 10` |
 | `audio` | 下载或抽取音频流 | `python src/cli.py audio "<链接>" --all` |
-| `transcribe` | 导出单集长文任务书，不落中间逐字稿 | `python src/cli.py transcribe "<链接>" --page 1 --article-type learning` |
 | `pipeline` | 执行完整流水线 | `python src/cli.py pipeline "<链接>" --all --article-type learning` |
-| `cluster-articles` | 把单集长文整编为模块教材 | `python src/cli.py cluster-articles "<链接>"` |
+| `merge-audio` | 单独重跑装箱合并（幂等，可改块标题） | `python src/cli.py merge-audio "<工作区目录>"` |
+| `split-transcript` | 可选：块逐字稿切回分集逐字稿（按集查阅） | `python src/cli.py split-transcript "<工作区目录>" --block 1` |
+| `cluster-articles` | 按块序整编模块长文为一册册教材 | `python src/cli.py cluster-articles "<链接>"` |
 | `cluster-notes` | 块 → 笔记归并，导出笔记任务书 | `python src/cli.py cluster-notes "<链接>"` |
 | `dedup` | 同步重复音频资产以节省 token | `python src/cli.py dedup --dry-run` |
 | `cleanup` | 回收已产出的任务书，每类保留样本 | `python src/cli.py cleanup --dry-run` |
@@ -376,7 +377,7 @@ skill/
 
 | 参数 | 适用命令 | 说明 | 默认 |
 |---|---|---|---|
-| `--article-type` | `pipeline` / `transcribe` | 长文提示词风格：`learning`（学习，推荐）/ `legacy`（旧版） | 不传即退出码 4 |
+| `--article-type` | `pipeline` | 长文提示词风格：`learning`（学习，推荐）/ `legacy`（旧版） | 不传即退出码 4 |
 | `--all` / `--range X-Y` / `--page N` | `pipeline` / `audio` | 选集范围：全部 / 区间 / 单集 | 单集 |
 | `--force` | 多数命令 | 强制重跑，忽略已有产物 | 关 |
 | `--base-dir` | 全部 | 产物根路径 | `BVB_OUTPUT_DIR`，或 `<工作目录>/output`（无容器标记时） |
@@ -389,7 +390,7 @@ skill/
 
 | 脚本 | 说明 | 常用参数 |
 |---|---|---|
-| `scripts/queue_tracker.py` | 待办分集、阶段门禁、派发载荷与台账 | `--next N` / `--summary` / `--pattern` / `--log-dispatch` / `--json` |
+| `scripts/queue_tracker.py` | 块级转录/写作进度、阶段门禁、派发载荷与台账 | `--next-transcribe N` / `--next-module N` / `--summary` / `--pattern` / `--log-dispatch` / `--json` |
 | `scripts/note_quality_check.py` | 笔记成色体检 | `--strict`、`--require-structure`、`--max-truncated N` |
 | `scripts/render_compat_check.py` | 渲染合规体检 | `--strict`、`--require-lang` |
 | `scripts/selfcheck.py` | 仓库唯一门禁自检 | — |
