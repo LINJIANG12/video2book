@@ -229,7 +229,13 @@ class TaskWorkspace:
         try:
             if (path / "parts.json").exists():
                 return True
-            for sub, pattern in (("articles", "P*_*.md"), ("subtitles", "P*_clean.txt")):
+            for sub, pattern in (
+                ("articles", "P*_*.md"),
+                ("subtitles", "P*_clean.txt"),
+                # 块级转录链路产出的分集逐字稿（`PXX_<标题>_逐字稿.md`）同样是实质语料：
+                # 只有逐字稿、还没写长文的工作区不该被当成空壳而重新建目录。
+                ("subtitles", "P*_逐字稿.md"),
+            ):
                 folder = path / sub
                 if not folder.is_dir():
                     continue
@@ -359,6 +365,8 @@ class TaskWorkspace:
         "audio_file", "filepath", "source_path", "target_path", "chunk_path", "chunk_file",
         # 模块笔记任务书结果里的目标文件；缺了它会把机器绝对路径写进 manifest
         "note_file", "kernel_file",
+        # 块清单路径（audio/_blocks/blocks.json）；不登记会把机器绝对路径留在 manifest 里
+        "blocks_manifest",
     }
 
     # 列表型路径字段（元素为路径字符串）：textbooks / notes_files / kernels 等

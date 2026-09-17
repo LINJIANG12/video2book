@@ -48,8 +48,9 @@ from src.core import fsutil  # noqa: E402
 from src.core.task_cleanup import find_workspaces  # noqa: E402
 from src.core.workspace import TaskWorkspace  # noqa: E402
 
-# 排除：任务书（非交付物）与隐藏目录（归档/备份/缓存）
-EXCLUDE_NAME_SUFFIXES = ("_TASK.md", "_KERNEL_TASK.md")
+# 排除：任务书与逐字稿（都不是交付物，前者是派发物、后者是给写作角色看的原始语料——
+# 语音识别文本里出现没闭合的代码围栏是正常现象，不该算渲染缺陷）与隐藏目录（归档/备份/缓存）
+EXCLUDE_NAME_SUFFIXES = ("_TASK.md", "_KERNEL_TASK.md", "_转录任务书.md", "_逐字稿.md")
 
 
 def collect_markdown(ws: Any) -> List[Path]:

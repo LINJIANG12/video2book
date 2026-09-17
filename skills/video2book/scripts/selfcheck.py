@@ -104,13 +104,22 @@ def check_imports():
 
 def check_cli_help():
     for sub in ("parse", "audio", "transcribe",
-                "pipeline", "cluster-notes", "cluster-articles", "dedup",
+                "pipeline", "merge-audio", "split-transcript",
+                "cluster-notes", "cluster-articles", "dedup",
                 "cleanup", "sync", "login", "logout", "info"):
         res = run_quiet(
             [sys.executable, str(SKILL_ROOT / "src" / "cli.py"), sub, "--help"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60,
         )
         assert res.returncode == 0, f"`{sub} --help` 退出码 {res.returncode}: {res.stderr[:200]}"
+
+    # pipeline 的两个块级转录开关必须存在：块时长可覆盖（不写死）＋可回退老链路
+    res = run_quiet(
+        [sys.executable, str(SKILL_ROOT / "src" / "cli.py"), "pipeline", "--help"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60,
+    )
+    assert "--block-minutes" in res.stdout, "pipeline 缺少 --block-minutes（块时长必须可配置）"
+    assert "--no-merge" in res.stdout, "pipeline 缺少 --no-merge（必须能回退逐集听音链路）"
 
 
 def check_repo_separation():
@@ -127,8 +136,24 @@ def check_repo_separation():
         print("       (skill/ 不是 git 工作树——zip 下载安装，跳过仓库边界断言)")
 
     if container:
-        # 容器根不应是 git 仓库（拆分后由两个独立仓库各自管理）
-        assert not (HOME_ROOT / ".git").is_dir(), f"容器根不应再有 .git: {HOME_ROOT / '.git'}"
+        # Codex uses an empty root .git as a workspace boundary; it must not
+        # become a real version-control repository containing tracked files.
+        root_git = HOME_ROOT / ".git"
+        if root_git.is_dir():
+            commits = run_quiet(
+                ["git", "-C", str(HOME_ROOT), "rev-list", "--all", "--count"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30,
+            )
+            tracked = run_quiet(
+                ["git", "-C", str(HOME_ROOT), "ls-files"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30,
+            )
+            assert commits.returncode == 0, f"无法识别容器根 .git 标记: {commits.stderr[:200]}"
+            assert tracked.returncode == 0, f"无法识别容器根 .git 标记: {tracked.stderr[:200]}"
+            assert (commits.stdout or "").strip() == "0", \
+                "容器根 .git 已包含提交；它是 Codex 工作区标记，不应进行真实版本控制"
+            assert not (tracked.stdout or "").strip(), \
+                "容器根 .git 已跟踪文件；它是 Codex 工作区标记，不应进行真实版本控制"
     else:
         print(f"       (未检测到容器布局标记，跳过「容器根不得是 git 仓库」断言: home={HOME_ROOT})")
 
@@ -311,6 +336,57 @@ def check_no_cross_repo_imports():
         assert not bad, f"MCP 侧不得 import 技能包 src，运行代码也不得互引（契约测试除外）: {bad}"
 
 
+def check_copied_skill_is_self_contained():
+    """A copied skill directory must run from an unrelated working directory."""
+    import shutil
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        copied = root / "video2book"
+        shutil.copytree(
+            SKILL_ROOT,
+            copied,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+        work = root / "work"
+        work.mkdir()
+        result = run_quiet(
+            [sys.executable, str(copied / "src" / "cli.py"), "info"],
+            cwd=str(work),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=120,
+        )
+        assert result.returncode == 0, (result.stdout or "")[-500:]
+        assert "Python 运行环境" in (result.stdout or "")
+        assert str(work / "output") in (result.stdout or "")
+    return "复制后的技能目录可从任意 cwd 独立运行"
+
+
+def check_contract_parser():
+    """Accept contract v1 and legacy v0; reject incompatible major versions."""
+    from src.core.contract import (
+        ContractCompatibilityError,
+        parse_compatible_status,
+    )
+
+    assert parse_compatible_status("普通正文，无状态注释") is None
+    legacy = '<!-- OMNI_STATUS: {"is_finished": true} -->'
+    assert parse_compatible_status(legacy)["is_finished"] is True
+    current = '<!-- OMNI_STATUS: {"contract_version": 1, "is_finished": false} -->'
+    assert parse_compatible_status(current)["contract_version"] == 1
+    incompatible = '<!-- OMNI_STATUS: {"contract_version": 2, "is_finished": true} -->'
+    try:
+        parse_compatible_status(incompatible)
+    except ContractCompatibilityError as exc:
+        assert "主版本 1" in str(exc)
+    else:
+        raise AssertionError("contract_version=2 必须被拒绝")
+    return "契约 v1 可用，缺失按 legacy v0，其他主版本明确拒绝"
+
+
 def check_kernel_extractor_contract():
     """本地伪造抽取必须已彻底移除，缺失的知识元只能报告为待办。"""
     from src.core.kernel_extractor import KernelExtractor
@@ -409,12 +485,189 @@ def check_integrator_no_hardcoded_course():
         "run() 的 course_title 应为必传参数"
 
 
-def check_zero_transcript_pipeline():
-    """单集直出长文：文章任务书入口存在，旧的转录任务书入口必须已移除。"""
+def check_transcript_pipeline():
+    """块级转录链路：文章任务书入口在、块级转录入口在，**逐集**转录入口不得回流。
+
+    注意这条断言的性质变了：逐字稿本身不再是禁忌——块级转录流水线**要求**它落盘到
+    `subtitles/`（它是转录与写作两类角色之间的接口）。守的是「按集转录」这条老路径：
+    它一门 200 集的课就要调 200 次取音接口，正是本次要消掉的成本。
+    """
     from src.core import pipeline
 
     assert hasattr(pipeline, "export_article_task"), "export_article_task 应已提供"
-    assert not hasattr(pipeline, "export_transcribe_task"), "export_transcribe_task 应已移除"
+    assert hasattr(pipeline, "export_block_transcribe_task"), "块级转录任务书入口应已提供"
+    assert not hasattr(pipeline, "export_transcribe_task"), \
+        "逐集转录任务书入口（export_transcribe_task）不得回加：转录必须按块派发"
+    assert str(pipeline.TRANSCRIBE_TIMESTAMP_INSTRUCTION).strip(), \
+        "转录时间戳要求不得为空——缺了它，块级逐字稿无法机械切回分集"
+
+
+def check_audio_block_contract():
+    """块级转录的机器契约：块时长可配不写死、装箱不劈集、切分确定、复用优先、幂等。
+
+    这些是本次改造的核心不变量，全部是可复算的纯逻辑断言（只有拼接那一段真跑 ffmpeg，
+    用 ffmpeg 合成的正弦音，不依赖任何课程音频）。
+    """
+    import tempfile
+
+    from src.core.audio_merger import (
+        DEFAULT_BLOCK_MINUTES,
+        DEFAULT_ONESHOT_LIMIT_MINUTES,
+        ENV_BLOCK_MINUTES,
+        ENV_ONESHOT_LIMIT_MINUTES,
+        AudioMerger,
+    )
+    from src.core.transcript_splitter import TranscriptSplitter
+    from src.core.workspace import TaskWorkspace
+
+    # 1) 块时长默认 60 但**不得写死**：环境变量可覆盖，且目标超过上限时被夹紧
+    assert DEFAULT_BLOCK_MINUTES == 60.0, f"块时长默认值应为 60 分钟，实际 {DEFAULT_BLOCK_MINUTES}"
+    assert DEFAULT_ONESHOT_LIMIT_MINUTES == 75.0, "单块硬上限默认应为 75 分钟（取音侧整片就绪阈值）"
+    assert AudioMerger.block_minutes() == 60.0, "未设环境变量时应取默认 60"
+    _limits = AudioMerger.limits()
+    assert (_limits["target"], _limits["ceiling"], _limits["effective"]) == (60.0, 75.0, 60.0), _limits
+
+    _old_target = os.environ.get(ENV_BLOCK_MINUTES)
+    _old_ceiling = os.environ.get(ENV_ONESHOT_LIMIT_MINUTES)
+    try:
+        os.environ[ENV_BLOCK_MINUTES] = "45"
+        assert AudioMerger.block_minutes() == 45.0, "块时长目标未跟随环境变量（即写死了）"
+        assert AudioMerger.limits()["effective"] == 45.0
+        os.environ[ENV_ONESHOT_LIMIT_MINUTES] = "30"
+        assert AudioMerger.limits()["effective"] == 30.0, "目标超过硬上限时应被夹紧到上限"
+        os.environ[ENV_BLOCK_MINUTES] = "0"
+        assert AudioMerger.block_minutes() == 60.0, "非正数环境变量应回退默认"
+        os.environ[ENV_BLOCK_MINUTES] = "abc"
+        assert AudioMerger.block_minutes() == 60.0, "非法环境变量应回退默认（不因配置笔误中断）"
+    finally:
+        for _key, _val in ((ENV_BLOCK_MINUTES, _old_target), (ENV_ONESHOT_LIMIT_MINUTES, _old_ceiling)):
+            if _val is None:
+                os.environ.pop(_key, None)
+            else:
+                os.environ[_key] = _val
+
+    # 2) 装箱：不重不漏、块内连续、多集块不越上限
+    durations = [600.0] * 7 + [1800.0] + [300.0] * 4
+    groups = AudioMerger.pack(durations, 60.0, 75.0)
+    flat = sorted(i for g in groups for i in g)
+    assert flat == list(range(len(durations))), f"装箱后集号有重有漏: {groups}"
+    for group in groups:
+        assert group == list(range(group[0], group[0] + len(group))), f"块内必须连续: {group}"
+        span = sum(durations[i] for i in group)
+        assert span <= 75.0 * 60 + 1e-6 or len(group) == 1, \
+            f"多集块越过硬上限（一集被劈开是最坏情况）: {group} = {span}s"
+    # 单集本身超长 → 允许单独成块（由取音侧分卷续读），但绝不能与别集同块
+    over = AudioMerger.pack([5000.0, 600.0], 60.0, 75.0)
+    assert any(len(g) == 1 and 0 in g for g in over), f"超长单集未被单独成块: {over}"
+
+    # 3) 切分契约：两段式/三段式时间戳都认；无时间戳必须降级，绝不臆测归属
+    assert TranscriptSplitter.parse_stamp("05:20") == 320.0, "两段式 MM:SS 未识别"
+    assert TranscriptSplitter.parse_stamp("00:05:20") == 320.0, "三段式 HH:MM:SS 未识别"
+    assert TranscriptSplitter.parse_stamp("320") == 320.0, "纯秒数未识别"
+    segments = [
+        {"page": 1, "start_sec": 0.0, "end_sec": 600.0, "start": "00:00:00", "end": "00:10:00"},
+        {"page": 2, "start_sec": 600.0, "end_sec": 1200.0, "start": "00:10:00", "end": "00:20:00"},
+    ]
+    text = "[00:00:00] 第一集开场\n[00:05:00] 第一集中段\n[00:10:00] 第二集开场\n[00:15:00] 第二集中段\n"
+    outcome = TranscriptSplitter.split(text, segments)
+    assert outcome["mode"] == "timestamp", outcome["mode"]
+    assert outcome["buckets"][1] == ["第一集开场", "第一集中段"], outcome["buckets"][1]
+    assert outcome["buckets"][2] == ["第二集开场", "第二集中段"], outcome["buckets"][2]
+    assert outcome["stats"]["anchored_boundaries"] == 1, outcome["stats"]
+    assert TranscriptSplitter.split("没有任何时间戳的正文", segments)["mode"] == "unsplit", \
+        "无时间戳时必须降级为 unsplit，不得按位置硬切"
+    thin = "[00:00:00] 开场\n[00:15:00] 交界附近没有时间戳\n"
+    assert TranscriptSplitter.split(thin, segments)["stats"]["anchored_boundaries"] == 0, \
+        "交界处缺时间戳时未如实报告（会让错位切分蒙混过关）"
+
+    # 4) 命名与复用优先级 + 契约登记
+    with tempfile.TemporaryDirectory() as tmp:
+        ws = TaskWorkspace(task_name="block_contract", base_dir=tmp)
+        assert TranscriptSplitter.episode_path(ws, 3, "绪论").name == "P03_绪论_逐字稿.md"
+        assert TranscriptSplitter.block_path(ws, {"audio": "audio/_blocks/BLK02_P13-P17.m4a"}).name \
+            == "BLK02_P13-P17_逐字稿.md"
+        assert TranscriptSplitter.existing_episode_transcript(ws, 3, "绪论") is None
+        legacy = TranscriptSplitter.legacy_path(ws, 3, "绪论")
+        legacy.write_text("历史语料", encoding="utf-8")
+        assert TranscriptSplitter.existing_episode_transcript(ws, 3, "绪论") == legacy, \
+            "已有历史 _clean.txt 语料时必须优先复用它，避免把已有语料重转录一遍"
+        fresh = TranscriptSplitter.episode_path(ws, 3, "绪论")
+        fresh.write_text("块级转录产物", encoding="utf-8")
+        assert TranscriptSplitter.existing_episode_transcript(ws, 3, "绪论") == fresh, \
+            "新链路逐字稿的优先级应高于历史语料"
+
+        # 4b) 块级稿的命名只取决于**块结构**：无收益装箱（每块仅一集、块音频直接指向该集原音频）
+        #     时也不能与分集稿同名，否则两者互相覆盖
+        noop_block = {"block_id": 1, "episodes": [8], "audio": "audio/P08_测试集.m4a"}
+        block_named = TranscriptSplitter.block_path(ws, noop_block).name
+        assert block_named == "BLK01_P08_逐字稿.md", block_named
+        assert block_named != TranscriptSplitter.episode_path(ws, 8, "测试集").name, \
+            "块级稿与分集稿同名会互相覆盖"
+
+        # 4c) 陈旧派发物清理：改块时长会改块编号与集号区间，旧任务书必须作废——
+        #     否则它是一份「可被派发的幽灵任务」，照着它转录会去读一个不存在的块
+        subtitles = Path(ws.subtitles_dir)
+        (subtitles / "BLK01_P08_转录任务书.md").write_text("当前", encoding="utf-8")
+        (subtitles / "BLK09_P70-P79_转录任务书.md").write_text("陈旧", encoding="utf-8")
+        (subtitles / "BLK09_P70-P79_逐字稿.md").write_text("陈旧数据", encoding="utf-8")
+        stale = AudioMerger.prune_orphans(ws, [noop_block])
+        assert stale["removed_tasks"] == ["BLK09_P70-P79_转录任务书.md"], stale
+        assert not (subtitles / "BLK09_P70-P79_转录任务书.md").exists(), "陈旧任务书未被作废"
+        assert (subtitles / "BLK01_P08_转录任务书.md").exists(), "当前任务书被误删"
+        assert stale["orphan_transcripts"] == ["BLK09_P70-P79_逐字稿.md"], stale
+        assert (subtitles / "BLK09_P70-P79_逐字稿.md").exists(), \
+            "块级逐字稿是数据产物，只应报告、不应删除（删了会连累已切出的分集稿）"
+
+        assert "blocks_manifest" in TaskWorkspace.PATH_KEYS, \
+            "块清单路径未登记进 PATH_KEYS，机器绝对路径会漏进 manifest"
+        # 只有逐字稿、还没写长文的工作区不能被当成空壳（会被重建目录、丢掉既有语料）
+        only_transcript = Path(tmp) / "只有逐字稿"
+        (only_transcript / "subtitles").mkdir(parents=True, exist_ok=True)
+        (only_transcript / "subtitles" / "P01_绪论_逐字稿.md").write_text("语料", encoding="utf-8")
+        assert TaskWorkspace._populated(only_transcript) is True, \
+            "只有逐字稿的工作区被判成空壳"
+        # 渲染门禁必须把逐字稿与转录任务书排除在交付物之外（ASR 文本里围栏不闭合属正常）
+        import render_compat_check as _rcc
+        for suffix in ("_逐字稿.md", "_转录任务书.md"):
+            assert suffix in _rcc.EXCLUDE_NAME_SUFFIXES, f"渲染门禁未排除 {suffix}"
+
+        # 5) 真跑一次拼接 + 幂等（用 ffmpeg 合成正弦音，不依赖课程音频）
+        if not shutil.which("ffmpeg"):
+            print("    [skip] 未装 ffmpeg，跳过块拼接与幂等的真跑验证")
+            return
+        source_dir = Path(tmp) / "src_audio"
+        source_dir.mkdir(parents=True, exist_ok=True)
+        for index in (11, 12):
+            target = source_dir / f"P{index}_测试集{index}.m4a"
+            res = run_quiet(
+                [shutil.which("ffmpeg"), "-hide_banner", "-loglevel", "error", "-y",
+                 "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                 "-acodec", "aac", "-ar", "16000", "-ac", "1", "-b:a", "32k", str(target)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120,
+            )
+            assert res.returncode == 0 and target.exists(), f"合成测试音频失败: {res.stderr[:200]}"
+        ws2 = TaskWorkspace(task_name="block_merge", base_dir=tmp)
+        for index in (11, 12):
+            src_file = source_dir / f"P{index}_测试集{index}.m4a"
+            (ws2.audio_dir / src_file.name).write_bytes(src_file.read_bytes())
+        ws2.save_parts([{"page": 11, "title": "测试集11"}, {"page": 12, "title": "测试集12"}])
+
+        first = AudioMerger.merge(ws2, [11, 12], target_minutes=1)
+        assert first["status"] in ("merged", "noop"), f"首次合并状态异常: {first['status']}"
+        assert len(first["blocks"]) == 1, f"两集两秒音频应合成一块: {first['blocks']}"
+        block = first["blocks"][0]
+        assert block["episodes"] == [11, 12] and len(block["segments"]) == 2
+        assert abs(sum(s["duration_sec"] for s in block["segments"]) - block["duration_sec"]) < 1.5, \
+            f"段表时长与块时长不一致: {block}"
+        manifest_file = AudioMerger.manifest_path(ws2)
+        assert manifest_file.exists(), "块清单未落盘"
+        before = manifest_file.read_bytes()
+
+        second = AudioMerger.merge(ws2, [11, 12], target_minutes=1)
+        assert second["status"] == "cached", f"重跑未命中缓存（不幂等）: {second['status']}"
+        assert manifest_file.read_bytes() == before, "重跑改写了块清单（不幂等）"
+        loaded = AudioMerger.load_manifest(ws2)
+        assert loaded and loaded["blocks"][0]["episodes"] == [11, 12]
 
 
 def check_subprocess_timeouts():
@@ -2259,13 +2512,16 @@ def main():
     check("三域分离契约（仓库边界/产物在仓库外）", check_repo_separation)
     check("产物根解析（容器标记优先，否则取工作目录）", check_products_root_resolution)
     check("跨仓库不互引（skill ⇎ mcp）", check_no_cross_repo_imports)
+    check("复制后的技能目录自包含", check_copied_skill_is_self_contained)
+    check("OMNI_STATUS 契约版本兼容", check_contract_parser)
     check("KernelExtractor 契约（无本地伪造抽取）", check_kernel_extractor_contract)
     check("SemanticTopicPlanner 契约（无启发式聚类 + 按实际集号校验）", check_topic_planner_contract)
     check("两趟语义规划契约（模块→笔记 / 无集数配额 / 缺规划不终止 / 基准取工作区）",
           check_two_pass_planning_contract)
     check("文档无悬空小节引用", check_docs_no_dangling_section_refs)
     check("ArticleIntegrator 无硬编码课程数据", check_integrator_no_hardcoded_course)
-    check("单集直出长文入口切换", check_zero_transcript_pipeline)
+    check("单集直出长文入口切换", check_transcript_pipeline)
+    check("块级转录契约（装箱不劈集/块时长可配/切分幂等）", check_audio_block_contract)
     check("子进程硬超时就位", check_subprocess_timeouts)
     check("MCP 仓库自检（可选段落）", check_mcp_repo_optional)
     check("任务书导出门禁端到端", check_task_file_export_end_to_end)

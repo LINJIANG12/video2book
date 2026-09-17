@@ -71,11 +71,17 @@ video2book cluster-notes "https://www.bilibili.com/video/BV14VqVBrEhc" --force-p
 ## 场景五：查看与监控任务队列状态
 
 ```bash
-# 查看当前任务工作区的完成进度与阶段判定
+# 查看当前任务工作区的完成进度与阶段判定（含块级转录进度）
 python scripts/queue_tracker.py
 
 # 获取待处理队列中接下来的 5 个分集及路径
 python scripts/queue_tracker.py --next 5
+
+# 转录侧取载荷：待转录的块（块音频 / 块内时间表 / 逐字稿目标路径）
+python scripts/queue_tracker.py --next-transcribe 2 --json
+
+# 写作侧取载荷：只返回「逐字稿已就绪且长文缺失」的集（转录与写作交错推进时用这个）
+python scripts/queue_tracker.py --next-article 5 --json --log-dispatch
 
 # 多课程并存时指定工作区（否则取最近活动的那个）
 python scripts/queue_tracker.py --pattern "微机原理" --next 5
@@ -84,6 +90,9 @@ python scripts/queue_tracker.py --pattern "微机原理" --next 5
 ## 场景六：交付前质检与收尾
 
 ```bash
+# 长文依据级校验（长文是否真的基于本集逐字稿；默认提示级，--strict 才纳入门禁）
+python scripts/article_grounding_check.py --strict
+
 # 笔记成色体检（致命项：套话填充 / 空壳标题 / 分集平铺标题 / 行内残缺引用 / 分集口吻；
 #              提示项：断句 / 结构缺件——加 --require-structure 才纳入门禁）
 python scripts/note_quality_check.py --strict

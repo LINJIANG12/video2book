@@ -50,6 +50,7 @@ from src.core.pipeline import (
     PipelineGateError,
     _STATUS_FILE,
     export_article_task,
+    export_block_transcribe_task,
     get_audio_stream,
     parse_range_string,
     part_kind,
@@ -515,9 +516,136 @@ def cmd_pipeline(args):
             quality=args.quality,
             chunk_minutes=getattr(args, "chunk_minutes", 60),
             article_type=article_type,
+            no_merge=getattr(args, "no_merge", False),
+            block_minutes=getattr(args, "block_minutes", None) or 0.0,
         )
     except PipelineGateError as gate:
         sys.exit(gate.exit_code)
+
+
+def _workspace_from_path(raw: str) -> TaskWorkspace:
+    """按目录路径绑定一个**已存在**的工作区（`merge-audio` / `split-transcript` 共用）。
+
+    为什么用路径而不是 URL：这两条命令都是**离线重跑**——块清单与音频已经在盘上，再走一次
+    网络解析既慢又可能撞风控。给绝对路径最直接，也让命令与当前工作目录彻底解耦。
+    """
+    path = Path(str(raw)).expanduser()
+    if not path.is_dir():
+        print(f"[✗] 工作区目录不存在：{path}", file=sys.stderr)
+        print("去向：传入 `<产物根>/<课程工作区>` 的绝对路径（目录里应有 parts.json 与 audio/）", file=sys.stderr)
+        sys.exit(2)
+    return TaskWorkspace.from_existing(path)
+
+
+def _titles_by_page(ws: TaskWorkspace):
+    """从 parts.json 取「集号 → 清洗后标题」，与音频/长文/逐字稿的命名口径保持一致。"""
+    titles = {}
+    for part in ws.load_parts() or []:
+        page = part.get("page")
+        if page is None:
+            continue
+        titles[int(page)] = sanitize_filename(str(part.get("title") or f"P{int(page):02d}"))
+    return titles
+
+
+def cmd_merge_audio(args):
+    """单独重跑音频装箱合并并导出块级转录任务书（幂等，可反复执行）。"""
+    from src.core.audio_merger import AudioMerger
+
+    ws = _workspace_from_path(args.workspace)
+    titles = _titles_by_page(ws)
+    pages = [
+        int(part["page"]) for part in (ws.load_parts() or [])
+        if part.get("page") is not None and part_kind(part) == KIND_VIDEO
+    ]
+    if not pages:
+        print(f"[✗] {ws.root_dir.name} 里没有可用分集（parts.json 为空或全为非视频作品）", file=sys.stderr)
+        sys.exit(2)
+
+    print("=" * 65)
+    print(f"[*] 音频装箱合并：{ws.root_dir.name}")
+    print("=" * 65)
+    result = AudioMerger.merge(
+        ws, pages, target_minutes=(args.block_minutes or None), force=bool(args.force)
+    )
+    for line in result["diag"]:
+        print(f"    {line}")
+    for line in AudioMerger.describe(result["blocks"], result["limits"]):
+        print(f"    {line}")
+    if not result["blocks"]:
+        print("[✗] 没有生成任何块（音频缺失？先跑 pipeline 收音频）", file=sys.stderr)
+        sys.exit(2)
+
+    stale = AudioMerger.prune_orphans(ws, result["blocks"])
+    if stale["removed_tasks"]:
+        print(f"    [i] 已作废 {len(stale['removed_tasks'])} 份与本次装箱不符的旧转录任务书")
+    if stale["orphan_audio"]:
+        print(f"    [!] 以下块音频不再属于本次装箱（**未删**，确认无用后可手工清理）：{stale['orphan_audio']}")
+    if stale["orphan_transcripts"]:
+        print(f"    [!] 以下块级逐字稿不再属于本次装箱（**未删**，分集逐字稿可能仍引用它）："
+              f"{stale['orphan_transcripts']}")
+
+    course_title = ""
+    try:
+        course_title = str((ws.load_manifest() or {}).get("course_title") or "")
+    except Exception:
+        course_title = ""
+    course_title = course_title or ws.root_dir.name
+    for block in result["blocks"]:
+        export_block_transcribe_task(ws, block, titles=titles, course_title=course_title)
+
+    print(f"[✓] 块清单：{AudioMerger.manifest_path(ws)}")
+    print(f"[✓] 块级转录任务书 {len(result['blocks'])} 份 → {Path(ws.subtitles_dir).name}/")
+    print("[i] 下一步：专职转录角色照任务书转录出块级逐字稿，再跑 split-transcript 切回分集")
+
+
+def cmd_split_transcript(args):
+    """把块级逐字稿按块时间表切成 `subtitles/PXX_*_逐字稿.md`（机械切分，幂等）。"""
+    from src.core.audio_merger import AudioMerger
+    from src.core.transcript_splitter import TranscriptSplitter
+
+    ws = _workspace_from_path(args.workspace)
+    manifest = AudioMerger.load_manifest(ws)
+    if not manifest or not manifest.get("blocks"):
+        print(f"[✗] 找不到块清单：{AudioMerger.manifest_path(ws)}", file=sys.stderr)
+        print("去向：先跑 pipeline（或 merge-audio）生成块与转录任务书", file=sys.stderr)
+        sys.exit(2)
+
+    titles = _titles_by_page(ws)
+    blocks = list(manifest["blocks"])
+    if args.block is not None:
+        blocks = [b for b in blocks if int(b.get("block_id") or 0) == int(args.block)]
+        if not blocks:
+            print(f"[✗] 块清单里没有 BLK{int(args.block):02d}", file=sys.stderr)
+            sys.exit(2)
+
+    print("=" * 65)
+    print(f"[*] 切分块级逐字稿 → 分集逐字稿（{len(blocks)} 个块）")
+    print("=" * 65)
+    done = pending = unsplit = 0
+    for block in blocks:
+        label = f"BLK{int(block.get('block_id') or 0):02d} {AudioMerger.block_stem(block.get('episodes') or [])}"
+        raw = TranscriptSplitter.block_path(ws, block)
+        if not raw.exists() or raw.stat().st_size == 0:
+            print(f"[skip] {label} 尚无块级逐字稿（{raw.name}）")
+            pending += 1
+            continue
+        outcome = TranscriptSplitter.write_episode_transcripts(
+            ws, block, raw.read_text(encoding="utf-8"), titles=titles,
+        )
+        print(f"[*] {label}: {outcome['status']}")
+        for line in outcome["diag"]:
+            print(f"    {line}")
+        if outcome["mode"] == "timestamp":
+            done += 1
+        else:
+            unsplit += 1
+
+    print(f"[✓] 切分完成：{done} 块成功 / {unsplit} 块未切分 / {pending} 块待转录")
+    if pending:
+        print(f"    [!] 待转录的块见 {Path(ws.subtitles_dir).name}/BLK*_转录任务书.md（转录完重跑本命令）")
+    if unsplit:
+        print("    [!] 未切分的块：模型没给行首时间戳，按转录任务书 2.1 节重读该块后重跑本命令")
 
 
 def cmd_cluster_notes(args):
@@ -1044,6 +1172,15 @@ def main():
     p_pipe.add_argument("--prefetch-workers", type=int, default=12, help="Parallel audio prefetch (download/extract) threads")
     p_pipe.add_argument("--skip-failed", action="store_true", default=False, help="Explicit opt-in: exempt failed episodes from transcription gate (recorded in manifest skip list)")
     p_pipe.add_argument("--chunk-minutes", type=int, default=60, help="Split audio into chunks of ~N minutes (0=disabled, default=60)")
+    p_pipe.add_argument(
+        "--block-minutes", type=float, default=None,
+        help="块级转录的块时长目标（分钟）；缺省取环境变量 BVB_AUDIO_BLOCK_MINUTES，再缺省 60。"
+             "单块硬上限由 BVB_AUDIO_ONESHOT_LIMIT_MINUTES 控制（默认 75）",
+    )
+    p_pipe.add_argument(
+        "--no-merge", action="store_true", default=False,
+        help="回退老链路：不做音频装箱，长文由子智能体逐集听音撰写（块级转录关闭）",
+    )
     p_pipe.add_argument("--sessdata", help="Optional SESSDATA cookie", default=None)
     p_pipe.add_argument("--douyin-cookie", dest="douyin_cookie", default=None, help=DOUYIN_COOKIE_HELP)
     p_pipe.add_argument(
@@ -1052,6 +1189,24 @@ def main():
              "未指定时打印风格菜单并请用户确认，确认不了即终止任务。"
              "另有 consulting/interview/review/livestream 四种形态已登记但提示词未提供，命中即终止。",
     )
+
+    # merge-audio：块级转录链路的离线入口（单独重跑装箱合并，幂等）
+    p_merge = subparsers.add_parser(
+        "merge-audio", help="Merge per-episode audio into transcription blocks and export block task books"
+    )
+    p_merge.add_argument("workspace", help="Path to an existing course workspace (contains parts.json and audio/)")
+    p_merge.add_argument(
+        "--block-minutes", type=float, default=None,
+        help="块时长目标（分钟）；缺省取 BVB_AUDIO_BLOCK_MINUTES，再缺省 60",
+    )
+    p_merge.add_argument("--force", action="store_true", help="Rebuild blocks even if the manifest signature matches")
+
+    # split-transcript：把块级逐字稿切回分集（机械切分，幂等）
+    p_split = subparsers.add_parser(
+        "split-transcript", help="Split block transcripts into per-episode transcripts under subtitles/"
+    )
+    p_split.add_argument("workspace", help="Path to an existing course workspace (contains audio/_blocks/blocks.json)")
+    p_split.add_argument("--block", type=int, default=None, help="Only split this block id (default: all blocks)")
 
     # info
     p_info = subparsers.add_parser("info", help="Show environment & toolchain readiness status")
@@ -1167,6 +1322,8 @@ def main():
         "audio": cmd_audio,
         "transcribe": cmd_transcribe,
         "pipeline": cmd_pipeline,
+        "merge-audio": cmd_merge_audio,
+        "split-transcript": cmd_split_transcript,
         "cluster-notes": cmd_cluster_notes,
         "cluster-articles": cmd_cluster_articles,
         "dedup": cmd_dedup,

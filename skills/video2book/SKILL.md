@@ -1,10 +1,10 @@
 ---
 name: video2book
-description: 把 B 站、YouTube、抖音长视频/系列网课或本地音视频重构为精读教材长文、模块合辑全书与思维导图复习笔记的完整技能，自带多平台统一媒体内核、音频提取、两趟语义聚合、双通道听音与多阶段门禁工具链。当用户提出「把网课/视频做成教材」「整理成复习笔记或思维导图」「这门课帮我精读一遍」「B 站/油管/抖音这个合集重构成文档」，或给出本地课程目录要求系统化整理时，使用本技能。
+description: 把 B 站、YouTube、抖音长视频/系列网课或本地音视频重构为精读教材长文、模块合辑全书与思维导图复习笔记的完整技能，自带多平台统一媒体内核、音频提取与块级转录（把连续几集拼成块、按块一次转录后按时间表切回分集逐字稿）、两趟语义聚合、双通道听音（回退链路）与多阶段门禁工具链。当用户提出「把网课/视频做成教材」「整理成复习笔记或思维导图」「这门课帮我精读一遍」「B 站/油管/抖音这个合集重构成文档」，或给出本地课程目录要求系统化整理时，使用本技能。
 license: MIT
 metadata:
   author: LINJIANG12
-  version: 2.3.0
+  version: 2.5.0
   category: learning-and-education
   compatibility: Python 3.10+；系统 ffmpeg 在 PATH；宿主需具备 read_audio 或 read_media 听音通道之一。
 ---
@@ -24,12 +24,19 @@ metadata:
 > 1. **黑盒调用原则（严禁窥探与私造脚本）**：
 >    - 严禁阅读或修改底层实现源码（如 `src/` 内部代码）来寻找“捷径”；
 >    - **严禁编写任何 `gen_*.py` 等离线批量造文脚本**来伪造、填充产物。所有任务必须通过官方 CLI 命令与原生多模态工具链推进；
-> 2. **音频事实保真原则（Strict Audio Grounding）**：
->    - 所有 `articles/PXX_*.md` 的撰写，必须建立在**真正处理过本集音频**的基础之上。按宿主能力二选一（先看自己的工具列表里有哪个，不要猜）：
+> 2. **逐字稿事实保真原则（Strict Transcript Grounding）**：
+>    - 所有 `articles/PXX_*.md` 的撰写，必须建立在**本集逐字稿**的基础之上。默认链路是**块级转录**：
+>      专职转录角色按**块**取音（一块覆盖连续的几集，块的装箱与拼接见 §4.2），产出块级逐字稿后
+>      按块内时间表切成 `subtitles/PXX_<标题>_逐字稿.md`；**写作角色读逐字稿写长文，不再听音频**；
+>    - 已有 `subtitles/PXX_*_clean.txt`（人工清洗稿或旧链路的逐集文本）的集**直接复用**那份语料，
+>      不为了统一格式把已经存在的逐字稿再转录一遍（那是纯烧钱）；
+>    - 回退链路（`pipeline --no-merge`）仍走「逐集取音」，那时按宿主能力二选一（先看自己的工具列表里有哪个，不要猜）：
 >      - **有原生音频模态**（工具列表里有 `read_audio`）→ 调用 `read_audio(output_mode="file")` 提取切片，再用**宿主自己的文件查看能力**（能直接感知音频内容的那件工具，各平台工具名见 `references/host-tools/`）真正聆听；
 >      - **没有原生音频模态**（只有 `read_media`）→ 调用 `read_media` 由**外部模型代读**，取回逐字稿/讲解文本作为事实依据；
->      - 两条通道的选择规则与分页契约见 §4.2；**无论走哪条，都必须拿到本集真实讲解内容**，不得跳过取音频这一步直接编造；
->    - 正文必须包含原视频讲师亲口讲述的真实案例、例题或板书比喻（Grounding Evidence），严禁脱离音频凭空脑补；
+>      - 两条通道的选择规则与分页契约见 §4.2；**无论走哪条，都必须拿到本集真实讲解内容**，不得跳过取语料这一步直接编造；
+>    - 正文必须包含讲师亲口讲述的真实案例、例题或板书比喻（Grounding Evidence），严禁脱离逐字稿凭空脑补；
+>    - **这一条从「纪律」升级为可校验项了**：`scripts/article_grounding_check.py` 用逐字稿的技术实体
+>      （英文标识符与多位数字）在长文里的覆盖率报警，低于下限即指出「这篇没怎么用语料」（见 §4.5）；
 > 3. **拒绝脱缰黑话（Context Preservation）**：
 >    - 高校经典基础课（如数据结构、操作系统、数据库）严禁脱离课程实际，生搬硬套互联网大厂“微服务”、“分布式架构师”、“NVMe SSD”等浮夸黑话。
 > 4. **提示词风格红线（Prompt-Style Gate）**：
@@ -38,17 +45,28 @@ metadata:
 >      仍然确认不了就**以退出码 4 终止任务**（工具层不猜、不兜底）；
 >    - 另有咨询答疑 / 访谈对谈 / 测评体验 / 直播闲聊四种形态只登记、未提供提示词：命中即终止；
 >      **严禁换个名字硬套、严禁手工套用别的提示词继续写**。
-> 5. **阶段一派发纪律（执行者约束，2026-09 起）**：
->    - **课程总时长 ≤ 60 分钟** → 主 Agent 可串行亲做（听音 + 写作都在主上下文里完成）；
->    - **总时长 > 60 分钟** → **必须派发**：默认 **一集一子智能体**；当「集数 ≥ 15 且单集预算 ≤ 40k token」时，
+> 5. **阶段一派发纪律（执行者约束，2026-09 起；2026-09 块级转录版）**：
+>    - **课程总时长 ≤ 60 分钟** → 主 Agent 可串行亲做（取语料 + 写作都在主上下文里完成）；
+>    - **总时长 > 60 分钟** → **必须派发**。默认链路按**两类角色**分工，主 Agent 只做调度：
+>      - **转录角色（专职，建议 2 个）**：只做音频转录这一件事，各自连续消费自己那批块
+>        （取载荷：`queue_tracker.py --next-transcribe N`），**不回传正文**，只回报一行；
+>      - **写作角色（持续派发）**：按块领任务、读块内各集逐字稿写长文
+>        （取载荷：`queue_tracker.py --next-article N`，只返回逐字稿已就绪且长文缺失的集）；
+>      - 两类角色**交错推进**：先推一波转录，逐字稿一就绪就派写作，不要等全部转录结束才开工；
+>    - 回退链路（`--no-merge`）下的写作粒度：**一集一子智能体**；当「集数 ≥ 15 且单集预算 ≤ 40k token」时，
 >      按 `suggest_batch` 建议改为 **3~5 集打包给一个子智能体**（省派发协调开销，代价是返修粒度变粗）；
->    - **窗口兜底（仅通道 A 适用）**：实算音频 token（时长 × 系数）超过窗口 60% 时，即使不足 60 分钟也必须派发。
+>    - **窗口兜底（仅回退链路的通道 A 适用）**：实算音频 token（时长 × 系数）超过窗口 60% 时，即使不足 60 分钟也必须派发。
 >      音频 token 系数与窗口**随宿主而异**，可用 `BVB_AUDIO_TOKENS_PER_SEC`（默认 `32`，Gemini 原生音频口径；
 >      OpenAI input_audio 约 `100`）与 `BVB_CONTEXT_WINDOW_TOKENS`（默认 `1000000`）覆盖；工具会打印实算值；
 >      走**通道 B**（外部模型代读，见 § 4.2）时音频根本不进宿主上下文，这条预算口径不适用，以外部模型的额度为准；
->    - **主 Agent 不得代听代写**（除上两条兜底），只负责取载荷、派生、收回报与验收；
->    - 宿主不具备子智能体能力时，显式声明「单集串行模式」，每 5~8 集换新会话，**不得**因此跳过红线 2（音频保真）；
->    - **纪律与门禁的边界**：执行者身份、是否真听音频，工具层**无法校验**（见 § 4.5）；不要把它当成机器门禁。
+>      **块级转录链路的写作侧不吃音频**（只吃逐字稿文本），所以这条预算只在转录侧成立；
+>    - **主 Agent 不得代听代写**（除上两条兜底），只负责取载荷、派发、跑门禁；
+>    - 宿主不具备子智能体能力时，显式声明「单集串行模式」，每 5~8 集换新会话，**不得**因此跳过红线 2（逐字稿保真）；
+>    - **门禁放行**：全部长文完成后先用脚本验收（`queue_tracker.py --summary` 看 `STAGE1_DONE=1`，
+>      再跑 `article_grounding_check.py` / `note_quality_check.py` / `render_compat_check.py`），
+>      **合格才允许派发后续模块任务**；脚本判不了的内容质量仍靠抽样复核兜底；
+>    - **纪律与门禁的边界**：执行者身份、谁写的，工具层**无法校验**（见 § 4.5）；
+>      但「长文是否基于本集逐字稿」已从纪律升级为可校验（`article_grounding_check.py`）。
 
 ---
 
@@ -157,23 +175,44 @@ python src/cli.py logout                                   # 撤销保存（两�
         ➔ 打印风格菜单 + exit 4 终止任务（不猜、不降级、不硬套）
           │
           ▼
-【准备阶段：结构解析与音频双轨直出】
+【准备阶段：结构解析 · 音频收齐 · 装箱成块】
   python src/cli.py pipeline "<链接或路径>" [--all | --range X-Y] --article-type learning [--sessdata "..."]
   ├── 解析分 P 结构 (parts.json)
   ├── 流式下载 16kHz 单声道音频至 audio/
+  ├── 装箱：按**集边界**把连续几集拼成块 → audio/_blocks/BLK01_P08-P12.m4a + blocks.json
+  │      （块时长目标可配：--block-minutes N 或 BVB_AUDIO_BLOCK_MINUTES，默认 60 分钟；
+  │        单块硬上限 BVB_AUDIO_ONESHOT_LIMIT_MINUTES，默认 75 分钟——超过会被取音侧自动分卷）
+  │      ※ 块只用于「按块转录、少调用几次取音接口」；**一集绝不劈进两块**；
+  │        不需要装箱时加 --no-merge 回退「逐集取音」老链路
+  ├── 导出块级转录任务书：subtitles/BLK01_P08-P12_转录任务书.md（内含块内每集的起止时间表）
   └── 可选去重：python src/cli.py dedup "<链接或路径>"（pipeline 不会自动调用，需手动执行）
           │
           ▼
-【阶段一：单集教材长文直出（派发回路；总时长 ≤ 60 分钟可主 Agent 串行）】
-  主 Agent 取载荷：python scripts/queue_tracker.py --next 5 --log-dispatch --json
-  （载荷已含每集 任务书路径 / 切片清单 / 目标长文路径 / 本集 token 预算，禁止手抄路径）
-  ├── 1. 派生：一集一个子智能体（集数 ≥15 且单集 ≤40k token 时 3~5 集打包），并发 5~6
-  ├── 2. 子智能体取音频：有 `read_audio` 走原生听音（read_audio → 宿主的文件查看能力）；无则用 `read_media` 交由外部模型代读（两条通道同一分页契约，见 §4.2）
-  ├── 3. 子智能体处理音频：原生通道用宿主的文件查看能力感知讲师原声与板书案例；外部模型通道直接读回逐字稿/讲解文本（必须真过一遍，见红线 2）
-  ├── 4. 子智能体撰写教材：依音频实际讲解内容撰写深入技术长文 (载入所选风格提示词)
-  ├── 5. 子智能体落盘：用宿主的文件写入能力写入 articles/PXX_*_精读文章.md（严格保留，严禁八股模板）
-  ├── 6. 子智能体回报一行：P07 | 文件路径 | 字节数 | 执行者（**不回传正文**）
-  └── 7. 主 Agent 验收门禁：python scripts/queue_tracker.py --summary 确认 STAGE1_DONE=1 方可放行
+【阶段一 A：块级转录（由**专职转录角色**承担，建议 2 个角色并行消费块队列，只做这一件事）】
+  转录角色取载荷：python scripts/queue_tracker.py --next-transcribe 2 --json
+  ├── 1. 读块：subtitles/BLK01_P08-P12_转录任务书.md（块音频绝对路径 + 块内时间表）
+  ├── 2. 转录：read_media(file_path=块音频, mode="transcribe", duration_minutes=块时长)
+  │      并把任务书 2.1 节那段「行首 [HH:MM:SS] 时间戳」要求**原样**传进 instruction
+  │      （缺了它，块级逐字稿无法机械切回分集）
+  ├── 3. 落盘：完整转录正文写入 subtitles/BLK01_P08-P12_逐字稿.md
+  ├── 4. 切分：python src/cli.py split-transcript "<工作区目录>" --block 1
+  │      按块内时间表机械切成 subtitles/PXX_<标题>_逐字稿.md（不需要手工誊抄）
+  │      ※ 报「边界未锚定」说明交界处缺时间戳：按 2.1 节重读该块后重跑本命令
+  └── 5. 回报一行：BLK01 | 逐字稿路径 | 字节数 | 切分结果（**不回传正文**）
+          │
+          ▼
+【阶段一 B：单集教材长文直出（派发回路；逐字稿一就绪就派写作，不必等全部转录完）】
+  主 Agent 取载荷：python scripts/queue_tracker.py --next-article 5 --log-dispatch --json
+  （只返回「逐字稿已就绪且长文缺失」的集；载荷含 任务书路径 / 逐字稿路径 / 目标长文路径，禁止手抄路径）
+  ├── 1. 派生：一个子智能体领一个块、依次写块内各集长文，并发 5~6
+  ├── 2. 子智能体读语料：打开发给它的本集逐字稿（任务书第 1 节给了绝对路径）
+  │      ※ 逐字稿未就绪时**立即停止并回报**，不得凭分集标题编造、也不得去别处找音频补听
+  ├── 3. 子智能体撰写教材：依逐字稿实际讲解内容撰写深入技术长文 (载入所选风格提示词)
+  ├── 4. 子智能体落盘：用宿主的文件写入能力写入 articles/PXX_*_精读文章.md（严格保留，严禁八股模板）
+  ├── 5. 子智能体回报一行：P07 | 文件路径 | 字节数 | 执行者（**不回传正文**）
+  └── 6. 主 Agent 验收门禁：python scripts/queue_tracker.py --summary 确认 STAGE1_DONE=1；
+         再跑 python scripts/article_grounding_check.py --strict 核对长文确实基于逐字稿；
+         两关都过才放行阶段二（脚本判不了的内容质量靠抽样复核兜底）
           │
           ▼
 【阶段二：两趟语义聚合（模块 ➔ 笔记）＋ 教材整编，需 Agent + 子智能体往返】
@@ -219,12 +258,42 @@ python src/cli.py logout                                   # 撤销保存（两�
 
 ### 4.1 任务来源
 
-先由工具链导出任务书（`pipeline` 或 `transcribe` 命令），产物位于 `articles/PXX_*_TASK.md`，内含该集音频切片清单与所选类型的文章撰写提示词。
+阶段一由 `pipeline` 导出**两类任务书**，各管一段：
+
+| 任务书 | 位置 | 交给谁 | 内含 |
+| :--- | :--- | :--- | :--- |
+| **块级转录任务书** | `subtitles/BLK01_P08-P12_转录任务书.md` | **专职转录角色** | 块音频绝对路径、块内每集起止时间表、逐字稿目标路径、时间戳要求、切分命令 |
+| **单集长文任务书** | `articles/PXX_*_TASK.md` | 写作角色（子智能体） | 本集逐字稿路径（**唯一事实来源**）、目标长文路径、所选类型的文章撰写提示词 |
+
+单集长文任务书**不再夹带音频切片清单**（那是回退链路 `--no-merge` 的形态）：逐字稿链路的
+写作侧只吃文本，音频留在块里、由转录角色消费。任务书第 1 节会写明「本集逐字稿（唯一事实来源）」
+与「所属块音频（备查，不必再听）」，并给出前置条件：**逐字稿缺失就立即停止并回报**，不得编造。
 
 ### 4.2 工具链调用链路
 
-阶段一的音频处理有**两条通道**，按宿主的原生音频能力二选一。判断依据是**你自己的工具列表**，
-不要猜：有 `read_audio` 就走原生，只有 `read_media` 就走外部模型代读。
+**默认链路是「块级转录 → 分集逐字稿 → 读逐字稿写长文」**，取音只发生在转录角色身上：
+
+- 块由 `pipeline` 在收齐音频后自动装箱（按集边界拼连续几集，目标时长
+  `--block-minutes` / `BVB_AUDIO_BLOCK_MINUTES`，默认 60 分钟；单块硬上限
+  `BVB_AUDIO_ONESHOT_LIMIT_MINUTES`，默认 75 分钟——超过取音侧一次性就绪阈值会被自动分卷，
+  调用次数反而回升）。清单落在 `audio/_blocks/blocks.json`，是切分逐字稿的**唯一事实源**；
+- 转录角色按块调用 `read_media(mode="transcribe")`（**必须**把任务书 2.1 节的
+  「行首 `[HH:MM:SS]` 时间戳」要求原样传进 `instruction`），把整块正文写入
+  `subtitles/BLK01_P08-P12_逐字稿.md`；
+- 切分由工具层做，不需要手工誊抄：`python src/cli.py split-transcript "<工作区>" --block 1`
+  按块内时间表把块级稿切成 `subtitles/PXX_<标题>_逐字稿.md`。切分是**确定性**的：
+  时间戳落在哪一集的时间区间里就归哪一集。两条降级路径都会如实报告，不会静默出错：
+  **边界未锚定**（交界处缺时间戳，该处靠插值推定）与 **`unsplit`**（完全没有时间戳，
+  不切分、保留块级稿），两者都要求按任务书 2.1 节重读该块后重跑切分命令；
+- 已有 `subtitles/PXX_*_clean.txt`（人工清洗稿或旧链路逐集文本）的集**直接复用**，
+  写作角色照它写长文，不重复转录；
+- **改块时长要留意**：块编号与集号区间由「目标时长 + 集时长分布」决定，改一次
+  `--block-minutes` 就可能把 15 块变成 12 块。重跑时会自动**作废与本次装箱不符的旧转录任务书**
+  （否则它是一份可被派发的幽灵任务），块音频与块级逐字稿只报告不删——它们可能仍被
+  已切出的分集逐字稿引用。
+
+**回退链路（`pipeline --no-merge`）** 才使用下面的两条听音通道，按宿主的原生音频能力二选一。
+判断依据是**你自己的工具列表**，不要猜：有 `read_audio` 就走原生，只有 `read_media` 就走外部模型代读。
 
 | | 通道 A：宿主原生听音（`omni-media`） | 通道 B：外部模型代读（`omni-media-ext`） |
 | :--- | :--- | :--- |
@@ -263,7 +332,7 @@ python src/cli.py logout                                   # 撤销保存（两�
    填大了会被载荷预算收窄）；只有返回文本里 `OMNI_STATUS` 显示 `is_finished=false` 时，
    才按其中的 `next_start_time` / `next_duration_minutes` 续读下一片；
 2. **续读同构**：返回文本首行的 `OMNI_STATUS` 注释与通道 A **同名同义**
-   （`is_finished` / `next_start_time` / `next_duration_minutes` / `mode`），
+   （`contract_version: 1` / `is_finished` / `next_start_time` / `next_duration_minutes` / `mode`），
    因此**同一段续读循环在两条通道之间可以无感切换**，只需换工具名；
    注意 `mode` 是切片模式（`oneshot` / `chunked`），本次任务预设看 `task` 字段；
    若返回里带 `clamped: true`，说明请求的时长被载荷上限收窄，按 `OMNI_STATUS` 的续读参数接着读；
@@ -284,7 +353,7 @@ python src/cli.py logout                                   # 撤销保存（两�
 
 | 环节 | 做法 |
 | :--- | :--- |
-| 取载荷 | 派发前**必须**跑 `python scripts/queue_tracker.py --next N --log-dispatch --json`；载荷已含每集 `task_file` / `audio_slices` / `target_article` / 本集 token 预算，**禁止手抄路径**（手抄会导致同一集被派两次，白烧 35~90k token） |
+| 取载荷 | 派发前**必须**跑工具取载荷，**禁止手抄路径**（手抄会导致同一集被派两次，白烧 35~90k token）。两侧各一个入口：**转录侧** `queue_tracker.py --next-transcribe N --json`（块音频 / 块内时间表 / 逐字稿目标路径）；**写作侧** `queue_tracker.py --next-article N --log-dispatch --json`（只返回逐字稿已就绪且长文缺失的集，载荷含每集 `task_file` / `transcript_file` / `target_article`）。回退链路用 `--next N` |
 | 派发粒度 | 默认 **一集一子智能体**；当「集数 ≥ 15 且单集预算 ≤ 40k token」时按 `suggest_batch` 建议改为 **3~5 集/子智能体** |
 | 并发 | 建议 5~6（`suggest_workers` 给出建议值；不得超过宿主并发上限） |
 | 子智能体输入 | **直接转交该集任务书**（`articles/PXX_*_TASK.md`）——它已含完整撰写提示词与红线，派发词不必也不得重述规范；**主 Agent 不代读、不代听** |
@@ -300,22 +369,43 @@ python src/cli.py logout                                   # 撤销保存（两�
 ### 4.4 阶段验收
 
 ```bash
-python scripts/queue_tracker.py --next 5 --json --log-dispatch   # 取派发载荷（含任务书/切片/目标路径/预算）
-python scripts/queue_tracker.py --summary    # 单行状态：TOTAL/DONE/PENDING/STAGE1_DONE + 派发建议
+# —— 转录侧 ——
+python scripts/queue_tracker.py --next-transcribe 2 --json   # 取待转录的块（含块音频/时间表/逐字稿目标）
+python src/cli.py split-transcript "<工作区目录>" [--block N] # 按块内时间表切出分集逐字稿（幂等）
+
+# —— 写作侧 ——
+python scripts/queue_tracker.py --next-article 5 --json --log-dispatch  # 只取「逐字稿已就绪且长文缺失」的集
+python scripts/queue_tracker.py --next 5 --json --log-dispatch   # 不过滤逐字稿（回退链路/排查用）
+python scripts/queue_tracker.py --summary    # 单行状态：TOTAL/DONE/PENDING/STAGE1_DONE + 块级转录进度
 python scripts/queue_tracker.py --pattern "<目录名关键字>"   # 多课程并存时指定工作区（否则取最近活动的那个）
+
+# —— 放行门禁（全部长文完成后，合格才派发后续模块任务）——
+python scripts/article_grounding_check.py --strict   # 长文是否真的基于本集逐字稿（实体覆盖率）
+python scripts/note_quality_check.py --strict        # 笔记成色（阶段二用）
+python scripts/render_compat_check.py --strict       # 渲染合规
 ```
 
-仅当 `STAGE1_DONE=1`（全部分集长文均 ≥ 1000 字节）时，方可进入阶段二。
+- `STAGE1_DONE=1`（全部分集长文均 ≥ 1000 字节）是**硬前提**；
+- 块级转录进度看 `--summary` 的 `BLOCKS/BLOCKS_TRANSCRIBED/TRANSCRIPT_READY` 三项。
+  **它们是独立信号，不参与 `STAGE1_DONE`**：老工作区（听音链路、无块清单）三项为 0，
+  不能因此判它未完工；
+- 全部门禁通过后才进入阶段二。
 
 ### 4.5 门禁 vs 纪律（边界声明，不要把纪律当成机器门禁）
 
 | 项 | 性质 | 工具层能否校验 |
 | :--- | :--- | :--- |
-| 长文 ≥ 1000 字节、任务书存在、切片清单齐备 | **机器门禁** | ✅ 可校验（`queue_tracker` / `sync` / `note_quality_check`） |
+| 长文 ≥ 1000 字节、任务书存在、逐字稿/切片清单齐备 | **机器门禁** | ✅ 可校验（`queue_tracker` / `sync` / `note_quality_check`） |
 | 长文风格命中已提供预设（`learning` / `legacy`） | **机器门禁** | ✅ 未命中即 `exit 4` |
+| **长文是否基于本集逐字稿**（红线 2 的默认链路） | **机器门禁（启发式）** | ✅ `article_grounding_check.py`：逐字稿技术实体（英文标识符 + 多位数字）在长文里的覆盖率；低于下限报警，`--strict` 时非零退出。**它是启发式**：只测技术实体，中文表述为主但忠实于逐字稿的长文也会偏低；无逐字稿的集不参与判定 |
 | **谁写的**（主 Agent 还是子智能体） | **纪律条款** | ❌ 不可校验（只能靠 `.dispatch_log.jsonl` 观察派发节奏） |
-| **是否真的听了音频**（红线 2） | **纪律条款** | ❌ 不可校验（只能要求正文含音频里的真实案例/例题） |
+| **是否真的听过音频**（仅 `--no-merge` 回退链路） | **纪律条款** | ❌ 不可校验（只能要求正文含音频里的真实案例/例题） |
+| **转录是否忠于原声**（块级转录链路） | **纪律条款** | ❌ 不可校验（ASR 质量由外部模型决定；写作侧只能照逐字稿写，不替它补听） |
+| 转录角色是否只有 2 个、写作是否按块派发 | **纪律条款** | ❌ 不可校验 |
 | 并发与打包是否按建议执行 | **纪律条款** | ❌ 不可校验 |
+
+> **一句话**：`article_grounding_check.py` 把「文章用了语料没有」变成了可量化的门禁，但它只能
+> 证明「用了」，不能证明「用得对」——取舍是否恰当、有没有过度展开，仍需抽样复核。
 
 ---
 
@@ -478,11 +568,17 @@ python src/cli.py sync                           # 按磁盘对账回填 manifes
 # 1. 解析合集结构与时长
 python src/cli.py parse "<链接或本地目录>" [--json]
 
-# 2. 执行音频下载流水线（阶段一：收音频 + 派发单集文章任务书）
+# 2. 执行音频下载流水线（准备阶段 + 导出两类任务书：收音频 → 装箱成块 → 块级转录任务书 + 单集长文任务书）
 #    注意：--article-type 是长文提示词风格，**必填**；learning=学习（推荐）/ legacy=旧版
 #    不传则打印风格菜单并当场询问，确认不了即 exit 4 终止
 python src/cli.py pipeline "<链接或本地路径>" --all --article-type learning
 python src/cli.py pipeline "<链接或本地路径>" --range 1-10 --article-type legacy
+python src/cli.py pipeline "<链接或本地路径>" --all --article-type learning --block-minutes 45  # 块时长目标（默认 60）
+python src/cli.py pipeline "<链接或本地路径>" --all --article-type learning --no-merge            # 回退「逐集听音」老链路
+
+# 2b. 块级转录链路的两个离线入口（幂等，可反复重跑）
+python src/cli.py merge-audio "<工作区目录>" [--block-minutes 45] [--force]  # 只重跑装箱合并 + 重出块级转录任务书
+python src/cli.py split-transcript "<工作区目录>" [--block 1]                # 块级逐字稿 → subtitles/PXX_*_逐字稿.md
 
 # 3. 单集文章任务书（单集直出长文；已存在长文则跳过）
 python src/cli.py transcribe "<链接或本地路径>" --page 1 --article-type learning
@@ -490,10 +586,12 @@ python src/cli.py transcribe "<链接或本地路径>" --page 1 --article-type l
 # 4. 音频指纹去重（自动复用相同分集的语料与长文，0 Token 消耗）
 python src/cli.py dedup "<链接或本地路径>"
 
-# 5. 动态任务队列追踪器（待办分集 + 阶段门禁 + 派发建议/载荷/台账）
+# 5. 动态任务队列追踪器（待办分集 + 阶段门禁 + 派发建议/载荷/台账 + 块级转录进度）
 python scripts/queue_tracker.py --next 5                          # 待办分集与目标路径
 python scripts/queue_tracker.py --next 5 --json --log-dispatch     # 派发载荷（转交子智能体）+ 写派发台账
-python scripts/queue_tracker.py --summary                         # 单行状态 + SUGGEST_WORKERS/BATCH
+python scripts/queue_tracker.py --next-transcribe 2 --json         # 转录侧：取待转录的块（块音频/时间表/逐字稿目标）
+python scripts/queue_tracker.py --next-article 5 --json --log-dispatch  # 写作侧：只取「逐字稿已就绪且长文缺失」的集
+python scripts/queue_tracker.py --summary                         # 单行状态 + SUGGEST_WORKERS/BATCH + 转录进度
 
 # 6. 阶段二：整编模块教材全书（按第一趟模块分册，输出至 textbooks/，原有 articles/ 完整保留）
 python src/cli.py cluster-articles "<链接或本地路径>"                             # 已有教材默认复用
@@ -509,6 +607,7 @@ python src/cli.py cluster-notes "<链接或本地路径>" --kernel-index        
 python src/cli.py cluster-notes "<链接或本地路径>" --block-id 3                   # 只派发第 3 篇笔记（--start-block/--end-block 同理）
 
 # 8. 交付前质检与收尾（手动体检，不在流水线上拦人）
+python scripts/article_grounding_check.py --strict  # 长文是否真的基于本集逐字稿（实体覆盖率，启发式）
 python scripts/note_quality_check.py --strict      # 笔记成色体检（套话/空壳标题/分集标题/断句/结构缺件；含默认不拦的提示项）
 python scripts/render_compat_check.py --strict     # 渲染合规体检（告警块/裸字符画/围栏配对；含默认不拦的提示项）
 python src/cli.py cleanup --dry-run                # 任务书回收预演（成品产出后才回收，每类留 1 份范本）
@@ -526,7 +625,7 @@ python src/cli.py logout
 > 阶段一的音频处理依赖 MCP 工具：**有原生音频模态的宿主**用 `omni-media:read_audio`（零凭证，服务本体在配套仓库的 `mcp/`），
 > **没有原生音频模态的宿主**用 `omni-media-ext:read_media`（服务本体在配套仓库的 `mcp-ext/`，由配置文件指定的外部模型代读）。
 > 两个服务同属仓库 [LINJIANG12/omni-media](https://github.com/LINJIANG12/omni-media)。
-> 两者各自独立成包、**互不 import**，与技能无运行时依赖，装一次即可长期使用；**分页契约同构**（同一 `OMNI_STATUS` 注释与续读循环），
+> 两者各自独立成包、**互不 import**，与技能无运行时依赖，装一次即可长期使用；**分页契约同构**（同一 `OMNI_STATUS` 注释、`contract_version: 1` 与续读循环），
 > 切换只需换工具名。选择规则见 §4.2，接入方式见 `references/install.md`。
 
 ### 6.1 完整参数表（速查表之外的开关都在这里）
@@ -536,7 +635,9 @@ python src/cli.py logout
 | `parse` | `--limit N` / `--json` | 列表最多显示 N 条（默认 10）/ 输出 JSON |
 | `audio` | `--page N` `--all` `--range X-Y` `--quality low\|medium\|high` `--url-only` `--output DIR` `--chunk-minutes N` `--json` `--force` | 单集或批量取音频；`--url-only` 只打印直链不下载；`--chunk-minutes` 默认 10；`--output` 覆盖音频目录 |
 | `transcribe` | `--page N` `--output PATH` `--article-type <风格>` | 单集文章任务书；`--output` 仅在长文已存在时用于导出副本 |
-| `pipeline` | `--all` `--range X-Y` `--page N` `--quality <档>` `--prefetch-workers N` `--skip-failed` `--chunk-minutes N`（默认 60） `--force` `--article-type <风格>` `--task NAME` `--base-dir DIR` | 阶段一主入口；`--skip-failed` 把音频失败集记入跳过名单继续跑；`--force` 重派已完成分集 |
+| `pipeline` | `--all` `--range X-Y` `--page N` `--quality <档>` `--prefetch-workers N` `--skip-failed` `--chunk-minutes N`（默认 60） `--block-minutes N` `--no-merge` `--force` `--article-type <风格>` `--task NAME` `--base-dir DIR` | 阶段一主入口；`--skip-failed` 把音频失败集记入跳过名单继续跑；`--block-minutes` 是**块时长目标**（默认取 `BVB_AUDIO_BLOCK_MINUTES`，再默认 60；硬上限看 `BVB_AUDIO_ONESHOT_LIMIT_MINUTES`）；`--no-merge` 回退「逐集听音」链路；`--force` 重派已完成分集 |
+| `merge-audio` | `<工作区目录>` `--block-minutes N` `--force` | 单独重跑音频装箱合并并重出块级转录任务书（幂等；`--force` 忽略指纹重建块） |
+| `split-transcript` | `<工作区目录>` `--block N` | 把块级逐字稿按块内时间表切成 `subtitles/PXX_*_逐字稿.md`（幂等；`--block` 只处理指定块） |
 | `cluster-notes` | `--force` `--force-plan` `--kernel-index` `--block-id N` `--start-block N` `--end-block N` | 两趟语义聚合；后三个按**笔记序号**只处理指定区间（参数名是历史遗留）；`--force` 强制重导笔记任务书 |
 | `cluster-articles` | `--force` | 默认复用已有教材，`--force` 按最新章节重编 |
 | `dedup` | `--dry-run` | 只报告重复分集，不复制语料与长文 |
@@ -544,7 +645,8 @@ python src/cli.py logout
 | `sync` | `--dry-run` `--task 关键字` `--all` | 按磁盘对账回填 manifest |
 | `note_quality_check.py` | `--strict` `--require-structure` `--max-truncated N`（默认 4） `--dir` `--task` `--base-dir` `--json` | 结构缺件默认只提示，`--require-structure` 才纳入门禁 |
 | `render_compat_check.py` | `--strict` `--require-lang` `--dir` `--task` `--base-dir` `--json` | 语言标识默认只提示，`--require-lang` 才纳入门禁 |
-| `queue_tracker.py` | `--next N` `--summary` `--json` `--dir PATH` `--pattern 关键字` `--base-dir DIR` `--log-dispatch` | 派发前取载荷：`--next N --json`（含任务书/切片/目标长文/预算）；多课程并存时必须用 `--dir`/`--pattern`；`--base-dir` 缺省即产物根；`--log-dispatch` 追加派发台账（默认关闭） |
+| `queue_tracker.py` | `--next N` `--next-article N` `--next-transcribe N` `--summary` `--json` `--dir PATH` `--pattern 关键字` `--base-dir DIR` `--log-dispatch` | 派发前取载荷，三个入口互斥：`--next-transcribe N`（转录侧：待转录的块）、`--next-article N`（写作侧：只返回逐字稿已就绪且长文缺失的集）、`--next N`（不过滤，回退链路/排查用）；`--summary` 额外给出 `BLOCKS/BLOCKS_TRANSCRIBED/TRANSCRIPT_READY` 转录进度；多课程并存时必须用 `--dir`/`--pattern`；`--log-dispatch` 追加派发台账（默认关闭） |
+| `article_grounding_check.py` | `--strict` `--min-freq N`（默认 2） `--min-coverage F`（默认 0.5） `--dir` `--task` `--base-dir` `--json` | 长文依据级校验：逐字稿技术实体在长文里的覆盖率，低于下限报警（默认提示级，`--strict` 才纳入门禁）；无逐字稿的集不参与判定 |
 | `cleanup_tasks.py` | `--keep N` `--dry-run` `--task` `--json` `--strict` | `cleanup` 的独立脚本入口（功能一致） |
 
 ---
@@ -569,6 +671,7 @@ python src/cli.py logout
 ```text
 <产物根>/<task>/
 ├── audio/                     # 提取的音频与自动切片
+│   └── _blocks/               #   块级转录的块音频与清单（BLK01_P08-P12.m4a + blocks.json）
 ├── parts.json                 # 分集拓扑缓存（**集号基准**：接口受阻时离线自愈依赖它；局部运行按 page 合并，不会截断）
 ├── manifest.json              # 任务清单与断点续跑状态（可用 `cli.py sync` 按磁盘对账回填）
 ├── topic_plan.json            # ① 模块规划（Agent 产出；消费方＝教材）
@@ -578,7 +681,11 @@ python src/cli.py logout
 ├── articles/                  # 单集长文 + 派发任务书
 │   ├── PXX_*_TASK.md          #   单集长文任务书（临时派发物，完成后回收，保留 P01 一份范本）
 │   └── PXX_*_精读文章.md       #   单集长文（最终产物，严格保留）
-├── subtitles/                 # 逐字稿与人工语料的**正式**存放位置（通道 B 代读文本、人工整理的 PXX_*_clean.txt）
+├── subtitles/                 # 逐字稿与人工语料的**正式**存放位置
+│   ├── BLKxx_Paa-Pbb_转录任务书.md  #   块级转录任务书（临时派发物）
+│   ├── BLKxx_Paa-Pbb_逐字稿.md      #   块级原始逐字稿（转录角色的产出，可溯源）
+│   ├── PXX_<标题>_逐字稿.md         #   分集逐字稿（写作角色的唯一事实依据，由 split-transcript 切出）
+│   ├── PXX_<标题>_clean.txt         #   人工清洗稿 / 旧链路逐集文本（**有则优先复用**，不重复转录）
 │   └── kernels/               #   知识元（可选索引，历史工作区遗留，默认不参与笔记生成）
 ├── notes/                     # ③ 笔记 + 派发任务书（每类保留 1 份任务书范本）
 │   ├── 笔记XX_*_TASK.md       #   笔记任务书（临时派发物，成品产出后回收）
