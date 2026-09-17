@@ -28,6 +28,12 @@ def quiet_kwargs(**kwargs: Any) -> dict:
     if os.name == "nt" and CREATE_NO_WINDOW:
         kwargs.setdefault("creationflags", CREATE_NO_WINDOW)
     kwargs.setdefault("stdin", subprocess.DEVNULL)
+    if kwargs.get("text") or kwargs.get("universal_newlines"):
+        # Windows runners default to the active ANSI code page (often cp1252).
+        # Project output is UTF-8, so decoding it with the default codec aborts
+        # reader threads and leaves stdout as None.
+        kwargs.setdefault("encoding", "utf-8")
+        kwargs.setdefault("errors", "replace")
     return kwargs
 
 

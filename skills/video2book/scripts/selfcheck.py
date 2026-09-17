@@ -157,10 +157,10 @@ def check_repo_separation():
     else:
         print(f"       (未检测到容器布局标记，跳过「容器根不得是 git 仓库」断言: home={HOME_ROOT})")
 
-    # 产物根必须位于两个仓库工作树之外，避免产物被误提交。
-    # 只在插件布局下判定：技能被单独安装时 REPO_ROOT 只是平台目录（如 ~/.claude），
-    # 默认产物根必然落在它里面，这条断言在该场景下没有意义。
-    if PLUGIN_LAYOUT:
+    # 容器布局下，产物根必须位于两个仓库工作树之外。独立 GitHub clone
+    # 没有容器标记，默认产物本就落在工作目录下的 output/，此时由 .gitignore
+    # 保障安全，不得把合法安装误判为错误。
+    if PLUGIN_LAYOUT and container:
         for repo_name, repo_root in (("skill", REPO_ROOT),
                                      (_paths.DEFAULT_MCP_REPO_DIRNAME, MCP_REPO_BASE)):
             if not repo_root.exists():
@@ -1363,7 +1363,7 @@ def check_sessdata_store_safety():
     # 两类凭证必须各占一个文件，否则后写会覆盖先写
     assert store_path() != douyin_store_path(), "两类凭证共用同一存档文件，会互相覆盖"
 
-    # 默认存档路径：必须落在产物根（两仓库工作树之外），且 skill/.gitignore 留有安全网。
+    # 默认存档路径：必须落在产物根，且 skill/.gitignore 留有安全网。
     # 两类凭证（B 站 SESSDATA / 抖音 Cookie）一并纳入，避免新增一类时漏掉安全网。
     _凭证文件 = ((DEFAULT_STORE_NAME, store_path()),
                  (DEFAULT_DOUYIN_STORE_NAME, douyin_store_path()))
@@ -1388,11 +1388,12 @@ def check_sessdata_store_safety():
             )
             assert not tracked.stdout.strip(), \
                 f"凭证存档已进入 {repo.name} 版本控制: {tracked.stdout.strip()}"
-            try:
-                _p.relative_to(repo)
-            except ValueError:
-                continue
-            raise AssertionError(f"凭证存档位于 {repo.name} 仓库工作树内")
+            if _paths.is_container_layout():
+                try:
+                    _p.relative_to(repo)
+                except ValueError:
+                    continue
+                raise AssertionError(f"凭证存档位于 {repo.name} 仓库工作树内")
 
 
 def check_cache_paths_anchored():
@@ -1405,7 +1406,7 @@ def check_cache_paths_anchored():
                      ("抖音凭证存档", douyin_store_path())):
         assert p.is_absolute(), f"{label}路径不是绝对路径: {p}"
         assert PRODUCTS_ROOT in p.parents, f"{label}路径未锚定产物根: {p}"
-        if PLUGIN_LAYOUT:
+        if PLUGIN_LAYOUT and _paths.is_container_layout():
             assert REPO_ROOT not in p.parents, f"{label}路径落在了代码仓库内: {p}"
 
     # 显式传入的相对路径按**容器根**解析（兼容拆分前的 `output/.wbi_keys.json` 写法）。
