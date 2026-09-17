@@ -1,24 +1,18 @@
-"""Lossless Audio Chunker using FFmpeg Stream Copy.
+"""Audio helpers: probing duration and formatting time strings.
 
-Optimized for multimodal AI models (Audio Agents / Multimodal LLMs):
-- Splits long lectures (e.g. 45min - 2hours) into 10-20 min semantic chunks
-- Zero re-encoding: uses `-acodec copy` for instantaneous (<0.1s) segmentation
-- Generates structured manifest with timestamps for downstream AI aggregation
+取音早已收敛到「块」这一层（见 `audio_merger`）：本模块只保留两个被块级链路复用的纯工具——
+`get_audio_duration`（ffprobe 优先、ffmpeg -i 兜底）与 `format_seconds`（HH:MM:SS）。
+为单集音频切片的那条老链路（`chunk_audio`）已随「逐集听音」整体移除，不要回加。
 """
 
-import json
-import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Optional, Union
 
-from .local_media import PROBE_TIMEOUT_SEC, TRANSCODE_TIMEOUT_SEC
+from .local_media import PROBE_TIMEOUT_SEC
 from .proc import run_quiet
-
-SUPPORTED_VIDEO_EXTS = {
-    ".mp4", ".mkv", ".mov", ".avi", ".flv", ".wmv", ".webm", ".ts", ".m4v", ".rmvb"
-}
 
 
 class AudioChunker:
@@ -48,7 +42,6 @@ class AudioChunker:
             res = run_quiet(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=PROBE_TIMEOUT_SEC)
             output = res.stderr
             # Parse Duration: 00:40:09.12
-            import re
             m = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.?\d*)", output)
             if m:
                 hours = float(m.group(1))
@@ -68,102 +61,6 @@ class AudioChunker:
         from .local_media import LocalMediaParser
         target = Path(output_audio_path) if output_audio_path else Path(video_path).with_suffix(".m4a")
         return LocalMediaParser.extract_audio(video_path, target)
-
-    @classmethod
-    def chunk_audio(
-        cls,
-        audio_filepath: str,
-        chunk_minutes: int = 10,
-        balanced: bool = True,
-        output_dir: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        """
-        Split audio into segments using stream copy.
-        If duration <= chunk_minutes (default 10 min), returns single file.
-        If duration > chunk_minutes and balanced=True, divides duration evenly into N=ceil(duration/chunk) slices.
-        """
-        import math
-
-        src = Path(audio_filepath).resolve()
-        if not src.exists():
-            raise FileNotFoundError(f"Audio file not found: {audio_filepath}")
-
-        # If input is a video file, extract 64k audio first before chunking
-        if src.suffix.lower() in SUPPORTED_VIDEO_EXTS:
-            target_dir = Path(output_dir).resolve() if output_dir else src.parent / f"{src.stem}_chunks"
-            target_dir.mkdir(parents=True, exist_ok=True)
-            extracted_audio = target_dir / f"{src.stem}.m4a"
-            if not extracted_audio.exists() or extracted_audio.stat().st_size == 0:
-                cls.extract_audio_from_video(src, extracted_audio)
-            src = extracted_audio
-
-        total_duration = cls.get_audio_duration(str(src))
-        chunk_seconds = chunk_minutes * 60
-
-        # If audio is shorter than or equal to target chunk size (<= 10 min), return single file
-        if total_duration <= chunk_seconds or chunk_seconds <= 0:
-            return [{
-                "chunk_index": 1,
-                "start_sec": 0.0,
-                "end_sec": total_duration,
-                "duration_sec": total_duration,
-                "start_time_str": "00:00:00",
-                "end_time_str": cls.format_seconds(total_duration),
-                "filepath": str(src),
-            }]
-
-        target_dir = Path(output_dir).resolve() if output_dir else src.parent / f"{src.stem}_chunks"
-        target_dir.mkdir(parents=True, exist_ok=True)
-
-        ffmpeg_bin = shutil.which("ffmpeg")
-        if not ffmpeg_bin:
-            raise RuntimeError("FFmpeg is required for audio chunking")
-
-        # Balanced-average chunking: N = ceil(duration / chunk_seconds)
-        if balanced:
-            num_chunks = max(1, math.ceil(total_duration / float(chunk_seconds)))
-            slice_dur = total_duration / float(num_chunks)
-        else:
-            slice_dur = float(chunk_seconds)
-            num_chunks = max(1, math.ceil(total_duration / float(chunk_seconds)))
-
-        chunks = []
-        for index in range(1, num_chunks + 1):
-            start_sec = (index - 1) * slice_dur
-            end_sec = min(total_duration, index * slice_dur) if index < num_chunks else total_duration
-            duration_current = end_sec - start_sec
-
-            chunk_filename = f"{src.stem}_part_{index:03d}{src.suffix}"
-            chunk_path = target_dir / chunk_filename
-
-            cmd = [
-                ffmpeg_bin,
-                "-y",
-                "-ss", str(round(start_sec, 2)),
-                "-i", str(src),
-                "-t", str(round(duration_current, 2)),
-                "-acodec", "copy",
-                "-avoid_negative_ts", "make_zero",
-                str(chunk_path),
-            ]
-            try:
-                run_quiet(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=TRANSCODE_TIMEOUT_SEC)
-            except subprocess.TimeoutExpired as err:
-                raise RuntimeError(
-                    f"FFmpeg 音频切片超时（>{TRANSCODE_TIMEOUT_SEC}s）：第 {index} 段切片失败。"
-                ) from err
-
-            chunks.append({
-                "chunk_index": index,
-                "start_sec": round(start_sec, 2),
-                "end_sec": round(end_sec, 2),
-                "duration_sec": round(duration_current, 2),
-                "start_time_str": cls.format_seconds(start_sec),
-                "end_time_str": cls.format_seconds(end_sec),
-                "filepath": str(chunk_path),
-            })
-
-        return chunks
 
     @staticmethod
     def format_seconds(seconds: float) -> str:

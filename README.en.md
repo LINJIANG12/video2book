@@ -34,7 +34,7 @@
 
 </div>
 
-Give it a course URL or a directory, and it listens episode by episode, writes one article per episode, then consolidates them into books and review notes.
+Give it a course URL or a directory, and it packs the audio into blocks, transcribes each block, splits the transcript back per episode, writes one article per episode, then consolidates them into books and review notes.
 
 > [!CAUTION]
 > This tool batch-fetches Bilibili video metadata and audio streams, and can store your login credential. Use it only on content you are entitled to access, and comply with Bilibili's terms of service and applicable law. `SESSDATA` grants access to your account: do not copy, upload or share it.
@@ -59,7 +59,7 @@ Give it a course URL or a directory, and it listens episode by episode, writes o
 
 Video2Book is a skill for AI coding assistants that turns a course into a textbook. It accepts a Bilibili collection, a YouTube channel or playlist, a Douyin collection or a local course directory, writes one deep-dive article per episode, and consolidates those articles into a modular book and mindmap review notes.
 
-The hard part of a long course is that you cannot finish listening to it, let alone remember it. Transcribing the course into a verbatim script still leaves the reader to turn spoken language into reviewable text, and the longer the script, the more likely it is to overflow the Agent's context. This skill slices the course into audio chunks and hands them to a host model that can listen, so each chunk is understood and **written into an article directly**, with no intermediate transcript file on disk (the `transcribe` command is positioned as "zero intermediate transcript").
+The hard part of a long course is that you cannot finish listening to it, let alone remember it. This skill packs the audio into blocks along **episode boundaries** (an episode is never split across blocks), has a listening channel transcribe each block, then **mechanically splits** it back into one transcript per episode. Writer roles read the transcript and write the article — they never touch audio. The number of audio-reading calls therefore drops from "one per episode" to "one per block" (measured: 936 episodes of 9 courses → 381 blocks, a 2.46× reduction).
 
 Output comes in three tracks, each in its own directory and usable on its own: per-episode articles, compiled modular textbooks, and cross-module review notes. Every deliverable passes a machine gate before delivery — filler prose, hollow headings and per-episode flat headings get caught by scripts rather than by you while reading.
 
@@ -166,13 +166,16 @@ Deliverables land in `<products_root>/<course_workspace>/`: articles in `article
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
 flowchart TD
-    A[Multi-platform ingestion<br/>Bilibili · YouTube · Douyin · local] --> B[FFmpeg 16 kHz mono slices<br/>each ≤ 60 min]
-    B --> C{Course duration ≤ 60 min}
-    C -->|Yes| D[Main agent handles serially]
-    C -->|No| E[Dispatch sub-agents<br/>one per episode / 3-5 packed]
-    D --> F[Stage 1 listening<br/>read_audio / read_media]
+    A[Multi-platform ingestion<br/>Bilibili · YouTube · Douyin · local] --> B[FFmpeg 16 kHz mono audio]
+    B --> M[Pack episodes into blocks<br/>audio/_blocks/ + blocks.json]
+    M --> C{Course duration ≤ 60 min}
+    C -->|Yes| D[Main agent transcribes serially]
+    C -->|No| E[Dispatch transcriber roles<br/>block by block]
+    D --> F[Block transcription<br/>read_audio / read_media]
     E --> F
-    F --> G[Per-episode articles<br/>articles/]
+    F --> S[Split back per episode<br/>subtitles/PXX_*_逐字稿.md]
+    S --> W[Writer roles read transcripts<br/>one article per episode]
+    W --> G[Per-episode articles<br/>articles/]
     G --> H[Stage 2 two-pass aggregation<br/>module plan → note merge]
     H --> I[Modular textbooks textbooks/<br/>review notes notes/]
 
@@ -182,12 +185,13 @@ flowchart TD
     classDef data fill:#8B5CF6,stroke:#7C3AED,color:#fff,stroke-width:2px
 
     class A start
-    class B,D,E,F,H process
+    class B,M,D,E,F,S,W,H process
     class C decision
     class G,I data
 ```
 
-- **Dispatch thresholds live in `src/core/budget.py`**: under 60 minutes total the main agent handles work serially; over 60 minutes it must dispatch — one sub-agent per episode by default, or 3–5 episodes packed per sub-agent per the `suggest_batch` advice when episode count ≥ 15 and per-episode budget ≤ 40k tokens. The window fallback applies to Channel A only: when the computed audio tokens exceed 60% of the context window, dispatch is required even below 60 minutes.
+- **Audio is read only by the transcriber roles, and block by block**: audio is packed into blocks along **episode boundaries** (`audio/_blocks/`, configurable target, 60 min by default; an episode is never split across blocks). A block is transcribed in one pass with line-leading timestamps, then the toolchain **mechanically splits** it back into per-episode transcripts. Writer roles read transcripts only and never touch audio.
+- **Dispatch thresholds live in `src/core/budget.py`**: under 60 minutes total the main agent handles work serially; over 60 minutes it must dispatch — two transcriber roles consuming the block queue, plus writer roles picking up blocks (one sub-agent per block, writing its episodes in order). The window fallback applies only to transcriber roles on Channel A: a block whose computed audio tokens exceed 60% of the context window must be read in continuation chunks.
 - **Stage 2 runs in two passes and never stalls on imperfect plans**: the first pass splits episodes into knowledge modules (`topic_plan.json`, feeding textbooks); the second merges modules into a number of notes (`note_plan.json`, one note may span several modules). Out-of-range, missing or duplicate entries are rescued in place (trimmed, filled, first-come-wins), the command always exits normally, and on-disk plan files are never overwritten by fallback results.
 - **Stage 1 and Stage 2 are decoupled by content boundaries**, so a long course can resume from a breakpoint.
 - **The tool layer only prepares task files, dispatch payloads and gates**; writing the articles and notes is done by the host agent (usually sub-agents). "Who wrote it" and "did it really listen" are discipline clauses the tool layer cannot verify.

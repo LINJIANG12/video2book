@@ -150,7 +150,7 @@ class AudioMerger:
     def _partition(cls, weights: Sequence[float], num_blocks: int) -> List[List[int]]:
         """把按顺序排列的集均分成 `num_blocks` 个**连续**块，使各块时长尽量接近。
 
-        做法与 `AudioChunker.chunk_audio(balanced=True)` 同源（先定块数再均分），只是切点
+        做法与「先定块数、再按累计时长均分」同一口径，只是切点
         被吸附到**集边界**上：第 k 个切点取「累计时长最接近 `k/num_blocks` 目标」的那条集边界。
         连续性是硬要求——块内是连续的几集，转录出来的文本才会是连续的一段讲解。
         """

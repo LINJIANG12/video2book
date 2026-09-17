@@ -347,36 +347,25 @@ def _transcribe_payload(tstatus: Dict, n: int) -> List[Dict]:
     return items
 
 
-def _fmt_time(seconds: float) -> str:
-    """秒 → HH:MM:SS（与 AudioChunker.format_seconds 同口径）。"""
-    total = int(round(max(0.0, float(seconds or 0))))
-    return f"{total // 3600:02d}:{(total % 3600) // 60:02d}:{total % 60:02d}"
+def _blocks_by_page(tws) -> Dict[int, Dict]:
+    """块清单的「集号 → 块」索引；老工作区（无块清单）返回空表。
 
+    写作侧的取音早已收敛到转录角色身上，这里给出块音频与「本集在块内的时间区间」，
+    只是让派发载荷能指回语料的出处（备查），不再要求任何人去听。
+    """
+    if tws is None:
+        return {}
+    try:
+        from src.core.audio_merger import AudioMerger
 
-def _audio_slices(audio_f: Path, duration_sec: float, chunk_minutes: int = 60) -> List[Dict]:
-    """按 pipeline 的口径推算该集切片清单（≤60 分钟为单片，超长按 N=ceil(时长/60) 均分）。"""
-    import math
-
-    duration_sec = float(duration_sec or 0)
-    if chunk_minutes <= 0 or duration_sec <= chunk_minutes * 60:
-        return [{
-            "index": 1, "start": "00:00:00", "end": _fmt_time(duration_sec),
-            "path": str(audio_f), "exists": audio_f.exists(),
-        }]
-
-    num = max(1, math.ceil(duration_sec / (chunk_minutes * 60)))
-    slice_dur = duration_sec / num
-    chunks_dir = audio_f.parent / f"{audio_f.stem}_chunks"
-    slices = []
-    for i in range(1, num + 1):
-        start = (i - 1) * slice_dur
-        end = duration_sec if i == num else i * slice_dur
-        chunk = chunks_dir / f"{audio_f.stem}_part_{i:03d}{audio_f.suffix}"
-        slices.append({
-            "index": i, "start": _fmt_time(start), "end": _fmt_time(end),
-            "path": str(chunk), "exists": chunk.exists(),
-        })
-    return slices
+        manifest = AudioMerger.load_manifest(tws) or {}
+    except Exception:
+        return {}
+    index: Dict[int, Dict] = {}
+    for block in manifest.get("blocks") or []:
+        for page in block.get("episodes") or []:
+            index[int(page)] = block
+    return index
 
 
 def _budget_summary(status: Dict) -> Dict:
@@ -418,6 +407,7 @@ def _dispatch_payload(status: Dict, n: int, require_transcript: bool = False) ->
         tws = TaskWorkspace.from_existing(Path(status["workspace"]))
     except Exception:
         tws = None
+    blocks_by_page = _blocks_by_page(tws)
 
     for p in status["pending_parts"]:
         page = p["page"]
@@ -443,7 +433,16 @@ def _dispatch_payload(status: Dict, n: int, require_transcript: bool = False) ->
 
         task_file = articles_dir / f"P{page:02d}_{clean_title}_TASK.md"
         target_article = articles_dir / f"P{page:02d}_{clean_title}_精读文章.md"
-        slices = _audio_slices(audio_f, duration)
+
+        block = blocks_by_page.get(int(page)) or {}
+        segment_in_block = ""
+        for seg in block.get("segments") or []:
+            if int(seg.get("page") or 0) == int(page):
+                segment_in_block = f"{seg.get('start') or ''}-{seg.get('end') or ''}"
+                break
+        block_audio = (
+            str(Path(status["workspace"]) / str(block.get("audio"))) if block.get("audio") else ""
+        )
 
         items.append({
             "page": page,
@@ -455,8 +454,10 @@ def _dispatch_payload(status: Dict, n: int, require_transcript: bool = False) ->
             "task_file_exists": task_file.exists(),
             "audio_file": str(audio_f),
             "audio_exists": audio_f.exists(),
-            "audio_slices": slices,
-            "slices_ready": all(s["exists"] for s in slices),
+            "block_id": int(block.get("block_id") or 0),
+            "block_audio": block_audio,
+            "block_duration_min": float(block.get("duration_min") or 0.0),
+            "segment_in_block": segment_in_block,
             "target_article": str(target_article),
             "transcript_file": str(transcript_f) if transcript_f is not None else "",
             "transcript_ready": transcript_f is not None,
@@ -606,16 +607,15 @@ def main():
         print(f"\n【待派发队列 Next {len(payload)} 个分集】：")
         for item in payload:
             dur_m = item["duration_sec"] / 60.0
-            slices = item["audio_slices"]
-            slice_hint = "" if len(slices) <= 1 else f" 等 {len(slices)} 片"
-            audio_line = slices[0]["path"] if slices else "（缺音频）"
-            print(f"  • P{item['page']:02d} [{dur_m:.1f}m ≈ {item['est_audio_tokens']:,} tok]: {item['title']}")
+            print(f"  • P{item['page']:02d} [{dur_m:.1f}m]: {item['title']}")
             print(f"    - 任务书:  {item['task_file']}")
             if item.get("transcript_ready"):
                 print(f"    - 逐字稿:  {item['transcript_file']}")
             else:
                 print(f"    - 逐字稿:  未就绪（待生成 {item.get('expected_transcript') or '（未知）'}）")
-            print(f"    - Audio:   {audio_line}{slice_hint}")
+            if item.get("block_audio"):
+                _seg = f"（本集在块内 {item['segment_in_block']}）" if item.get("segment_in_block") else ""
+                print(f"    - 块音频:  BLK{item['block_id']:02d} {item['block_audio']}{_seg}")
             print(f"    - Article: {item['target_article']}")
         if args.log_dispatch:
             print(f"\n[i] 已追加派发台账: {Path(status['workspace']) / '.dispatch_log.jsonl'}")

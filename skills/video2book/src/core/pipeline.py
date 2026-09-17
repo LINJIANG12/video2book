@@ -25,7 +25,6 @@ from typing import Any, Dict, List, Optional, Set
 from src.core.parser import BilibiliParser
 from src.core.local_media import LocalMediaParser
 from src.core.fetcher import AudioFetcher
-from src.core.audio_chunker import AudioChunker
 from src.core.workspace import TaskWorkspace, sanitize_filename
 from src.core.kernel_extractor import KernelExtractor
 from src.core import fsutil
@@ -143,27 +142,24 @@ def export_article_task(
     ws: TaskWorkspace,
     page_num: int,
     clean_title: str,
-    audio_file: Any,
+    transcript_file: Any = None,
     title: str = "",
     cid: int = 0,
-    chunk_minutes: int = 60,
     article_type: str = "",
-    transcript_file: Any = None,
     block_info: Optional[Dict[str, Any]] = None,
 ) -> Path:
-    """导出单集精读文章任务书。输入形态由 `transcript_file` 决定：
+    """导出单集精读文章任务书（**逐字稿链路，唯一形态**）。
 
-    * **逐字稿链路（默认）**：给出本集逐字稿路径，长文以逐字稿为**唯一事实来源**，不再听音频。
-      音频只作为「块」存在的证据写进任务书，不再要求子智能体去听——这正是调用次数从
-      「每集一次取音」降到「每块一次」的落点。
-    * **听音链路（`--no-merge` 回退 / 旧工作区）**：`transcript_file=None`，沿用「听音后直接撰写」。
+    长文以本集逐字稿为**唯一事实来源**，音频只作为「块」的存在证据写进任务书，不再要求
+    子智能体去听——这正是取音次数从「每集一次」降到「每块一次」的落点。逐字稿尚未就绪时
+    仍照常导出任务书（第 1 节前置条件要求执行者立即停止并回报），这样 `pipeline` 能一次
+    交齐全集任务书，由 `queue_tracker --next-article` 只放行逐字稿就绪的集。
 
     长文写作提示词按 article_type 从提示词风格矩阵取用：风格未指定、拼写有误，
     或该类型尚无提示词时，一律抛 ArticlePromptTypeError（工具层不猜、不降级）。
     无外部 HTTP 依赖、无第三方 API Key 依赖。
     """
     import re as _re
-    from src.core.audio_chunker import AudioChunker
     from src.generator.prompt_templates import resolve_article_prompt
 
     resolved = resolve_article_prompt(article_type)
@@ -172,7 +168,6 @@ def export_article_task(
     task_file = ws.articles_dir / f"{prefix}{clean_title}_TASK.md"
     task_file.parent.mkdir(parents=True, exist_ok=True)
 
-    audio_path = Path(audio_file).resolve() if audio_file else None
     target_article = ws.articles_dir / f"{prefix}{clean_title}_精读文章.md"
 
     transcript_path = Path(transcript_file).resolve() if transcript_file else None
@@ -182,40 +177,11 @@ def export_article_task(
     block = block_info or {}
     block_audio = block.get("audio")
 
-    # 音频微切片只为「听音链路」服务：逐字稿链路下音频已经过块级合并与转录，再为单集切一遍
-    # 纯属重复劳动（多占磁盘、多一次 ffmpeg），因此这里直接跳过。
-    slices = []
-    if transcript_path is None and audio_path and audio_path.exists() and audio_path.stat().st_size > 1024:
-        try:
-            chunks_dir = ws.audio_dir / f"{prefix}{clean_title}_chunks"
-            slices = AudioChunker.chunk_audio(str(audio_path), chunk_minutes=chunk_minutes, balanced=True, output_dir=str(chunks_dir))
-        except Exception:
-            slices = []
-
-    # 生成分片清单文本
-    if slices:
-        slices_lines = []
-        for s in slices:
-            fp = s.get("filepath", str(audio_path))
-            start_str = s.get("start_time_str", "00:00:00")
-            end_str = s.get("end_time_str", "00:00:00")
-            idx = s.get("chunk_index", 1)
-            slices_lines.append(f"- [ ] 切片 {idx:02d} [{start_str} -> {end_str}]: `{fp}` (待听音)")
-        slices_section = "\n".join(slices_lines)
-    else:
-        slices_section = f"- [ ] P{page_num:02d} 完整音频 (00:00 起): `{audio_file}`"
-
-    if transcript_path is not None:
-        # 逐字稿链路：语料就是这份逐字稿，音频退居「出处备查」，不再要求子智能体去听
-        content_payload = (
-            "（本集走逐字稿链路：长文必须依据下方逐字稿撰写，不得引入逐字稿之外的内容）\n\n"
-            f"本集逐字稿（唯一事实来源）：`{transcript_path}`"
-        )
-    else:
-        content_payload = (
-            "（本流程不产出中间逐字稿：请直接依据下方音频切片聆听所得的真实讲解内容撰写）\n\n"
-            f"待听音切片清单：\n{slices_section}"
-        )
+    # 语料就是这份逐字稿：音频退居「块」的出处备查，不再要求子智能体去听。
+    content_payload = (
+        "（本集走逐字稿链路：长文必须依据下方逐字稿撰写，不得引入逐字稿之外的内容）\n\n"
+        f"本集逐字稿（唯一事实来源）：`{transcript_path}`"
+    )
 
     article_prompt = (
         resolved["prompt"]
@@ -224,104 +190,58 @@ def export_article_task(
         .replace("{content}", content_payload)
     )
 
-    # 本集预算（供子智能体判断上下文占用、供主 Agent 判断并发与打包粒度）
+    # 本集时长与「本集在块内的时间区间」都取自块清单的段表（ffprobe 实测，与切分逐字稿的
+    # 依据完全一致）；没有块清单时退化为「未知」。
     from src.core import budget as _budget
 
     _时长秒 = 0.0
-    if slices:
-        try:
-            _时长秒 = float(slices[-1].get("end_sec") or 0.0)
-        except (TypeError, ValueError):
-            _时长秒 = 0.0
     _段区间 = ""
-    if block.get("segments"):
-        # 逐字稿链路没有切片，本集时长与「本集在块内的时间区间」都从块清单的段表取
-        # （同一份 ffprobe 实测数据，与切分逐字稿的依据完全一致）
-        for _seg in block["segments"]:
-            if int(_seg.get("page") or 0) == int(page_num):
-                if _时长秒 <= 0:
-                    try:
-                        _时长秒 = float(_seg.get("duration_sec") or 0.0)
-                    except (TypeError, ValueError):
-                        _时长秒 = 0.0
-                _段区间 = f"{_seg.get('start') or ''}-{_seg.get('end') or ''}"
-                break
-    _系数 = _budget.audio_tokens_per_sec()
+    for _seg in block.get("segments") or []:
+        if int(_seg.get("page") or 0) == int(page_num):
+            try:
+                _时长秒 = float(_seg.get("duration_sec") or 0.0)
+            except (TypeError, ValueError):
+                _时长秒 = 0.0
+            _段区间 = f"{_seg.get('start') or ''}-{_seg.get('end') or ''}"
+            break
     _音频token = _budget.est_audio_tokens(_时长秒)
     _时长文本 = (
         f"{int(_时长秒 // 60):02d}:{int(_时长秒 % 60):02d}" if _时长秒 > 0 else "未知"
     )
     _逐字稿字节 = transcript_path.stat().st_size if transcript_ready else 0
 
-    if transcript_path is not None:
-        block_hint = f"`{block_audio}`" if block_audio else "（未记录）"
-        content = (
-            f"# P{page_num:02d} {clean_title} 单集精读文章任务书（ARTICLE_TASK）\n\n"
-            f"> 状态：need-agent-article | 逐字稿链路：读本集逐字稿撰写精读长文（本集不再取音）\n"
-            f"> 　　　　前置条件：第 1 节那份逐字稿必须已存在且非空；缺失即表示该块转录尚未完成\n"
-            f"> 长文风格：{resolved['label']}（{resolved['key']}）\n"
-            f"> 执行者要求：由**子智能体**承担（可一个子智能体领一个块、依次写块内各集长文）；\n"
-            f"> 　　　　　　完成后只回报一行 `P{page_num:02d} | 文件路径 | 字节数 | 执行者`，**不回传正文**\n"
-            f"> 本集语料：逐字稿 {_逐字稿字节:,} 字节（本集时长 {_时长文本}；"
-            f"对应音频约 {_音频token:,} token 已在转录阶段一次性消费，本集不再占用上下文）\n\n"
-            f"## 1. 任务输入\n\n"
-            f"- 课程全称：{title}\n"
-            f"- 分集序号：P{page_num:02d} {clean_title}\n"
-            f"- 本集逐字稿（**唯一事实来源**）：`{transcript_path}`\n"
-            f"- 所属块音频（备查，不必再听）：{block_hint}"
-            + (f"，本集在块内 {_段区间}" if _段区间 else "") + "\n"
-            f"- 目标长文落盘路径：`{target_article}`\n\n"
-            f"### 前置条件（先判再写）\n\n"
-            f"`{transcript_path}` 存在且非空 → 正常撰写。\n\n"
-            f"不存在或为空 → **立即停止**，不要凭分集标题或常识编造内容，也不要去别处找音频补听；\n"
-            f"直接回报 `P{page_num:02d} 逐字稿未就绪` 即可（转录完成后重新取载荷再派发）。\n\n"
-            f"---\n\n"
-            f"## 2. 宿主 Agent 执行指引（逐字稿链路）\n\n"
-            f"1. **读逐字稿**：用宿主的文件读取能力打开第 1 节那份逐字稿，通读整篇（含其中的代码块与公式）；\n"
-            f"2. **撰写长文**：依据逐字稿内容，按下方【文章撰写提示词】撰写深入技术长文：\n"
-            f"   - 逐字稿是**唯一事实来源**：逐字稿没讲的不补写；讲师只在幻灯片上展示、音频里没念出来的代码与表格不要替他写；\n"
-            f"   - 逐字稿是语音识别产物：明显听错的专有名词可按上下文纠正，但不得据此引入逐字稿之外的结论；\n"
-            f"3. **落盘**：用**宿主的文件写入能力**将长文写入上方目标长文落盘路径（严格保留，模块整编时不得删除）。\n\n"
-            f"---\n\n"
-            f"## 3. 文章撰写提示词\n\n"
-            f"{article_prompt}\n"
-        )
-    else:
-        content = (
-            f"# P{page_num:02d} {clean_title} 单集精读文章任务书（ARTICLE_TASK）\n\n"
-            f"> 状态：need-agent-article | 单集直出长文：取到本集真实讲解内容后直接撰写精读长文\n"
-            f"> 　　　　（听音链路：边听边写，不产出中间逐字稿）\n"
-            f"> 长文风格：{resolved['label']}（{resolved['key']}）\n"
-            f"> 执行者要求：由**子智能体**承担（一集一个；课程总时长 ≤ 60 分钟时主 Agent 可串行亲做）；\n"
-            f"> 　　　　　　完成后只回报一行 `P{page_num:02d} | 文件路径 | 字节数 | 执行者`，**不回传正文**\n"
-            f"> 本集预算：时长 {_时长文本} × {_系数:g} tok/s ≈ {_音频token:,} token 音频；切片 {len(slices) if slices else 1} 个\n"
-            f"> 取音通道：按**宿主自己的工具列表**判定——有 `read_audio` 走通道 A，"
-            f"只有 `read_media` 走通道 B（见第 2 节）\n\n"
-            f"## 1. 任务输入与待听音切片清单\n\n"
-            f"- 课程全称：{title}\n"
-            f"- 分集序号：P{page_num:02d} {clean_title}\n"
-            f"- 完整音频：`{audio_file}`\n"
-            f"- 目标长文落盘路径：`{target_article}`\n\n"
-            f"### 待听音切片清单（共 {len(slices) if slices else 1} 个切片）：\n\n"
-            f"{slices_section}\n\n"
-            f"---\n\n"
-            f"## 2. 宿主 Agent 执行指引（单集直出长文）\n\n"
-            f"1. **取音频并处理**：先看自己的工具列表，按原生音频能力二选一（两条通道的分页契约同构，续读循环可复用）：\n"
-            f"   - **通道 A（工具列表里有 `read_audio`，优先）**：\n"
-            f"     a. 对清单中的切片调用 `omni-media:read_audio`（`output_mode=\"file\"`）取得本地切片绝对路径；\n"
-            f"     b. 用**宿主自己的文件查看能力**（能直接感知音频内容的那件工具；各平台工具名见技能内 references/host-tools/）打开该切片路径，直接聆听讲师原声、例题与板书讲解；\n"
-            f"   - **通道 B（只有 `read_media`，宿主无原生音频）**：\n"
-            f"     a. 对清单中的切片调用 `omni-media-ext:read_media`"
-            f"（`mode=\"transcribe\"`，需要总结/问答时换 `mode`），直接取回文本；\n"
-            f"     b. 返回文本首行的 `OMNI_STATUS` 注释若 `is_finished=false`，用 `start_time=next_start_time` 继续读下一卷；\n"
-            f"     c. 注意 `mode` 在状态注释里指切片模式（`oneshot`/`chunked`），本次任务预设看 `task` 字段；\n"
-            f"   - **共同要求**：不得跳过取音频这一步直接编造；正文须含讲师亲口讲的内容。\n"
-            f"2. **撰写长文**：依据所得的真实讲解内容，按下方【文章撰写提示词】撰写深入技术长文；\n"
-            f"3. **落盘**：用**宿主的文件写入能力**将长文写入上方目标长文落盘路径（严格保留，模块整编时不得删除）。\n\n"
-            f"---\n\n"
-            f"## 3. 文章撰写提示词\n\n"
-            f"{article_prompt}\n"
-        )
+    block_hint = f"`{block_audio}`" if block_audio else "（未记录）"
+    content = (
+        f"# P{page_num:02d} {clean_title} 单集精读文章任务书（ARTICLE_TASK）\n\n"
+        f"> 状态：need-agent-article | 逐字稿链路：读本集逐字稿撰写精读长文（本集不再取音）\n"
+        f"> 　　　　前置条件：第 1 节那份逐字稿必须已存在且非空；缺失即表示该块转录尚未完成\n"
+        f"> 长文风格：{resolved['label']}（{resolved['key']}）\n"
+        f"> 执行者要求：由**子智能体**承担（可一个子智能体领一个块、依次写块内各集长文）；\n"
+        f"> 　　　　　　完成后只回报一行 `P{page_num:02d} | 文件路径 | 字节数 | 执行者`，**不回传正文**\n"
+        f"> 本集语料：逐字稿 {_逐字稿字节:,} 字节（本集时长 {_时长文本}；"
+        f"对应音频约 {_音频token:,} token 已在转录阶段一次性消费，本集不再占用上下文）\n\n"
+        f"## 1. 任务输入\n\n"
+        f"- 课程全称：{title}\n"
+        f"- 分集序号：P{page_num:02d} {clean_title}\n"
+        f"- 本集逐字稿（**唯一事实来源**）：`{transcript_path}`\n"
+        f"- 所属块音频（备查，不必再听）：{block_hint}"
+        + (f"，本集在块内 {_段区间}" if _段区间 else "") + "\n"
+        f"- 目标长文落盘路径：`{target_article}`\n\n"
+        f"### 前置条件（先判再写）\n\n"
+        f"`{transcript_path}` 存在且非空 → 正常撰写。\n\n"
+        f"不存在或为空 → **立即停止**，不要凭分集标题或常识编造内容，也不要去别处找音频补听；\n"
+        f"直接回报 `P{page_num:02d} 逐字稿未就绪` 即可（转录完成后重新取载荷再派发）。\n\n"
+        f"---\n\n"
+        f"## 2. 宿主 Agent 执行指引（逐字稿链路）\n\n"
+        f"1. **读逐字稿**：用宿主的文件读取能力打开第 1 节那份逐字稿，通读整篇（含其中的代码块与公式）；\n"
+        f"2. **撰写长文**：依据逐字稿内容，按下方【文章撰写提示词】撰写深入技术长文：\n"
+        f"   - 逐字稿是**唯一事实来源**：逐字稿没讲的不补写；讲师只在幻灯片上展示、音频里没念出来的代码与表格不要替他写；\n"
+        f"   - 逐字稿是语音识别产物：明显听错的专有名词可按上下文纠正，但不得据此引入逐字稿之外的结论；\n"
+        f"3. **落盘**：用**宿主的文件写入能力**将长文写入上方目标长文落盘路径（严格保留，模块整编时不得删除）。\n\n"
+        f"---\n\n"
+        f"## 3. 文章撰写提示词\n\n"
+        f"{article_prompt}\n"
+    )
     task_file.write_text(content, encoding="utf-8")
     return task_file
 
@@ -639,16 +559,14 @@ class PipelineCoordinator:
         prefetch_workers: int = 12,
         skip_failed: bool = False,
         quality: str = "low",
-        chunk_minutes: int = 60,
         article_type: str = "",
-        no_merge: bool = False,
         block_minutes: float = 0.0,
     ) -> Dict[str, Any]:
         """执行完整流水线；硬门禁失败时抛出 PipelineGateError（由 CLI 转换为退出码）。
 
-        `no_merge=True` 退回「逐集取音、边听边写」的老链路（`block_minutes` 随之失效）；
-        缺省走块级转录链路，块时长目标取 `block_minutes`，为 0 时用 `AudioMerger` 的默认值
-        （环境变量 `BVB_AUDIO_BLOCK_MINUTES`，默认 60 分钟）。
+        阶段一固定走**块级转录链路**：音频收齐后按集装箱成块、导出块级转录任务书，长文由
+        写作角色读块级逐字稿撰写。块时长目标取 `block_minutes`，为 0 时用 `AudioMerger`
+        的默认值（环境变量 `BVB_AUDIO_BLOCK_MINUTES`，默认 60 分钟）。
         """
         from concurrent.futures import ThreadPoolExecutor
 
@@ -861,79 +779,74 @@ class PipelineCoordinator:
 
         # ===== 阶段一点五「音频装箱合并」：把连续的几集拼成块，供专职转录角色一次转录 =====
         # 块的唯一用途是「少调用几次取音接口」：转录按块走，长文仍按集走，下游（模块规划/
-        # 教材分册/笔记/思维导图）看到的仍是一集一篇，因此它们无需任何改动。
-        # --no-merge 时整段跳过，退回「逐集取音、边听边写」的老链路。
+        # 教材分册/笔记/思维导图）看到的仍是一集一篇，因此它们无需任何改动。装箱是阶段一的
+        # **固定步骤**——没有块清单就没有块级逐字稿，写作链路便无从谈起。
         blocks: List[Dict[str, Any]] = []
         block_by_page: Dict[int, Dict[str, Any]] = {}
         titles_by_page = {int(p["page"]): sanitize_filename(p["title"]) for p in effective_parts}
-        if no_merge:
-            print("\n[i] --no-merge 已指定：跳过音频装箱，长文走「逐集取音」链路")
-        else:
-            from src.core.audio_merger import AudioMerger
-
-            print("=" * 65)
-            print("[*] 阶段一点五：音频装箱合并（块级转录的前置步骤）")
-            print("=" * 65)
-            Path(ws.subtitles_dir).mkdir(parents=True, exist_ok=True)
-            try:
-                merged = AudioMerger.merge(
-                    ws,
-                    [int(p["page"]) for p in effective_parts],
-                    target_minutes=(block_minutes or None),
-                )
-            except Exception as err:
-                print("\n" + "=" * 65, file=sys.stderr)
-                print(f"[✗] 音频装箱合并失败，终止任务：{err}", file=sys.stderr)
-                print("①排障重跑：确认 ffmpeg/ffprobe 在 PATH、audio/ 可写后重跑本命令", file=sys.stderr)
-                print("②回退：加 --no-merge 退回「逐集取音、边听边写」链路", file=sys.stderr)
-                print("=" * 65, file=sys.stderr)
-                raise PipelineGateError(3) from err
-
-            for _line in merged["diag"]:
-                print(f"    {_line}")
-            if merged["missing"]:
-                print(f"    [!] 以下集缺音频、未进任何块：{merged['missing']}")
-            blocks = merged["blocks"]
-            for _line in AudioMerger.describe(blocks, merged["limits"]):
-                print(f"    {_line}")
-            for _block in blocks:
-                for _page in _block["episodes"]:
-                    block_by_page[int(_page)] = _block
-
-            ws.save_manifest({"audio_blocks": {
-                "target_minutes": merged["limits"]["target"],
-                "ceiling_minutes": merged["limits"]["ceiling"],
-                "block_count": len(blocks),
-                "episode_count": sum(len(b["episodes"]) for b in blocks),
-                "noop": bool(merged["noop"]),
-                "blocks_manifest": merged.get("manifest", ""),
-            }})
-
-            # 块边界随目标时长变化：旧编号的任务书留在盘上就是「可被派发的幽灵任务」
-            _stale = AudioMerger.prune_orphans(ws, blocks)
-            if _stale["removed_tasks"]:
-                print(f"    [i] 已作废 {len(_stale['removed_tasks'])} 份与本次装箱不符的旧转录任务书")
-            if _stale["orphan_audio"]:
-                print(f"    [!] 以下块音频不再属于本次装箱（**未删**，确认无用后可手工清理）："
-                      f"{_stale['orphan_audio']}")
-            if _stale["orphan_transcripts"]:
-                print(f"    [!] 以下块级逐字稿不再属于本次装箱（**未删**，分集逐字稿可能仍引用它）："
-                      f"{_stale['orphan_transcripts']}")
-
-            print(f"[*] 导出块级转录任务书（{len(blocks)} 份）→ {Path(ws.subtitles_dir).name}/")
-            for _block in blocks:
-                _task = export_block_transcribe_task(
-                    ws, _block, titles=titles_by_page, course_title=info["title"]
-                )
-                print(f"    [agent] BLK{_block['block_id']:02d} "
-                      f"{AudioMerger.block_stem(_block['episodes'])}: {_task.name}")
-            if merged["noop"]:
-                print("[i] 本次装箱无收益（每块仅一集）：块任务书与逐集任务书等价，"
-                      "可继续照块号派发，也可加 --no-merge 走老链路")
+        from src.core.audio_merger import AudioMerger
 
         print("=" * 65)
-        _stage2_mode = "读逐字稿撰写" if not no_merge else "单集直出长文（听音）"
-        print(f"[*] 阶段二：派发单集精读文章任务书（共 {len(effective_parts)} 集，{_stage2_mode}）")
+        print("[*] 阶段一点五：音频装箱合并（块级转录的前置步骤）")
+        print("=" * 65)
+        Path(ws.subtitles_dir).mkdir(parents=True, exist_ok=True)
+        try:
+            merged = AudioMerger.merge(
+                ws,
+                [int(p["page"]) for p in effective_parts],
+                target_minutes=(block_minutes or None),
+            )
+        except Exception as err:
+            print("\n" + "=" * 65, file=sys.stderr)
+            print(f"[✗] 音频装箱合并失败，终止任务：{err}", file=sys.stderr)
+            print("去向：确认 ffmpeg/ffprobe 在 PATH、audio/ 可写后重跑本命令；"
+                  "缺音频的集先补齐音频再重跑（块级转录以块音频为唯一取音对象）", file=sys.stderr)
+            print("=" * 65, file=sys.stderr)
+            raise PipelineGateError(3) from err
+
+        for _line in merged["diag"]:
+            print(f"    {_line}")
+        if merged["missing"]:
+            print(f"    [!] 以下集缺音频、未进任何块：{merged['missing']}")
+        blocks = merged["blocks"]
+        for _line in AudioMerger.describe(blocks, merged["limits"]):
+            print(f"    {_line}")
+        for _block in blocks:
+            for _page in _block["episodes"]:
+                block_by_page[int(_page)] = _block
+
+        ws.save_manifest({"audio_blocks": {
+            "target_minutes": merged["limits"]["target"],
+            "ceiling_minutes": merged["limits"]["ceiling"],
+            "block_count": len(blocks),
+            "episode_count": sum(len(b["episodes"]) for b in blocks),
+            "noop": bool(merged["noop"]),
+            "blocks_manifest": merged.get("manifest", ""),
+        }})
+
+        # 块边界随目标时长变化：旧编号的任务书留在盘上就是「可被派发的幽灵任务」
+        _stale = AudioMerger.prune_orphans(ws, blocks)
+        if _stale["removed_tasks"]:
+            print(f"    [i] 已作废 {len(_stale['removed_tasks'])} 份与本次装箱不符的旧转录任务书")
+        if _stale["orphan_audio"]:
+            print(f"    [!] 以下块音频不再属于本次装箱（**未删**，确认无用后可手工清理）："
+                  f"{_stale['orphan_audio']}")
+        if _stale["orphan_transcripts"]:
+            print(f"    [!] 以下块级逐字稿不再属于本次装箱（**未删**，分集逐字稿可能仍引用它）："
+                  f"{_stale['orphan_transcripts']}")
+
+        print(f"[*] 导出块级转录任务书（{len(blocks)} 份）→ {Path(ws.subtitles_dir).name}/")
+        for _block in blocks:
+            _task = export_block_transcribe_task(
+                ws, _block, titles=titles_by_page, course_title=info["title"]
+            )
+            print(f"    [agent] BLK{_block['block_id']:02d} "
+                  f"{AudioMerger.block_stem(_block['episodes'])}: {_task.name}")
+        if merged["noop"]:
+            print("[i] 本次装箱无收益（每块仅一集）：块音频直接指向该集原音频，转录仍按块派发")
+
+        print("=" * 65)
+        print(f"[*] 阶段二：派发单集精读文章任务书（共 {len(effective_parts)} 集，读逐字稿撰写）")
         print(f"[*] 长文提示词风格：{article_type or '未指定（将在派发时终止并给出风格菜单）'}")
         print("=" * 65)
 
@@ -978,8 +891,8 @@ class PipelineCoordinator:
 
             try:
                 task_file = export_article_task(
-                    ws, p_num, clean_p_title, audio_file,
-                    title=info["title"], cid=p["cid"], chunk_minutes=chunk_minutes,
+                    ws, p_num, clean_p_title,
+                    title=info["title"], cid=p["cid"],
                     article_type=article_type,
                     transcript_file=_transcript, block_info=_block,
                 )
@@ -991,8 +904,7 @@ class PipelineCoordinator:
                 print("=" * 65, file=sys.stderr)
                 raise PipelineGateError(3)
 
-            _src_hint = "读逐字稿撰写" if _transcript is not None else "听音撰写"
-            print(f"    [agent] 已导出文章任务书，待 Agent {_src_hint}: {task_file.name}")
+            print(f"    [agent] 已导出文章任务书，待 Agent 读逐字稿撰写: {task_file.name}")
             _entry: Dict[str, Any] = {
                 "page": p_num, "title": p["title"], "cid": p["cid"],
                 "audio": str(audio_file), "task_prompt": str(task_file),

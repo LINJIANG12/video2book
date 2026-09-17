@@ -113,13 +113,15 @@ def check_cli_help():
         )
         assert res.returncode == 0, f"`{sub} --help` 退出码 {res.returncode}: {res.stderr[:200]}"
 
-    # pipeline 的两个块级转录开关必须存在：块时长可覆盖（不写死）＋可回退老链路
+    # 块级转录是阶段一**唯一**的取音链路：块时长必须可覆盖（不写死）；「逐集听音」的老入口
+    # 已经整体移除，不许回加——它的存在等于给「按分集标题编长文」留了一条后门。
     res = run_quiet(
         [sys.executable, str(SKILL_ROOT / "src" / "cli.py"), "pipeline", "--help"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60,
     )
     assert "--block-minutes" in res.stdout, "pipeline 缺少 --block-minutes（块时长必须可配置）"
-    assert "--no-merge" in res.stdout, "pipeline 缺少 --no-merge（必须能回退逐集听音链路）"
+    for 已移除 in ("--no-merge", "--chunk-minutes"):
+        assert 已移除 not in res.stdout, f"pipeline 不该再有 {已移除}（逐集听音链路已整体移除）"
 
 
 def check_repo_separation():
@@ -747,13 +749,17 @@ def check_subprocess_timeouts():
     窗口抑制集中在 src/core/proc.py，此处防止有人回退成裸调用。
     """
     import src.core.audio_chunker as ac
+    import src.core.audio_merger as am
     import src.core.local_media as lm
     import src.core.proc as proc_mod
     import ast as _ast
 
     assert lm.PROBE_TIMEOUT_SEC > 0 and lm.TRANSCODE_TIMEOUT_SEC > 0
     assert ac.PROBE_TIMEOUT_SEC == lm.PROBE_TIMEOUT_SEC
-    assert ac.TRANSCODE_TIMEOUT_SEC == lm.TRANSCODE_TIMEOUT_SEC
+    # 转码（拼接/转码）口径现由块级合并侧引用：audio_chunker 只留取时长与时间格式化
+    assert am.TRANSCODE_TIMEOUT_SEC == lm.TRANSCODE_TIMEOUT_SEC
+    assert not hasattr(ac, 'chunk_audio'), '单集音频切片（chunk_audio）已随逐集听音移除，不许回加'
+    assert not hasattr(ac, 'SUPPORTED_VIDEO_EXTS'), 'audio_chunker 不该再持有视频扩展名表（已归 local_media）'
     assert hasattr(proc_mod, "run_quiet") and hasattr(proc_mod, "CREATE_NO_WINDOW")
 
     import os as _os
@@ -1733,7 +1739,8 @@ def check_article_prompt_types():
     assert "推荐" in menu, "风格菜单未标出推荐风格"
     assert "--all --article-type" in menu, "风格菜单缺少可复制用法"
 
-    # 8) 端到端：未命中风格不得落盘任何任务书；命中时任务书须写明风格并注入对应提示词
+    # 8) 端到端：未命中风格不得落盘任何任务书；命中时任务书须写明风格、注入对应提示词，
+    #    并把本集逐字稿写成「唯一事实来源」（这就是逐字稿链路对写作角色的全部约束）
     with tempfile.TemporaryDirectory() as tmp:
         ws = TaskWorkspace(task_name="style_gate", base_dir=tmp)
         for bad in ("", "consulting", "乱写"):
@@ -1745,13 +1752,24 @@ def check_article_prompt_types():
                 raise AssertionError(f"风格 {bad!r} 未被门禁拦下")
         assert not list(ws.articles_dir.glob("*_TASK.md")), "风格未命中却落了任务书"
 
-        task = export_article_task(ws, 1, "绪论", None, title="测试课程", article_type="学习")
+        ws.subtitles_dir.mkdir(parents=True, exist_ok=True)
+        语料 = "# 逐字稿\n\n[00:00:00] 开场白。\n"
+        t1 = ws.subtitles_dir / "P01_绪论_逐字稿.md"
+        t2 = ws.subtitles_dir / "P02_数制_逐字稿.md"
+        t1.write_text(语料, encoding="utf-8")
+        t2.write_text(语料, encoding="utf-8")
+
+        task = export_article_task(ws, 1, "绪论", t1, title="测试课程", article_type="学习")
         text = task.read_text(encoding="utf-8")
         assert "长文风格：学习" in text, "任务书未写明所选长文风格"
         assert "保住讲师的讲课风格" in text, "任务书未注入学习版提示词"
+        for 关键短语 in ("唯一事实来源", "逐字稿未就绪", "所属块音频（备查，不必再听）"):
+            assert 关键短语 in text, f"任务书缺少逐字稿链路条款：{关键短语}"
+        for 已移除 in ("待听音切片清单", "read_audio"):
+            assert 已移除 not in text, f"任务书回流了听音链路产物：{已移除}"
 
         (ws.articles_dir / "P01_绪论_精读文章.md").unlink(missing_ok=True)
-        legacy_task = export_article_task(ws, 2, "数制", None, title="测试课程", article_type="legacy")
+        legacy_task = export_article_task(ws, 2, "数制", t2, title="测试课程", article_type="legacy")
         legacy_text = legacy_task.read_text(encoding="utf-8")
         assert "长文风格：旧版" in legacy_text, "旧版任务书未写明风格"
         assert "随堂自测" in legacy_text, "旧版任务书未注入旧版提示词"
@@ -1873,11 +1891,12 @@ def check_quality_gate_copy():
 def check_dispatch_discipline_documented():
     """阶段一派发纪律必须写进文档，不能停留在含糊措辞上（防止回退）。
 
-    阈值：课程总时长 ≤ 60 分钟 → 主 Agent 可串行；超过 → 必须派发（一集一子智能体，
-    或集数多且单集短时 3~5 集打包）。回报协议：只回报一行、不回传正文。
+    阈值：课程总时长 ≤ 60 分钟 → 主 Agent 可串行；超过 → 必须派发。两类角色分工：
+    转录角色按块消费（建议 2 个），写作角色按块领集、读逐字稿写长文。回报协议：
+    只回报一行、不回传正文。窗口兜底（音频 token 口径）只对转录角色成立。
     """
     skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
-    for 关键词 in ("60 分钟", "一集一子智能体", "执行者", "不回传正文", "BVB_AUDIO_TOKENS_PER_SEC"):
+    for 关键词 in ("60 分钟", "转录角色", "写作角色", "不回传正文", "BVB_AUDIO_TOKENS_PER_SEC"):
         assert 关键词 in skill, f"SKILL.md 缺少阶段一派发纪律关键词：{关键词}"
 
     if _require_plugin_layout("README 的阶段一派发阈值"):
@@ -1937,14 +1956,21 @@ def check_dispatch_payload_shape():
 
         item = payload["next"][0]
         for key in ("page", "title", "duration_sec", "est_audio_tokens", "est_episode_prefill_tokens",
-                    "task_file", "task_file_exists", "audio_file", "audio_slices", "target_article"):
+                    "task_file", "task_file_exists", "audio_file", "block_id",
+                    "block_audio", "segment_in_block", "target_article",
+                    "transcript_file", "transcript_ready", "expected_transcript"):
             assert key in item, f"派发载荷缺少每集字段：{key}"
+        for 已移除 in ("audio_slices", "slices_ready"):
+            assert 已移除 not in item, f"派发载荷回流了听音链路字段：{已移除}"
         assert item["page"] == 1 and item["duration_sec"] == 900
         assert item["est_audio_tokens"] == budget.est_audio_tokens(900)
         assert item["task_file_exists"] is True, "任务书已存在却报告不存在"
         assert item["target_article"].endswith("P01_导学_精读文章.md"), item["target_article"]
-        assert item["audio_slices"] and item["audio_slices"][0]["path"].endswith("P01_导学.m4a")
-        assert item["slices_ready"] is True
+        assert item["audio_file"].endswith("P01_导学.m4a"), item["audio_file"]
+        # 无块清单时块字段为空——载荷里仍给出「将来该落在哪」，写作角色据此判断能否开工
+        assert item["transcript_ready"] is False, "尚无逐字稿却报告已就绪"
+        assert item["expected_transcript"].endswith("P01_导学_逐字稿.md"), item["expected_transcript"]
+        assert item["block_audio"] == "" and item["segment_in_block"] == ""
 
         # 2) --log-dispatch 写台账，且内容与建议分集一致
         res2 = _run("--next", "2", "--json", "--log-dispatch")

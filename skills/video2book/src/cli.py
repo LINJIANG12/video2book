@@ -33,7 +33,6 @@ from src.core import paths as _paths
 from src.core.console import enable_utf8_console
 from src.core.local_media import LocalMediaParser
 from src.core.fetcher import AudioFetcher
-from src.core.audio_chunker import AudioChunker
 from src.core.workspace import TaskWorkspace, sanitize_filename
 from src.core.kernel_extractor import KernelExtractor
 from src.core.credentials import (
@@ -132,7 +131,7 @@ def _confirm_article_prompt_style(args) -> str:
     sys.exit(4)
 
 
-def _export_article_task_guarded(ws, page_num, clean_title, audio_file, **kwargs):
+def _export_article_task_guarded(ws, page_num, clean_title, **kwargs):
     """单集长文任务书导出的唯一出口：提示词风格未命中已提供预设时，打印风格菜单并终止任务。
 
     工具层刻意不做关键词猜测、不做默认兜底——风格由用户确认。
@@ -140,7 +139,7 @@ def _export_article_task_guarded(ws, page_num, clean_title, audio_file, **kwargs
     from src.generator.prompt_templates import ArticlePromptTypeError
 
     try:
-        return export_article_task(ws, page_num, clean_title, audio_file, **kwargs)
+        return export_article_task(ws, page_num, clean_title, **kwargs)
     except ArticlePromptTypeError as err:
         print("\n" + err.report, file=sys.stderr)
         print("去向：确认使用哪种提示词风格后，用 --article-type 重跑本命令。", file=sys.stderr)
@@ -468,17 +467,6 @@ def cmd_audio(args):
         [info["parts"][target_part - 1]] if info.get("has_multi_pages") else (info.get("parts") or [])[:1],
     )
 
-    chunks_manifest = []
-    if args.chunk_minutes > 0:
-        print(f"[*] 正在使用 FFmpeg 进行无损音频切片（每切片 {args.chunk_minutes} 分钟）...")
-        chunks_manifest = AudioChunker.chunk_audio(
-            saved_path,
-            chunk_minutes=args.chunk_minutes,
-        )
-        print(f"[✓] 切片完成，共切分出 {len(chunks_manifest)} 个片段:")
-        for ch in chunks_manifest:
-            print(f"    - 第{ch['chunk_index']}段 [{ch['start_time_str']} -> {ch['end_time_str']}]: {ch['filepath']}")
-
     if args.json:
         result = {
             "bvid": target_bvid,
@@ -486,13 +474,44 @@ def cmd_audio(args):
             "title": target_title,
             "quality": stream_info["quality_desc"],
             "audio_file": saved_path,
-            "chunks": chunks_manifest,
         }
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
+def _require_episode_transcript(ws, page: int, clean_title: str):
+    """取本集逐字稿；没有就报错退出——逐字稿链路的任务书不允许在无语料时派发。
+
+    取音只发生在块级转录角色身上：先 `pipeline`（或 `merge-audio`）装箱并导出块级转录任务书，
+    再由转录角色按块转录出块级逐字稿，最后 `split-transcript` 切出本集逐字稿。
+    """
+    from src.core.transcript_splitter import TranscriptSplitter
+
+    found = TranscriptSplitter.existing_episode_transcript(ws, page, clean_title)
+    if found is None:
+        print(f"[✗] P{page:02d} 逐字稿未就绪，不导出长文任务书：{ws.subtitles_dir}", file=sys.stderr)
+        print("去向：① pipeline 收音频并装箱 → ② 转录角色按块转录（read_media）落块级逐字稿 → "
+              "③ split-transcript 切出分集逐字稿 → ④ 重跑本命令", file=sys.stderr)
+        sys.exit(2)
+    return found
+
+
+def _block_for_page(ws, page: int) -> dict:
+    """从块清单取本集所属的块；没有块清单时返回空字典（任务书照常导出，只是缺出处信息）。"""
+    from src.core.audio_merger import AudioMerger
+
+    manifest = AudioMerger.load_manifest(ws) or {}
+    for block in manifest.get("blocks") or []:
+        if int(page) in [int(p) for p in (block.get("episodes") or [])]:
+            return block
+    return {}
+
+
 def cmd_transcribe(args):
-    # 中文注释：单集直出长文 —— 直接导出单集精读文章任务书（已存在长文则视为完成）。
+    """导出单集精读文章任务书（**逐字稿链路**：语料必须是本集逐字稿）。
+
+    本命令不再产出「听音任务书」——取音只发生在块级转录角色身上。逐字稿未就绪时直接报错
+    退出，绝不派发一份没有语料的任务书。
+    """
     target_p = Path(args.target).resolve()
     if target_p.exists() and target_p.is_file():
         ws0 = TaskWorkspace.create(title=target_p.stem, bvid="", custom_name=args.task, base_dir=args.base_dir)
@@ -507,11 +526,12 @@ def cmd_transcribe(args):
                 print(f"[✓] 长文已复制至: {out_p}")
             return
 
+        _require_episode_transcript(ws0, 1, target_p.stem)
         tf = _export_article_task_guarded(
-            ws0, 1, target_p.stem, target_p, title=target_p.stem,
+            ws0, 1, target_p.stem, title=target_p.stem,
             article_type=_confirm_article_prompt_style(args),
         )
-        print(f"[✓] 已导出单集精读文章任务书（单集直出长文，听音后直接撰写）: {tf} (status=need-agent-article)")
+        print(f"[✓] 已导出单集精读文章任务书（读逐字稿撰写）: {tf} (status=need-agent-article)")
         return
 
     # Polymorphically resolve metadata (Local directory course or Bilibili URL/BVID)
@@ -530,7 +550,6 @@ def cmd_transcribe(args):
         p_title = matched["title"]
 
     clean_p_title = sanitize_filename(p_title)
-    article_file = ws.articles_dir / f"P{target_part:02d}_{clean_p_title}_精读文章.md"
     # 复用判定走宽容定位，兼容历史工作区无 _精读文章 后缀的长文
     existing_article = KernelExtractor.find_article(ws, target_part)
     if existing_article is not None and existing_article.stat().st_size >= 1000:
@@ -542,30 +561,13 @@ def cmd_transcribe(args):
             print(f"[✓] 长文已复制至: {out_p}")
         return
 
-    audio_file = ws.audio_dir / f"P{target_part:02d}_{clean_p_title}.m4a"
-
-    # Audio check or extraction/download
-    if not audio_file.exists() or audio_file.stat().st_size < 10240:
-        if info.get("is_local"):
-            source_file = matched["filepath"] if info["has_multi_pages"] else info["source_path"]
-            print(f"[*] 正在从本地视频提取 64kbps 纯音频...")
-            LocalMediaParser.extract_audio(source_file, audio_file)
-        else:
-            print(f"[*] 音频未缓存，正在下载 P{target_part:02d} 音频...")
-            # 中文注释：统一走 412 富化入口
-            stream_info = get_audio_stream(
-                target_bvid,
-                target_cid,
-                sessdata=args.sessdata,
-                prefer_quality=getattr(args, "quality", "low"),
-            )
-            AudioFetcher.download_audio(stream_info["best_stream_url"], str(audio_file), repackage_m4a=True)
-
+    _require_episode_transcript(ws, target_part, clean_p_title)
     tf = _export_article_task_guarded(
-        ws, target_part, clean_p_title, audio_file, title=info["title"], cid=target_cid,
+        ws, target_part, clean_p_title, title=info["title"], cid=target_cid,
+        block_info=_block_for_page(ws, target_part),
         article_type=_confirm_article_prompt_style(args),
     )
-    print(f"[✓] 已导出单集精读文章任务书（单集直出长文，听音后直接撰写）: {tf} (status=need-agent-article)")
+    print(f"[✓] 已导出单集精读文章任务书（读逐字稿撰写）: {tf} (status=need-agent-article)")
 
 
 def cmd_pipeline(args):
@@ -585,9 +587,7 @@ def cmd_pipeline(args):
             prefetch_workers=args.prefetch_workers,
             skip_failed=args.skip_failed,
             quality=args.quality,
-            chunk_minutes=getattr(args, "chunk_minutes", 60),
             article_type=article_type,
-            no_merge=getattr(args, "no_merge", False),
             block_minutes=getattr(args, "block_minutes", None) or 0.0,
         )
     except PipelineGateError as gate:
@@ -1222,16 +1222,15 @@ def main():
     p_audio.add_argument("--douyin-cookie", dest="douyin_cookie", default=None, help=DOUYIN_COOKIE_HELP)
     p_audio.add_argument("--url-only", action="store_true", help="Only print stream URL without downloading")
     p_audio.add_argument("--output", default=None, help="Optional explicit output directory override")
-    p_audio.add_argument("--chunk-minutes", type=int, default=10, help="Split audio into balanced chunks of ~N minutes (0=disabled)")
     p_audio.add_argument("--json", action="store_true", help="Output in JSON format")
 
     # transcribe
-    p_tr = subparsers.add_parser("transcribe", help="Export per-episode ARTICLE_TASK (zero intermediate transcript)")
+    p_tr = subparsers.add_parser("transcribe", help="Export one episode's ARTICLE_TASK (requires the episode transcript)")
     p_tr.add_argument("target", help="Bilibili URL/BVID, local audio file, or local video file")
     p_tr.add_argument("--page", type=int, default=None, help="Page index for Bilibili video or local course (auto-detects ?p=X from URL if omitted)")
     p_tr.add_argument("--task", default=None, help="Custom task workspace folder name")
     p_tr.add_argument("--base-dir", default=None, help=BASE_DIR_HELP)
-    p_tr.add_argument("--output", default=None, help="Optional custom output path (only used when cached clean transcript exists)")
+    p_tr.add_argument("--output", default=None, help="Optional custom output path (only used when the article already exists)")
     p_tr.add_argument("--sessdata", help="Optional SESSDATA cookie", default=None)
     p_tr.add_argument("--douyin-cookie", dest="douyin_cookie", default=None, help=DOUYIN_COOKIE_HELP)
     p_tr.add_argument(
@@ -1253,15 +1252,10 @@ def main():
     p_pipe.add_argument("--force", action="store_true", help="Force re-transcribing and re-generating even if exists")
     p_pipe.add_argument("--prefetch-workers", type=int, default=12, help="Parallel audio prefetch (download/extract) threads")
     p_pipe.add_argument("--skip-failed", action="store_true", default=False, help="Explicit opt-in: exempt failed episodes from transcription gate (recorded in manifest skip list)")
-    p_pipe.add_argument("--chunk-minutes", type=int, default=60, help="Split audio into chunks of ~N minutes (0=disabled, default=60)")
     p_pipe.add_argument(
         "--block-minutes", type=float, default=None,
         help="块级转录的块时长目标（分钟）；缺省取环境变量 BVB_AUDIO_BLOCK_MINUTES，再缺省 60。"
              "单块硬上限由 BVB_AUDIO_ONESHOT_LIMIT_MINUTES 控制（默认 75）",
-    )
-    p_pipe.add_argument(
-        "--no-merge", action="store_true", default=False,
-        help="回退老链路：不做音频装箱，长文由子智能体逐集听音撰写（块级转录关闭）",
     )
     p_pipe.add_argument("--sessdata", help="Optional SESSDATA cookie", default=None)
     p_pipe.add_argument("--douyin-cookie", dest="douyin_cookie", default=None, help=DOUYIN_COOKIE_HELP)
