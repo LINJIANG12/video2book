@@ -4,7 +4,7 @@ description: 把 B 站、YouTube、抖音长视频/系列网课或本地音视�
 license: MIT
 metadata:
   author: LINJIANG12
-  version: 2.5.0
+  version: 2.5.1
   category: learning-and-education
   compatibility: Python 3.10+；系统 ffmpeg 在 PATH；宿主需具备 read_audio 或 read_media 听音通道之一。
 ---
@@ -197,7 +197,7 @@ python src/cli.py logout                                   # 撤销保存（两�
   ├── 3. 落盘：完整转录正文写入 subtitles/BLK01_P08-P12_逐字稿.md
   ├── 4. 切分：python src/cli.py split-transcript "<工作区目录>" --block 1
   │      按块内时间表机械切成 subtitles/PXX_<标题>_逐字稿.md（不需要手工誊抄）
-  │      ※ 报「边界未锚定」说明交界处缺时间戳：按 2.1 节重读该块后重跑本命令
+  │      ※ 报「边界未锚定 / 空集 / suspect」说明归属不可靠：按 2.1 节重读该块后重跑本命令
   └── 5. 回报一行：BLK01 | 逐字稿路径 | 字节数 | 切分结果（**不回传正文**）
           │
           ▼
@@ -282,9 +282,10 @@ python src/cli.py logout                                   # 撤销保存（两�
   `subtitles/BLK01_P08-P12_逐字稿.md`；
 - 切分由工具层做，不需要手工誊抄：`python src/cli.py split-transcript "<工作区>" --block 1`
   按块内时间表把块级稿切成 `subtitles/PXX_<标题>_逐字稿.md`。切分是**确定性**的：
-  时间戳落在哪一集的时间区间里就归哪一集。两条降级路径都会如实报告，不会静默出错：
-  **边界未锚定**（交界处缺时间戳，该处靠插值推定）与 **`unsplit`**（完全没有时间戳，
-  不切分、保留块级稿），两者都要求按任务书 2.1 节重读该块后重跑切分命令；
+  时间戳落在哪一集的时间区间里就归哪一集。异常会在**放行边界**被拦住：
+  **边界未锚定**、切后出现空集，或某集内容占比达到时长占比的 1.5 倍以上时，整块标记
+  `suspect`；已有分集文件保留供排障，但不会进入写作派发。**`unsplit`**（完全没有时间戳）
+  同样不切分、保留块级稿。以上状态都要求按任务书 2.1 节重读该块后重跑切分命令；
 - 已有 `subtitles/PXX_*_clean.txt`（人工清洗稿或旧链路逐集文本）的集**直接复用**，
   写作角色照它写长文，不重复转录；
 - **改块时长要留意**：块编号与集号区间由「目标时长 + 集时长分布」决定，改一次

@@ -580,6 +580,74 @@ def check_audio_block_contract():
     assert TranscriptSplitter.split(thin, segments)["stats"]["anchored_boundaries"] == 0, \
         "交界处缺时间戳时未如实报告（会让错位切分蒙混过关）"
 
+    # 3b) 稀疏时间戳过度归属必须从“提示”升级为“整块隔离”：
+    #     只要边界不可信，就不能把块内任何一集当作 ready 送进写作派发。
+    sparse_segments = [
+        {"page": 18, "start_sec": 0.0, "end_sec": 600.0, "start": "00:00:00", "end": "00:10:00", "duration_sec": 600.0},
+        {"page": 19, "start_sec": 600.0, "end_sec": 1200.0, "start": "00:10:00", "end": "00:20:00", "duration_sec": 600.0},
+        {"page": 20, "start_sec": 1200.0, "end_sec": 1800.0, "start": "00:20:00", "end": "00:30:00", "duration_sec": 600.0},
+    ]
+    sparse_text = (
+        "[00:00:00] P18 开场\n"
+        + "\n".join(f"这是实际属于 P19 的无时间戳正文第 {i} 行" for i in range(1, 30))
+        + "\n[00:20:00] P20 开场\n"
+    )
+    sparse_out = TranscriptSplitter.split(sparse_text, sparse_segments)
+    assert [item["page"] for item in sparse_out["stats"]["over_assigned"]] == [18], sparse_out["stats"]
+    assert any("分到" in line and "P18" in line for line in sparse_out["diag"]), sparse_out["diag"]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ws = TaskWorkspace(task_name="suspect_split", base_dir=tmp)
+        block = {"block_id": 3, "episodes": [18, 19, 20], "segments": sparse_segments}
+        stale_path = TranscriptSplitter.episode_path(ws, 18, "十八")
+        stale_path.parent.mkdir(parents=True, exist_ok=True)
+        stale_path.write_text("上一轮的污染稿", encoding="utf-8")
+
+        suspect = TranscriptSplitter.write_episode_transcripts(
+            ws,
+            block,
+            sparse_text,
+            titles={18: "十八", 19: "十九", 20: "二十"},
+        )
+        assert suspect["status"] == "suspect", suspect
+        assert suspect["files"] == {}, "边界可疑时不得放行任何分集稿"
+        assert suspect["suspect_pages"] == [18, 19, 20], suspect
+        assert stale_path.exists(), "已有文件应保留供排障"
+        assert TranscriptSplitter.existing_episode_transcript(ws, 18, "十八") is None, \
+            "带 suspect 标记的旧文件不得被派发"
+
+        AudioMerger.save_manifest(ws, {
+            "version": AudioMerger.MANIFEST_VERSION,
+            "blocks": [block],
+            "target_minutes": 30.0,
+            "effective_limit_minutes": 75.0,
+        })
+        cli_result = run_quiet(
+            [sys.executable, str(SKILL_ROOT / "src" / "cli.py"), "split-transcript", str(ws.root_dir)],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60,
+        )
+        assert cli_result.returncode == 3, \
+            f"suspect 块未以非零退出码阻断派发: {cli_result.returncode}\n{cli_result.stdout}"
+
+        valid_text = (
+            "[00:00:00] P18 正确内容\n"
+            "[00:10:00] P19 正确内容\n"
+            "[00:20:00] P20 正确内容\n"
+        )
+        fixed = TranscriptSplitter.write_episode_transcripts(
+            ws,
+            block,
+            valid_text,
+            titles={18: "十八", 19: "十九", 20: "二十"},
+        )
+        assert fixed["status"] == "split", fixed
+        assert sorted(fixed["files"]) == [18, 19, 20], fixed
+        assert TranscriptSplitter.existing_episode_transcript(ws, 18, "十八") == stale_path, fixed
+        assert "上一轮的污染稿" not in stale_path.read_text(encoding="utf-8"), \
+            "suspect 解除后必须用可靠切分覆盖旧污染稿"
+        assert not TranscriptSplitter.suspect_path(ws, 18, "十八").exists(), \
+            "可靠重切后 suspect 标记未解除"
+
     # 4) 命名与复用优先级 + 契约登记
     with tempfile.TemporaryDirectory() as tmp:
         ws = TaskWorkspace(task_name="block_contract", base_dir=tmp)

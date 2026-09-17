@@ -622,7 +622,7 @@ def cmd_split_transcript(args):
     print("=" * 65)
     print(f"[*] 切分块级逐字稿 → 分集逐字稿（{len(blocks)} 个块）")
     print("=" * 65)
-    done = pending = unsplit = 0
+    done = pending = unsplit = suspect = 0
     for block in blocks:
         label = f"BLK{int(block.get('block_id') or 0):02d} {AudioMerger.block_stem(block.get('episodes') or [])}"
         raw = TranscriptSplitter.block_path(ws, block)
@@ -636,16 +636,27 @@ def cmd_split_transcript(args):
         print(f"[*] {label}: {outcome['status']}")
         for line in outcome["diag"]:
             print(f"    {line}")
-        if outcome["mode"] == "timestamp":
+        if outcome["status"] == "suspect":
+            suspect += 1
+        elif outcome["mode"] == "timestamp":
             done += 1
         else:
             unsplit += 1
 
-    print(f"[✓] 切分完成：{done} 块成功 / {unsplit} 块未切分 / {pending} 块待转录")
+    print(
+        f"[✓] 切分完成：{done} 块成功 / {suspect} 块边界可疑 / "
+        f"{unsplit} 块未切分 / {pending} 块待转录"
+    )
     if pending:
         print(f"    [!] 待转录的块见 {Path(ws.subtitles_dir).name}/BLK*_转录任务书.md（转录完重跑本命令）")
     if unsplit:
         print("    [!] 未切分的块：模型没给行首时间戳，按转录任务书 2.1 节重读该块后重跑本命令")
+    if suspect:
+        print(
+            "    [!] 边界可疑的块已整体标记 suspect，不会进入写作派发；"
+            "按转录任务书 2.1 节补足逐段时间戳后重跑本命令"
+        )
+        return 3
 
 
 def cmd_cluster_notes(args):
@@ -1334,7 +1345,8 @@ def main():
         "info": cmd_info,
     }
     try:
-        dispatch[args.subcommand](args)
+        result = dispatch[args.subcommand](args)
+        return int(result or 0)
     except PipelineGateError as gate:
         # 流水线硬门禁自带退出码语义（cmd_pipeline 内部已转换，这里只是兜底透传，不改写码值）。
         sys.exit(getattr(gate, "exit_code", 1))
@@ -1350,4 +1362,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

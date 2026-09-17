@@ -1,6 +1,6 @@
 {
   "name": "video2book",
-  "version": "2.5.0",
+  "version": "2.5.1",
   "description": "Batch-transform Bilibili, YouTube, Douyin course videos & local media into publication-grade deep-dive textbooks and structured review notes.",
   "author": {
     "name": "LINJIANG12"

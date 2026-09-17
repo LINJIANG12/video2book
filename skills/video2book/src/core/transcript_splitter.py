@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from bisect import bisect_right
 from pathlib import Path
@@ -29,10 +30,10 @@ _ANY_TS_RE = re.compile(r"[\[【]\s*(?:\d{1,3}:)?\d{1,2}:\d{2}(?:[.,]\d{1,3})?\s
 # 边界认定容差：集交界处若有时间戳落在 ±该秒数内，认为这条边界被「锚定」住了。
 BOUNDARY_TOLERANCE_SEC = 120.0
 
-# 内容配比告警阈值：某集分到的字符占比 ≥ 它的时长占比 × 该倍数时告警。
+# 内容配比阈值：某集分到的字符占比 ≥ 它的时长占比 × 该倍数时，块边界视为可疑。
 # 用来抓「时间戳只标在话题转换处」这类稀疏标注下的静默过度归属——没有时间戳的行会一直归到
 # 上一个时间段，于是下一集整集内容被上一集吞掉（实测某块 5 集只切出 2 集，其中一集混入
-# 178 行他集内容）。阈值取 1.5 是「宁可多提醒」：它是提示项，不参与落盘与门禁判定。
+# 178 行他集内容）。阈值取 1.5 是「宁可多提醒」：命中后整块标 suspect，不进入写作派发。
 OVER_ASSIGN_RATIO = 1.5
 
 
@@ -40,6 +41,7 @@ class TranscriptSplitter:
     """块级逐字稿 → 分集逐字稿。切分幂等，可重复执行。"""
 
     SUFFIX = "_逐字稿.md"
+    SUSPECT_SUFFIX = ".suspect.json"
 
     # ------------------------------------------------------------------
     # 时间戳解析
@@ -221,6 +223,16 @@ class TranscriptSplitter:
         return Path(ws.subtitles_dir) / f"{cls._prefix_for(page, clean_title)}{clean_title}{cls.SUFFIX}"
 
     @classmethod
+    def suspect_path(cls, ws: Any, page: int, clean_title: str) -> Path:
+        """可疑分集稿的旁路标记；文件本身保留，但不得被当作 ready 派发。"""
+        episode = cls.episode_path(ws, page, clean_title)
+        return episode.with_name(episode.name + cls.SUSPECT_SUFFIX)
+
+    @staticmethod
+    def _is_suspect(path: Path) -> bool:
+        return path.with_name(path.name + TranscriptSplitter.SUSPECT_SUFFIX).is_file()
+
+    @classmethod
     def legacy_path(cls, ws: Any, page: int, clean_title: str) -> Path:
         """历史语料路径 `PXX_<标题>_clean.txt`（人工清洗稿或旧链路的逐集文本）。"""
         return Path(ws.subtitles_dir) / f"{cls._prefix_for(page, clean_title)}{clean_title}_clean.txt"
@@ -238,7 +250,7 @@ class TranscriptSplitter:
         """
         for candidate in (cls.episode_path(ws, page, clean_title), cls.legacy_path(ws, page, clean_title)):
             try:
-                if candidate.exists() and candidate.stat().st_size > 0:
+                if candidate.exists() and candidate.stat().st_size > 0 and not cls._is_suspect(candidate):
                     return candidate
             except OSError:
                 continue
@@ -288,6 +300,7 @@ class TranscriptSplitter:
         diag: List[str] = list(outcome["diag"])
         files: Dict[int, str] = {}
         status = "split" if outcome["mode"] == "timestamp" else "unsplit"
+        suspect_pages: List[int] = []
 
         block_file = cls.write_block_transcript(ws, block, text)
         diag.append(f"[i] 块级逐字稿已落盘：{block_file.name}")
@@ -297,6 +310,46 @@ class TranscriptSplitter:
                 "status": "unsplit",
                 "mode": "unsplit",
                 "files": {},
+                "suspect_pages": [],
+                "block_file": str(block_file),
+                "stats": outcome["stats"],
+                "diag": diag,
+            }
+
+        empty_pages = [
+            int(seg["page"])
+            for seg in segments
+            if not [line for line in outcome["buckets"].get(int(seg["page"]), []) if line.strip()]
+        ]
+        if empty_pages or outcome["stats"]["over_assigned"]:
+            # 只要边界不可信，就不把一个块里的任何一集当作 ready。错误归属可能污染
+            # 多个相邻集，局部放行会把错语料送进写作链路；已有文件保留供排障，但用
+            # sidecar 标记屏蔽，重新得到可靠时间戳后再真实重切并解除标记。
+            suspect_pages = sorted({int(seg["page"]) for seg in segments})
+            payload = {
+                "block_id": int(block.get("block_id") or 0),
+                "pages": suspect_pages,
+                "empty_pages": empty_pages,
+                "over_assigned": outcome["stats"]["over_assigned"],
+                "reason": "empty_or_over_assigned",
+            }
+            for page in suspect_pages:
+                clean_title = str(titles.get(page) or f"P{page:02d}")
+                marker = cls.suspect_path(ws, page, clean_title)
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+            diag.append(
+                "[!] 本块分集边界不可靠，已标记 suspect；"
+                "该块所有分集稿暂不进入写作派发，重转录后重跑 split-transcript 会自动解除"
+            )
+            return {
+                "status": "suspect",
+                "mode": outcome["mode"],
+                "files": {},
+                "suspect_pages": suspect_pages,
                 "block_file": str(block_file),
                 "stats": outcome["stats"],
                 "diag": diag,
@@ -311,7 +364,8 @@ class TranscriptSplitter:
                 status = "partial"
                 continue
             path = cls.episode_path(ws, page, clean_title)
-            if skip_existing and path.exists() and path.stat().st_size > 0:
+            marker = cls.suspect_path(ws, page, clean_title)
+            if skip_existing and path.exists() and path.stat().st_size > 0 and not marker.exists():
                 files[page] = str(path)
                 continue
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -326,6 +380,10 @@ class TranscriptSplitter:
                 f"---\n\n"
             )
             path.write_text(header + "\n".join(lines).rstrip() + "\n", encoding="utf-8")
+            try:
+                marker.unlink(missing_ok=True)
+            except OSError:
+                pass
             files[page] = str(path)
 
         if files:
@@ -339,6 +397,7 @@ class TranscriptSplitter:
             "status": status,
             "mode": outcome["mode"],
             "files": files,
+            "suspect_pages": suspect_pages,
             "block_file": str(block_file),
             "stats": outcome["stats"],
             "diag": diag,
