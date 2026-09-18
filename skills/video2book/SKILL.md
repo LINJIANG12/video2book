@@ -220,7 +220,7 @@ python src/cli.py logout                                   # 撤销保存（两�
   ├── ② 笔记派发：重跑后自动逐篇导出 notes/笔记XX_*_TASK.md
   │      ➔ 主 Agent 派子智能体（一篇笔记一个）逐篇读完该篇涵盖的模块长文后撰写笔记
   │      ※ 缺归并不停机：按「一块一篇」兜底粒度继续，note_plan.json 一个字节都不会被改写
-  ├── 模块合辑教材：python src/cli.py cluster-articles "<链接或路径>"  --> 一块一册 textbooks/模块XX_*_精读全书.md
+  ├── 教材整编：python src/cli.py cluster-articles "<链接或路径>"  --> textbooks/ 按块序整编成册（册=书、章=块）
   ├── 质检门禁（手动体检，不在流水线上拦人）：python scripts/note_quality_check.py --strict（笔记成色）
   │                                          python scripts/render_compat_check.py --strict（渲染合规）
   ├── 收尾：python src/cli.py cleanup（回收任务书，每类留 1 份范本）
@@ -498,9 +498,12 @@ Agent 需按任务书内的 `MODULE_NOTE_PROMPT`（专属提示词）撰写，�
 python src/cli.py cluster-articles "<链接或路径>"
 ```
 
-**一块一册**：以 `articles/` 里的模块长文为源，按块序整编为 `textbooks/模块XX_<块标题>_精读全书.md`
-（编号、标题与块音频、模块长文完全同源），补上模块导读、全景目录、章内过渡与模块总结，
-并把章内标题降一级、剥掉手写序号。`articles/` 完整保留，不做任何删除。
+**册 = 书、章 = 块**：把 `articles/` 里的模块长文**按块序整编成一本书**——默认整门课一册；
+一册体量超过 300KB 时，在**块与块之间**均衡切册（块绝不跨册拆开，命名
+`模块01_<课程短名>（第1册）_精读全书.md`；单册时不带册号，编号是**册号**而不是块号）。
+每册含：册名与课程信息 → 导读与全景目录（本册各章 = 各块）→ 逐章正文 → 章间承前启后 → 册尾小结；
+章标题 = 块标题，章内标题降一级并剥掉手写序号。缺模块长文的块**不进书**（打 gate，不落占位册）；
+本轮不再产出的旧册会被清掉（教材是纯派生，可随时重建）。`articles/` 完整保留，不做任何删除。
 
 > 教材按**块**分册，笔记按**归并后的笔记**分篇——两者粒度不同是刻意的：教材要覆盖全、便于通读，
 > 笔记要成体系、便于检索。
@@ -522,7 +525,7 @@ python src/cli.py cluster-articles "<链接或路径>"
 | 阶段一 模块长文 | `articles/模块XX_*_TASK.md` | `articles/模块XX_*_精读长文.md` | 文件 ≥ 1000 字节 |
 | 阶段二① 笔记归并 | `note_plan_TASK.md` | `note_plan.json` | 全部块各被认领一次（不完全合法则抢救后继续） |
 | 阶段二② 笔记任务书 | `notes/笔记XX_*_TASK.md` | `notes/笔记XX_*_笔记.md` | 该篇涵盖各块的模块长文齐备即导出 |
-| 阶段二③ 模块教材 | ——（纯工具整编） | `textbooks/模块XX_*_精读全书.md` | 块长文齐备即整编（一块一册） |
+| 阶段二③ 教材 | ——（纯工具整编） | `textbooks/模块01_<课程短名>[（第N册）]_精读全书.md` | 块长文齐备即整编（册=书、章=块；缺长文的块 gate 跳过） |
 
 > [!TIP]
 > 所有任务书均为「读完即写盘」模式：工具链只负责准备语料、渲染提示词与校验产物，**真正的语义工作全部由宿主 Agent（通常为子智能体）完成**。
@@ -541,7 +544,10 @@ python src/cli.py sync                           # 按磁盘对账回填 manifes
   需要纳入门禁时显式加 `--require-structure`；
 - **渲染致命项**为 `GitHub 告警块 / 围栏外裸字符画 / 围栏配对`；**围栏缺语言标识默认只提示不拦**，
   需要死守时加 `--require-lang`；
-- 任务书是**临时派发物**：成品产出后由 `cleanup` 回收，每个类别保留编号最小的 1 份作为提示词范本；`note_plan_TASK.md` 属课程级规划任务书，永不回收。
+- 任务书是**临时派发物**：成品产出后由 `cleanup` 回收，**三类**各自保留编号最小的 1 份作为提示词范本（`--keep 0` 可全清）：
+  **块级转录任务书**（`subtitles/BLKxx_*_转录任务书.md` ↔ 同名 `_逐字稿.md`）、
+  **模块长文任务书**（`articles/模块XX_*_TASK.md` ↔ `articles/模块XX_*_精读长文.md`）、
+  **笔记任务书**（`notes/笔记XX_*_TASK.md` ↔ `notes/笔记XX_*_笔记.md`）；`note_plan_TASK.md` 属课程级规划任务书，永不回收。
 
 > **这两个脚本不在流水线上拦人**：它们是交付前由主 Agent **手动**跑的体检，只有 `--strict` 的致命项才返回非零退出码。平时跑 `cluster-notes` / `cluster-articles` / `pipeline` 都不会被它们挡住。
 
@@ -577,7 +583,7 @@ python scripts/queue_tracker.py --next-transcribe 2 --json         # 转录侧�
 python scripts/queue_tracker.py --next-module 5 --json --log-dispatch   # 写作侧：只取「块逐字稿已就绪且模块长文缺失」的块
 python scripts/queue_tracker.py --summary                         # 单行状态 + SUGGEST_WORKERS/BATCH + 块级转录进度
 
-# 5. 阶段二：整编模块教材（一块一册，按块序整编块长文 → textbooks/，articles/ 完整保留）
+# 5. 阶段二：整编教材（按块序把模块长文整编成册 → textbooks/，册=书、章=块，articles/ 完整保留）
 python src/cli.py cluster-articles "<链接或本地路径>"                             # 已有教材默认复用
 python src/cli.py cluster-articles "<链接或本地路径>" --force                     # 按最新章节强制重编
 
@@ -640,7 +646,7 @@ python src/cli.py logout
 | :--- | :--- | :--- |
 | **模块精读长文** | `<产物根>/<task>/articles/模块XX_<块标题>_精读长文.md` | **一块一篇**：读该块级逐字稿写成一篇文章（不是把几集拼在一起），按所选**长文风格**的提示词撰写（`learning` 学习＝保住讲师讲课风格 + 高信息密度 + 成稿好读好看；`legacy` 旧版＝客观学术第一视角 + 随堂自测），含真实教学案例与讲师亲口讲的推导。教材整编后**严格保留，不予删除** |
 | **复习笔记** | `<产物根>/<task>/notes/笔记XX_*_笔记.md` | 按**归并后的笔记**分篇（一篇可跨多个块），语料是该篇涵盖各块的模块长文，按任务书内的 `MODULE_NOTE_PROMPT` 产出：只有 H1 + 按知识主题分节的条目（**不写抬头元信息、知识拓扑树、节级主旨句、来源标注**），标题最多到 `####` 且**不得手写序号**（阅读器会自动编号，手写会叠字）。**笔记只有这一种风格**（旧版八种风格矩阵已删除），无需 `--style`；原生支持 Markmap / XMind 导入 |
-| **模块合辑教材** | `<产物根>/<task>/textbooks/模块XX_*_精读全书.md` | **一块一册**：把该块的模块长文按块序整编成完整合辑教材，含全景导读与模块过渡。章标题**不写序号**（序号交给渲染器），继承自长文的手写序号在整编时被幂等剥掉 |
+| **模块合辑教材** | `<产物根>/<task>/textbooks/模块01_<课程短名>[（第N册）]_精读全书.md` | **册=书、章=块**：各块模块长文按块序整编成书，含导读、全景目录（本册各章）、章间承前启后与册尾小结；一册超过 300KB 时按块边界均衡切册。章标题=块标题且**不写序号**（序号交给渲染器），继承自长文的手写序号在整编时被幂等剥掉 |
 
 > **笔记与教材的分册粒度不同，这是有意的**：教材按**块**分册（覆盖全、便于通读），
 > 笔记按**归并后的笔记**分篇（成体系、便于检索）。一个块整体只进一篇笔记，一篇笔记可以装多个块。
@@ -667,7 +673,7 @@ python src/cli.py logout
 ├── notes/                     # ③ 笔记 + 派发任务书（每类保留 1 份任务书范本）
 │   ├── 笔记XX_*_TASK.md       #   笔记任务书（临时派发物，成品产出后回收）
 │   └── 笔记XX_*_笔记.md       #   笔记成品（跨块聚合，阶段二产物）
-└── textbooks/                 # ④ 模块合辑教材（一块一册）
+└── textbooks/                 # ④ 教材（册=书、章=块；超 300KB 按块边界分册，旧册自动清理）
 ```
 
 产物根同时存放运行时状态文件：`.sessdata.json`（凭证，`cli.py login`）、`.wbi_keys.json`（WBI 签名密钥缓存）、
@@ -706,7 +712,7 @@ python src/cli.py logout
 - 任务书会被自动回收，因此**不要靠删除任务书来重派**。需要重导时的正确做法：
   - 笔记：`cluster-notes --force`；
   - 笔记归并：`cluster-notes --force`（重出 `note_plan_TASK.md` 并忽略盘上归并）；
-  - 模块教材：`cluster-articles --force`；
+  - 教材：`cluster-articles --force`（重编后旧的册会被自动清理）；
   - 模块长文：`pipeline --force`，或直接删除该块的 `articles/模块XX_*_精读长文.md` 后再跑；
   - 块装箱/块标题：`merge-audio`（改 `block_titles.json` 后重跑即按新标题改名）；
 - 用 `python scripts/queue_tracker.py --next-module 5` 查看阶段一待办块队列，`--summary` 获取单行状态；多课程并存时加 `--pattern` / `--dir` / `--base-dir`；

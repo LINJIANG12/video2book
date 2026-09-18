@@ -78,7 +78,7 @@ Video2Book 是一个面向 AI 编程助手的技能，用来把一门课写成�
 ```text
 output/<课程工作区>/
 ├── articles/      模块XX_<块标题>_精读长文.md  # 模块精读长文（一个块一篇）
-├── textbooks/     模块XX_<主题>_精读全书.md   # 按模块整编的合辑教材
+├── textbooks/     模块01_<课程短名>_精读全书.md # 按块序整编的教材（册=书、章=块）
 ├── notes/         笔记XX_<主题>_笔记.md       # 跨模块聚合的复习笔记
 ├── audio/         PXX_*.m4a                 # 16kHz 单声道音频切片
 ├── parts.json                               # 工作区集号拓扑（阶段二取集号基准）
@@ -364,10 +364,10 @@ skill/
 | `pipeline` | 执行完整流水线 | `python src/cli.py pipeline "<链接>" --all --article-type learning` |
 | `merge-audio` | 单独重跑装箱合并（幂等，可改块标题） | `python src/cli.py merge-audio "<工作区目录>"` |
 | `split-transcript` | 可选：块逐字稿切回分集逐字稿（按集查阅） | `python src/cli.py split-transcript "<工作区目录>" --block 1` |
-| `cluster-articles` | 按块序整编模块长文为一册册教材 | `python src/cli.py cluster-articles "<链接>"` |
+| `cluster-articles` | 按块序把模块长文整编成册（册=书、章=块） | `python src/cli.py cluster-articles "<链接>"` |
 | `cluster-notes` | 块 → 笔记归并，导出笔记任务书 | `python src/cli.py cluster-notes "<链接>"` |
 | `dedup` | 同步重复音频资产以节省 token | `python src/cli.py dedup --dry-run` |
-| `cleanup` | 回收已产出的任务书，每类保留样本 | `python src/cli.py cleanup --dry-run` |
+| `cleanup` | 回收三类已完成任务书（转录/模块长文/笔记），每类留 1 份范本（`--keep 0` 全清） | `python src/cli.py cleanup --dry-run` |
 | `sync` | 以磁盘产物为准回填 manifest.json | `python src/cli.py sync --dry-run` |
 | `info` | 显示环境与工具链就绪状态 | `python src/cli.py info` |
 | `login` | 持久化 B 站 SESSDATA | `python src/cli.py login --sessdata "<SESSDATA>"` |

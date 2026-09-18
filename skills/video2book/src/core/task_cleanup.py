@@ -1,16 +1,20 @@
-"""Task-file Reclaim: 回收已完成的派发任务书（*_TASK.md）。
+"""Task-file Reclaim: 回收已完成的派发任务书（*_TASK.md / *_转录任务书.md）。
 
-架构定位：任务书（`模块XX_*_TASK.md` / `笔记XX_*_TASK.md`）是工具层写给宿主 Agent 的
-**临时派发物**；Agent 读完后把成品落到 `articles/` / `notes/`。旧版本只负责写、不负责收，
-于是任务书从第一门课堆到第 N 门课，目录里混着大量废纸，并且把 `queue_tracker` 的
-「模块笔记 N 部」计数也带偏了。
+架构定位：任务书是工具层写给宿主 Agent 的**临时派发物**；Agent 读完后把成品落到
+`subtitles/` / `articles/` / `notes/`。旧版本只负责写、不负责收，于是任务书从第一门课
+堆到第 N 门课，目录里混着大量废纸，并且把 `queue_tracker` 的计数也带偏了。
 
-两类的完成单位都是**块**：模块长文任务书 ↔ `articles/模块XX_*_精读长文.md`，
-笔记任务书 ↔ `notes/笔记XX_*_笔记.md`。
+**三类**任务书与成品一一对应（完成单位都是**块**）：
+
+| 类别 | 任务书 | 成品 |
+| :--- | :--- | :--- |
+| 块级转录 | `subtitles/BLKxx_*_转录任务书.md` | `subtitles/BLKxx_*_逐字稿.md` |
+| 模块长文 | `articles/模块XX_*_TASK.md` | `articles/模块XX_*_精读长文.md` |
+| 复习笔记 | `notes/笔记XX_*_TASK.md` | `notes/笔记XX_*_笔记.md` |
 
 本模块补齐「收」的这一半：
 - **只回收成品已落盘**的任务书；成品未产出的任务书一律保留；
-- 每个类别保留编号最小的 1 份作为**提示词范本**（供人/Agent 随时翻阅写法）；
+- 每个类别保留编号最小的 1 份作为**提示词范本**（`--keep 0` 可全清）；
 - `note_plan_TASK.md` 全库唯一，永不回收。
 """
 
@@ -23,10 +27,12 @@ from . import fsutil
 # 类别标识
 CATEGORY_ARTICLES = "articles"
 CATEGORY_NOTES = "notes"
+CATEGORY_TRANSCRIPTS = "transcripts"
 
 CATEGORY_LABELS = {
     CATEGORY_ARTICLES: "模块长文任务书",
     CATEGORY_NOTES: "笔记任务书",
+    CATEGORY_TRANSCRIPTS: "块级转录任务书",
 }
 
 # 成品体积门槛：与阶段一门禁一致，避免把空壳文件误判为成品
@@ -36,6 +42,12 @@ MIN_PRODUCT_BYTES = 1000
 _MODULE_ARTICLE_RE = re.compile(r"^模块(\d+)_")
 # 笔记任务书/成品统一为 `笔记XX_…`（块归并后的粒度）
 _NOTE_RE = re.compile(r"^笔记(\d+)_")
+# 块级转录任务书/成品统一为 `BLKxx_…`（一个块一份）：块号是清单里的事实
+_BLOCK_RE = re.compile(r"^BLK(\d+)_")
+# 转录任务书 / 逐字稿的文件名后缀（与 `export_block_transcribe_task`、
+# `TranscriptSplitter.block_path` 同源；这里只做**同名换后缀**的定位，不重算路径）
+_TRANSCRIBE_TASK_SUFFIX = "_转录任务书.md"
+_BLOCK_TRANSCRIPT_SUFFIX = "_逐字稿.md"
 
 
 def _article_module_no(name: str) -> Optional[int]:
@@ -48,6 +60,11 @@ def _note_no(name: str) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
+def _block_no(name: str) -> Optional[int]:
+    m = _BLOCK_RE.match(name)
+    return int(m.group(1)) if m else None
+
+
 def _iter_tasks(ws: Any, category: str) -> List[Path]:
     """列出某类别的任务书，按编号升序（编号缺失者排到最后）。"""
     if category == CATEGORY_ARTICLES:
@@ -56,14 +73,39 @@ def _iter_tasks(ws: Any, category: str) -> List[Path]:
     elif category == CATEGORY_NOTES:
         files = [f for f in ws.notes_dir.glob("笔记*_TASK.md")
                  if _note_no(f.name) is not None]
+    elif category == CATEGORY_TRANSCRIPTS:
+        files = [f for f in ws.subtitles_dir.glob(f"BLK*{_TRANSCRIBE_TASK_SUFFIX}")
+                 if _block_no(f.name) is not None]
     else:  # pragma: no cover - 防御式分支
         return []
 
     def 排序键(f: Path) -> int:
-        num = _note_no(f.name) if category == CATEGORY_NOTES else _article_module_no(f.name)
+        if category == CATEGORY_NOTES:
+            num = _note_no(f.name)
+        elif category == CATEGORY_TRANSCRIPTS:
+            num = _block_no(f.name)
+        else:
+            num = _article_module_no(f.name)
         return num if num is not None else 10**9
 
     return sorted(files, key=排序键)
+
+
+def _transcript_product_ready(ws: Any, task_file: Path) -> bool:
+    """块级逐字稿是否已落盘（同名换后缀，非空即算）。
+
+    转录任务书与逐字稿是**同名不同后缀**的配对（`BLK03_P08_转录任务书.md` ↔
+    `BLK03_P08_逐字稿.md`）：块号与覆盖范围就是文件名里的锚，不需要重算路径。
+    """
+    if not task_file.name.endswith(_TRANSCRIBE_TASK_SUFFIX):
+        return False
+    transcript = ws.subtitles_dir / (
+        task_file.name[: -len(_TRANSCRIBE_TASK_SUFFIX)] + _BLOCK_TRANSCRIPT_SUFFIX
+    )
+    try:
+        return transcript.exists() and transcript.stat().st_size > 0
+    except OSError:
+        return False
 
 
 def _article_product_ready(ws: Any, task_file: Path) -> bool:
@@ -128,6 +170,8 @@ def _note_product_ready(ws: Any, task_file: Path) -> bool:
 def _product_ready(ws: Any, category: str, task_file: Path) -> bool:
     if category == CATEGORY_ARTICLES:
         return _article_product_ready(ws, task_file)
+    if category == CATEGORY_TRANSCRIPTS:
+        return _transcript_product_ready(ws, task_file)
     return _note_product_ready(ws, task_file)
 
 
@@ -168,7 +212,7 @@ def cleanup_completed_tasks(
     def 相对(p: Path) -> str:
         return TaskWorkspace.to_relative(p)
 
-    for category in (CATEGORY_ARTICLES, CATEGORY_NOTES):
+    for category in (CATEGORY_ARTICLES, CATEGORY_NOTES, CATEGORY_TRANSCRIPTS):
         tasks = _iter_tasks(ws, category)
         cat_kept: List[str] = []
         cat_deleted = 0

@@ -78,7 +78,7 @@ The three deliverable tracks land in separate directories and never overwrite ea
 ```text
 output/<course_workspace>/
 ├── articles/      模块XX_<block title>_精读长文.md  # module article (one per block)
-├── textbooks/     模块XX_<theme>_精读全书.md   # compiled modular textbook
+├── textbooks/     模块01_<course>_精读全书.md  # block-order textbook (volume = book, chapter = block)
 ├── notes/         笔记XX_<theme>_笔记.md       # cross-module review note
 ├── audio/         PXX_*.m4a                  # 16 kHz mono audio slices
 ├── parts.json                               # episode topology (Stage 2 numbering basis)
@@ -363,10 +363,10 @@ Three equivalent entry points with identical behaviour:
 | `pipeline` | Run the complete pipeline | `python src/cli.py pipeline "<url>" --all --article-type learning` |
 | `merge-audio` | Re-run block packing alone (idempotent; also renames blocks after editing titles) | `python src/cli.py merge-audio "<workspace>"` |
 | `split-transcript` | Optional: split block transcripts back per episode | `python src/cli.py split-transcript "<workspace>" --block 1` |
-| `cluster-articles` | Compile module articles block by block into textbooks | `python src/cli.py cluster-articles "<url>"` |
+| `cluster-articles` | Compile module articles in block order (volume = book, chapter = block) | `python src/cli.py cluster-articles "<url>"` |
 | `cluster-notes` | Two-pass semantic aggregation, export note task files | `python src/cli.py cluster-notes "<url>"` |
 | `dedup` | Synchronize duplicate audio assets to save tokens | `python src/cli.py dedup --dry-run` |
-| `cleanup` | Reclaim completed task files, keeping samples | `python src/cli.py cleanup --dry-run` |
+| `cleanup` | Reclaim three kinds of completed task files (transcribe / module article / note), 1 sample each (`--keep 0` clears all) | `python src/cli.py cleanup --dry-run` |
 | `sync` | Reconcile manifest.json from on-disk products | `python src/cli.py sync --dry-run` |
 | `info` | Show environment and toolchain readiness | `python src/cli.py info` |
 | `login` | Persist the Bilibili SESSDATA | `python src/cli.py login --sessdata "<SESSDATA>"` |

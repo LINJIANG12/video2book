@@ -47,7 +47,7 @@ video2book pipeline "https://www.bilibili.com/video/BV14VqVBrEhc" --range 2-5 --
 
 ## 场景三：生成模块合辑教材
 
-在阶段一模块长文全部落盘后，整编生成模块教材（一块一册）：
+在阶段一模块长文全部落盘后，整编生成模块教材（按块序整编成册，册=书、章=块）：
 
 ```bash
 video2book cluster-articles "https://www.bilibili.com/video/BV14VqVBrEhc"

@@ -1684,6 +1684,12 @@ def check_module_note_contract():
         (ws.notes_dir / "笔记03_理论_TASK.md").write_text("t" * 200, encoding="utf-8")
         (ws.notes_dir / "笔记01_绪论_笔记.md").write_text("笔记" * 600, encoding="utf-8")
         (ws.notes_dir / "笔记02_关系_笔记.md").write_text("笔记" * 600, encoding="utf-8")
+        # 块级转录任务书：BLK01 有成品（范本，保留）、BLK02 有成品（回收）、
+        # BLK03 的成品是空文件（不算成品，保留待办）
+        for name in ("BLK01_P01_转录任务书.md", "BLK02_P02_转录任务书.md", "BLK03_P03_转录任务书.md"):
+            (ws.subtitles_dir / name).write_text("t" * 200, encoding="utf-8")
+        (ws.subtitles_dir / "BLK02_P02_逐字稿.md").write_text("逐字稿" * 200, encoding="utf-8")
+        (ws.subtitles_dir / "BLK03_P03_逐字稿.md").write_text("", encoding="utf-8")
 
         result = cleanup_completed_tasks(ws, keep_per_category=1, dry_run=False)
         remaining = sorted(p.name for p in ws.articles_dir.glob("*_TASK.md"))
@@ -1691,8 +1697,12 @@ def check_module_note_contract():
         note_remaining = sorted(p.name for p in ws.notes_dir.glob("*_TASK.md"))
         assert note_remaining == ["笔记01_绪论_TASK.md", "笔记03_理论_TASK.md"], \
             f"笔记任务书回收结果异常: {note_remaining}"
-        assert len(result["deleted"]) == 2, f"回收数量异常: {result['deleted']}"
-        assert set(result["counts"]) == {"articles", "notes"}, f"回收类别异常: {result['counts']}"
+        transcript_remaining = sorted(p.name for p in ws.subtitles_dir.glob("BLK*_转录任务书.md"))
+        assert transcript_remaining == ["BLK01_P01_转录任务书.md", "BLK03_P03_转录任务书.md"], \
+            f"块级转录任务书回收结果异常: {transcript_remaining}"
+        assert len(result["deleted"]) == 3, f"回收数量异常: {result['deleted']}"
+        assert set(result["counts"]) == {"articles", "notes", "transcripts"}, \
+            f"回收类别异常: {result['counts']}"
 
 
 
@@ -2240,31 +2250,34 @@ def check_regression_fixes():
         assert res["status"] == "cached", f"已有笔记成品时仍重复派发任务书: {res['status']}"
         assert not (ws.notes_dir / "笔记01_微机系统基础_TASK.md").exists(), "重复派发出了任务书"
 
-        # 4) 教材整编（一块一册）：长文抬头含多行引用时必须剥净、H2 降级，
-        #    章标题按块标题渲染，且默认复用 / --force 重编
+        # 4) 教材整编（册=书、章=块）：长文抬头含多行引用时必须剥净、H2 降级，
+        #    章标题按块标题渲染、目录按有序列表列出各章，且默认复用 / --force 重编
         block = {"block_id": 1, "title": "绪论", "span": "P01", "episodes": [1],
                  "duration_min": 30.0, "audio": "audio/_blocks/探针_01_绪论(P01).m4a"}
         integrator = ArticleIntegrator(ws.root_dir)
-        out = integrator.integrate_module(1, block, "测试课程")
+        volumes = integrator.run(course_title="测试课程", blocks=[block])
+        assert len(volumes) == 1, f"单块课程应编成一册: {volumes}"
+        out = volumes[0]
+        assert out.name == "模块01_测试课程_精读全书.md", out.name
         text = out.read_text(encoding="utf-8")
         out_lines = text.splitlines()
-        assert out.name == "模块01_绪论_精读全书.md", out.name
         assert "微型计算机概述" not in text, "长文 H1 未被剥离"
         assert "目标：讲清体系结构" not in text and "来源：模块长文" not in text, "多行抬头未被剥净"
         # 长文标题现要求不写序号；存量带号标题在整编时被幂等剥掉：`## 1. 体系结构` → `### 体系结构`
         assert "### 体系结构" in out_lines, "章内 H2 未降级为 H3（或未剥掉手写序号）"
         assert "## 体系结构" not in out_lines, "章内 H2 仍以 H2 层级残留（与教材章标题同级）"
         assert "### 1. 体系结构" not in out_lines, "整编未剥掉继承自长文的标题序号"
-        # 教材章标题与目录都不写序号（否则与阅读器自动编号叠字）
+        # 章标题=块标题；目录是有序列表；一律不写「第 N 章」这种手写章号
         assert "## 绪论" in out_lines, "教材章标题未按「块标题」渲染"
+        assert "1. 绪论（P01）" in out_lines, "目录未按有序列表列出各章"
         assert "第 1 章" not in text, "教材仍在章标题或目录里写「第 N 章」"
-        assert "覆盖范围**：P01（1 讲" in text, "教材未写明本册覆盖的块范围"
+        assert "覆盖范围**：P01 ~ P01" in text, "教材未写明本册覆盖的块范围"
         assert "正文内容。" in text, "正文被误删"
 
         out.write_text(text + chr(10) + "<!-- MARK -->" + chr(10), encoding="utf-8")
-        integrator.integrate_module(1, block, "测试课程")
-        assert "<!-- MARK -->" in out.read_text(encoding="utf-8"), "默认未复用已存在的模块教材"
-        integrator.integrate_module(1, block, "测试课程", force=True)
+        integrator.run(course_title="测试课程", blocks=[block])
+        assert "<!-- MARK -->" in out.read_text(encoding="utf-8"), "默认未复用已存在的教材册"
+        integrator.run(course_title="测试课程", blocks=[block], force=True)
         assert "<!-- MARK -->" not in out.read_text(encoding="utf-8"), "--force 未强制重新整编"
 
         # 5) 任务书回收计数：删除失败与成品未产出必须分开统计
@@ -2487,6 +2500,67 @@ def check_hardening_probes():
         assert task_names == ["笔记01_归并篇_TASK.md"], \
             f"同编号旧成品被误当新归并笔记的缓存: {task_names}"
 
+    # 5b) 教材分册：超体量时按**块边界**均衡切册，块序与章数不变，缺长文的块被 gate
+    with tempfile.TemporaryDirectory() as tmp:
+        ws = TaskWorkspace(task_name="volume_probe", base_dir=tmp)
+        blocks = [
+            {"block_id": 1, "title": "甲", "span": "P01", "episodes": [1],
+             "duration_min": 46.0, "audio": "audio/a.m4a"},
+            {"block_id": 2, "title": "乙", "span": "P02", "episodes": [2],
+             "duration_min": 46.0, "audio": "audio/b.m4a"},
+            {"block_id": 3, "title": "丙", "span": "P03", "episodes": [3],
+             "duration_min": 46.0, "audio": "audio/c.m4a"},
+        ]
+        _write_blocks(ws, blocks)
+        for bid, title in ((1, "甲"), (2, "乙"), (3, "丙")):
+            (ws.articles_dir / f"模块{bid:02d}_{title}_精读长文.md").write_text(
+                f"# {title} 长文" + chr(10) + chr(10) + "## 小节" + chr(10) + chr(10)
+                + ("正文内容。" * 300) + chr(10), encoding="utf-8")
+
+        integrator = ArticleIntegrator(ws.root_dir)
+        # 体量上限压到 1 字节 → 每块一册；三章按块序进书，块序不因分册而乱
+        volumes = integrator.run(course_title="探针课", blocks=blocks, size_cap_bytes=1)
+        assert len(volumes) == 3, f"超体量未按块分册: {volumes}"
+        assert [v.name for v in volumes] == [
+            "模块01_探针课（第1册）_精读全书.md",
+            "模块02_探针课（第2册）_精读全书.md",
+            "模块03_探针课（第3册）_精读全书.md",
+        ], [v.name for v in volumes]
+        first_text = volumes[0].read_text(encoding="utf-8")
+        assert "## 甲" in first_text and "第 1 册 / 共 3 册" in first_text, first_text[:200]
+
+        # 体量上限调大 → 归一册，且旧的多册被清掉（教材是纯派生）
+        single = integrator.run(course_title="探针课", blocks=blocks, size_cap_bytes=10_000_000)
+        assert len(single) == 1 and single[0].name == "模块01_探针课_精读全书.md", single
+        left = sorted(p.name for p in (ws.root_dir / "textbooks").glob("*_精读全书.md"))
+        assert left == ["模块01_探针课_精读全书.md"], f"旧册未被清理: {left}"
+        body = single[0].read_text(encoding="utf-8")
+        assert [body.count(f"## {t}") for t in ("甲", "乙", "丙")] == [1, 1, 1], "章数与块数不符"
+        assert body.index("## 甲") < body.index("## 乙") < body.index("## 丙"), "章序与块序不符"
+
+        # 同名章（劈分腿：同一集的上/下两块）必须补范围消歧，过渡句不得变成「A → A」
+        dup_blocks = [
+            {"block_id": 1, "title": "关系数据库（下）", "span": "P06上", "episodes": [6],
+             "duration_min": 43.6, "audio": "audio/d1.m4a"},
+            {"block_id": 2, "title": "关系数据库（下）", "span": "P06下", "episodes": [6],
+             "duration_min": 43.6, "audio": "audio/d2.m4a"},
+        ]
+        _write_blocks(ws, dup_blocks)
+        for bid, suffix in ((1, "上"), (2, "下")):
+            (ws.articles_dir / f"模块{bid:02d}_关系数据库（下）_精读长文.md").write_text(
+                "正文内容。" * 300, encoding="utf-8")
+        dup_out = integrator.run(course_title="探针课", blocks=dup_blocks, force=True)
+        dup_text = dup_out[0].read_text(encoding="utf-8")
+        assert "## 关系数据库（下）（P06上）" in dup_text and "## 关系数据库（下）（P06下）" in dup_text,             "同名章未按覆盖范围消歧"
+        assert "上一节讲完「关系数据库（下）（P06上）」，下一节接着讲「关系数据库（下）（P06下）」" in dup_text,             "过渡句未使用消歧后的章标题"
+        assert "共 1 讲" in dup_text, "讲数未按去重集号统计（劈分腿被重复计数）"
+
+        # 缺长文的块不纳入（gate），也不落占位册
+        (ws.articles_dir / "模块03_丙_精读长文.md").unlink()
+        kept = integrator.run(course_title="探针课", blocks=blocks, force=True, size_cap_bytes=10_000_000)
+        text = kept[0].read_text(encoding="utf-8")
+        assert "⚠️" not in text and "## 丙" not in text, "缺长文的块被写进了教材"
+
     # 6) grounding 冒烟：脚本子进程跑通、exit 0、对「尚无模块长文」如实报告
     with tempfile.TemporaryDirectory() as tmp:
         ws = TaskWorkspace(task_name="grounding_probe", base_dir=tmp)
@@ -2625,9 +2699,10 @@ def check_block_note_merge_contract():
         assert 已移除 not in _inspect.getsource(BlockSynthesizer), \
             f"笔记派发路径不得再做体积切分：{已移除}"
     integrator_text = (SKILL_ROOT / "src" / "generator" / "integrator.py").read_text(encoding="utf-8")
-    for 已移除 in ("SIZE_CAP_BYTES", "SIZE_TARGET_BYTES", "group_episodes_by_module",
-                  "topic_plan.json"):
-        assert 已移除 not in integrator_text, f"教材不再按体积分组、也不再读模块规划：{已移除}"
+    for 已移除 in ("group_episodes_by_module", "topic_plan.json", "parts.json"):
+        assert 已移除 not in integrator_text, f"教材不再按集号分组、也不再读模块规划：{已移除}"
+    # 体量上限仍在，但语义变了：只为**读者**分册（册=书、章=块），与「模块语料体积」无关
+    assert "SIZE_CAP_BYTES" in integrator_text,         "分册上限不得被删：一本几 MB 的书在阅读器里翻不动"
 
 
 def check_heading_number_discipline():

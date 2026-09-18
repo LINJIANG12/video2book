@@ -686,7 +686,7 @@ def cmd_cluster_notes(args):
 
 
 def cmd_cluster_articles(args):
-    """把各块的**模块长文**按块序整编成分册教材（textbooks/）。"""
+    """把各块的**模块长文**按块序整编成册（textbooks/）：册=书、章=块。"""
     from src.core.audio_merger import AudioMerger
     from src.generator.integrator import ArticleIntegrator
 
@@ -701,7 +701,7 @@ def cmd_cluster_articles(args):
     course_title = resolve_course_title(info, ws)
 
     print("=" * 65)
-    print(f"[*] 启动模块教材整编流水线 (Modular Textbook Integration)")
+    print(f"[*] 启动教材整编流水线：按块序把各块模块长文整编成册 (Modular Textbook Integration)")
     print(f"[*] 课程标题: 《{course_title}》")
     print(f"[*] 任务工作区: {ws.root_dir}")
     print(f"[*] 目标教材目录: {ws.root_dir / 'textbooks'}")
@@ -726,7 +726,7 @@ def cmd_cluster_articles(args):
     ws.save_manifest(manifest)
 
     print("\n" + "=" * 65)
-    print(f"[✓] 模块教材已就绪，共 {len(results)} 册（一块一册，源为模块长文）"
+    print(f"[✓] 教材已整编，共 {len(results)} 册（册=书、章=块，正文逐字保留模块长文）"
           f"（{'已按最新章节强制重编' if force else '已有教材默认复用，需重编请加 --force'}）:")
     for r in results:
         size_kb = round(r.stat().st_size / 1024, 1)
