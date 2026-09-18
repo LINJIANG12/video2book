@@ -2262,15 +2262,18 @@ def check_regression_fixes():
         assert out.name == "模块01_绪论_精读全书.md", out.name
         text = out.read_text(encoding="utf-8")
         out_lines = text.splitlines()
-        assert "微型计算机概述" not in text, "长文 H1 未被剥离"
+        assert "# 微型计算机概述" not in [line.strip() for line in out_lines], \
+            "长文 H1 行未被剥离（正文里又出现了一次篇名）"
         assert "目标：讲清体系结构" not in text and "来源：模块长文" not in text, "多行抬头未被剥净"
         # 长文标题现要求不写序号；存量带号标题在整编时被幂等剥掉：`## 1. 体系结构` → `### 体系结构`
         assert "### 体系结构" in out_lines, "章内 H2 未降级为 H3（或未剥掉手写序号）"
         assert "## 体系结构" not in out_lines, "章内 H2 仍以 H2 层级残留（与教材章标题同级）"
         assert "### 1. 体系结构" not in out_lines, "整编未剥掉继承自长文的标题序号"
-        # 章标题=块标题；目录是有序列表；一律不写「第 N 章」这种手写章号
-        assert "## 绪论" in out_lines, "教材章标题未按「块标题」渲染"
-        assert "1. 绪论（P01）" in out_lines, "目录未按有序列表列出各章"
+        # 章标题优先用**长文 H1**（写作者提炼的主题）；分集名退到「对应块」备注里；
+        # 目录是有序列表；一律不写「第 N 章」这种手写章号
+        assert "## 微型计算机概述" in out_lines, "教材章标题未采用长文 H1"
+        assert "1. 微型计算机概述（P01）" in out_lines, "目录未按有序列表列出各章"
+        assert "块标题（分集名）：《绪论》" in text, "块标题（分集名）未在对应块备注里保留"
         assert "第 1 章" not in text, "教材仍在章标题或目录里写「第 N 章」"
         assert "覆盖范围**：P01 ~ P01" in text, "教材未写明本册覆盖的块范围"
         assert "正文内容。" in text, "正文被误删"
@@ -2519,6 +2522,16 @@ def check_hardening_probes():
                 + ("正文内容。" * 300) + chr(10), encoding="utf-8")
         integrator = ArticleIntegrator(ws.root_dir)
 
+        def _fresh_corpus():
+            """子用例自成一套语料：清掉上一用例的长文与规划。
+
+            不清的后果实测过：宽容定位按 `模块XX_` 前缀取**排序第一**的长文，上一用例的
+            残留文件会被当成本块语料，章标题随即张冠李戴（用例还会时好时坏）。
+            """
+            for stale in ws.articles_dir.glob("模块*_精读长文.md"):
+                stale.unlink()
+            (ws.root_dir / "textbook_plan.json").unlink(missing_ok=True)
+
         # (a) 无规划但 parts.json 有平台分节 → 按分节成册，册名=节名；同时导出规划任务书
         (ws.root_dir / "parts.json").write_text(json.dumps([
             {"page": 1, "title": "甲", "section_title": "第一章 甲"},
@@ -2564,6 +2577,7 @@ def check_hardening_probes():
         assert "⚠️" not in joined and "## 丙" not in joined, "缺长文的块被写进了教材"
 
         # (e) 同名章（劈分腿）补范围消歧，过渡句不得变成「A → A」；讲数按去重集号
+        _fresh_corpus()
         dup_blocks = [
             {"block_id": 1, "title": "关系数据库（下）", "span": "P06上", "episodes": [6],
              "duration_min": 43.6, "audio": "audio/d1.m4a"},
@@ -2579,6 +2593,23 @@ def check_hardening_probes():
         assert "## 关系数据库（下）（P06上）" in dup_text and "## 关系数据库（下）（P06下）" in dup_text,             "同名章未按覆盖范围消歧"
         assert "上一节讲完「关系数据库（下）（P06上）」，下一节接着讲「关系数据库（下）（P06下）」" in dup_text,             "过渡句未使用消歧后的章标题"
         assert "共 1 讲" in dup_text, "讲数未按去重集号统计（劈分腿被重复计数）"
+        assert "（P06上）（P06上）" not in dup_text and "（P06下）（P06下）" not in dup_text,             "目录把消歧范围又补了一遍（重复括号）"
+        assert "1. 关系数据库（下）（P06上）" in dup_text, "目录未列出消歧后的章标题"
+
+        # (f) 章标题优先长文 H1：长文自己写了主题时，章标题不再照抄分集名
+        _fresh_corpus()
+        h1_blocks = [{"block_id": 1, "title": "数据库第2章 关系数据库 （上）", "span": "P05",
+                      "episodes": [5], "duration_min": 57.0, "audio": "audio/h1.m4a"}]
+        _write_blocks(ws, h1_blocks)
+        (ws.articles_dir / "模块01_数据库第2章 关系数据库 （上）_精读长文.md").write_text(
+            "# 关系模型结构与数据完整性约束" + chr(10) + chr(10)
+            + "## 关系数据结构" + chr(10) + chr(10) + "正文内容。" * 300 + chr(10),
+            encoding="utf-8")
+        h1_out = integrator.run(course_title="探针课", blocks=h1_blocks, force=True)
+        h1_text = h1_out[0].read_text(encoding="utf-8")
+        assert "## 关系模型结构与数据完整性约束" in h1_text, "章标题未采用长文 H1"
+        assert "1. 关系模型结构与数据完整性约束（P05）" in h1_text, "目录未用长文 H1"
+        assert "块标题（分集名）：《数据库第2章 关系数据库 （上）》" in h1_text, "分集名未保留在对应块备注"
 
     # 6) grounding 冒烟：脚本子进程跑通、exit 0、对「尚无模块长文」如实报告
     with tempfile.TemporaryDirectory() as tmp:

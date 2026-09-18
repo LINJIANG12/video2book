@@ -462,11 +462,13 @@ class ArticleIntegrator:
         minutes = sum(float(b.get("duration_min") or 0.0) for _, b, _, _ in volume)
         titles = self._display_titles(volume)
 
-        # 目录用有序列表：序号是**目录序号**（渲染器不会给列表项自动编号），与「标题不写序号」不冲突
-        toc = [
-            f"{i}. {titles[i - 1]}（{str(block.get('span') or '')}）"
-            for i, (_, block, _, _) in enumerate(volume, 1)
-        ]
+        # 目录用有序列表：序号是**目录序号**（渲染器不会给列表项自动编号），与「标题不写序号」不冲突。
+        # 范围后缀只在标题里还没有时才补——消歧已经在标题里加过一次，再加就成「（P06上）（P06上）」。
+        toc = []
+        for i, (_, block, _, _) in enumerate(volume, 1):
+            span = str(block.get("span") or "")
+            marked = f"（{span}）" if span else ""
+            toc.append(f"{i}. {titles[i - 1]}" + ("" if marked and marked in titles[i - 1] else marked))
 
         lines = [
             f"# {course_title}·{book_title}"
@@ -497,7 +499,11 @@ class ArticleIntegrator:
             title = titles[i - 1]
             span = str(block.get("span") or "")
             lines.append(f"## {title}")
-            lines.append(f"> 对应块：BLK{module_idx:02d} | 覆盖分集：{span}")
+            block_title = self._chapter_title(block)
+            trace = f"> 对应块：BLK{module_idx:02d} | 覆盖分集：{span}"
+            if block_title and block_title != title:
+                trace += f" | 块标题（分集名）：《{block_title}》"
+            lines.append(trace)
             lines.append("")
             lines.append(self._read_article_body(article))
             lines.append("")
@@ -520,15 +526,40 @@ class ArticleIntegrator:
         out_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
         return out_path
 
+    @staticmethod
+    def _article_title(article: Path) -> str:
+        """长文 H1——写作者读完语料提炼的主题，比块标题（分集名）更适合当章标题。
+
+        块标题是「块内分集名的语义组合」，单集成块时它就是**分集原名**（如「数据库第2章
+        关系数据库 （上）」，带平台编号与全角空格）；长文 H1 才是这一章真正讲了什么
+        （如「关系模型结构与数据完整性约束」）。章标题取后者，分集名退到「对应块」备注里。
+        """
+        try:
+            with article.open("r", encoding="utf-8", errors="replace") as handle:
+                for _ in range(60):
+                    line = handle.readline()
+                    if not line:
+                        break
+                    text = line.strip().lstrip("﻿")
+                    if text.startswith("# "):
+                        return text[2:].strip()
+        except OSError:
+            pass
+        return ""
+
     @classmethod
     def _display_titles(cls, volume: Sequence[_Item]) -> List[str]:
-        """册内章标题：同名时补覆盖范围消歧。
+        """册内章标题：长文 H1 优先、块标题兜底；同名时补覆盖范围消歧。
 
-        为什么必须消歧：单集超长被劈成上/下两条腿时，两个块的块标题**就是同一个集名**
-        （如「数据库第2章 关系数据库（下）」的 P06上/P06下），照搬会让书里出现两个同名章、
-        过渡句变成「上一节讲完 A，下一节接着讲 A」——读起来像坏了。加范围后缀即可区分。
+        为什么必须消歧：单集超长被劈成上/下两条腿时，两章可能同名（长文都叫同一个主题，
+        或块标题就是同一个集名），照搬会让书里出现两个同名章、过渡句变成
+        「上一节讲完 A，下一节接着讲 A」——读起来像坏了。加范围后缀即可区分；
+        目录随后**按标题里是否已有该范围**决定要不要再补，绝不出现「（P06上）（P06上）」。
         """
-        raw = [cls._chapter_title(block) for _, block, _, _ in volume]
+        raw = [
+            cls._article_title(article) or cls._chapter_title(block)
+            for _, block, article, _ in volume
+        ]
         counts = {title: raw.count(title) for title in set(raw)}
         out: List[str] = []
         for title, (_, block, _, _) in zip(raw, volume):
