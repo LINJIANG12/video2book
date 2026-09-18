@@ -726,11 +726,13 @@ def cmd_cluster_articles(args):
     ws.save_manifest(manifest)
 
     print("\n" + "=" * 65)
-    print(f"[✓] 教材已整编，共 {len(results)} 册（册=书、章=块，正文逐字保留模块长文）"
+    print(f"[✓] 教材已整编，共 {len(results)} 册（册=书、章=块；册名取自内容）"
           f"（{'已按最新章节强制重编' if force else '已有教材默认复用，需重编请加 --force'}）:")
     for r in results:
         size_kb = round(r.stat().st_size / 1024, 1)
         print(f"    - [{size_kb} KB] {r.name}")
+    print(f"[i] 分册依据：{ws.root_dir / 'textbook_plan.json'}（Agent 按内容划分册并起名）；"
+          f"缺该规划时按平台分节/章节标记兜底，任务书见 {ws.root_dir / 'textbook_plan_TASK.md'}")
     print(f"[✓] 模块长文保持完整: {ws.articles_dir} (未做任何删除)")
     print("=" * 65)
 

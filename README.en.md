@@ -78,7 +78,7 @@ The three deliverable tracks land in separate directories and never overwrite ea
 ```text
 output/<course_workspace>/
 ├── articles/      模块XX_<block title>_精读长文.md  # module article (one per block)
-├── textbooks/     模块01_<course>_精读全书.md  # block-order textbook (volume = book, chapter = block)
+├── textbooks/     模块01_<topic>_精读全书.md   # textbook (volume = book, chapter = block; named by content)
 ├── notes/         笔记XX_<theme>_笔记.md       # cross-module review note
 ├── audio/         PXX_*.m4a                  # 16 kHz mono audio slices
 ├── parts.json                               # episode topology (Stage 2 numbering basis)

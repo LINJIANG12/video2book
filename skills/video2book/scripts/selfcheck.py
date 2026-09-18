@@ -2258,7 +2258,8 @@ def check_regression_fixes():
         volumes = integrator.run(course_title="测试课程", blocks=[block])
         assert len(volumes) == 1, f"单块课程应编成一册: {volumes}"
         out = volumes[0]
-        assert out.name == "模块01_测试课程_精读全书.md", out.name
+        # 册名取自内容（本工作区无平台分节、标题无章节标记 → 用块标题兜底），不再是「第 N 册」这种空名
+        assert out.name == "模块01_绪论_精读全书.md", out.name
         text = out.read_text(encoding="utf-8")
         out_lines = text.splitlines()
         assert "微型计算机概述" not in text, "长文 H1 未被剥离"
@@ -2500,7 +2501,7 @@ def check_hardening_probes():
         assert task_names == ["笔记01_归并篇_TASK.md"], \
             f"同编号旧成品被误当新归并笔记的缓存: {task_names}"
 
-    # 5b) 教材分册：超体量时按**块边界**均衡切册，块序与章数不变，缺长文的块被 gate
+    # 5b) 教材分册：内容优先（Agent 规划 → 平台分节），体量兜底；册名取自内容
     with tempfile.TemporaryDirectory() as tmp:
         ws = TaskWorkspace(task_name="volume_probe", base_dir=tmp)
         blocks = [
@@ -2516,29 +2517,53 @@ def check_hardening_probes():
             (ws.articles_dir / f"模块{bid:02d}_{title}_精读长文.md").write_text(
                 f"# {title} 长文" + chr(10) + chr(10) + "## 小节" + chr(10) + chr(10)
                 + ("正文内容。" * 300) + chr(10), encoding="utf-8")
-
         integrator = ArticleIntegrator(ws.root_dir)
-        # 体量上限压到 1 字节 → 每块一册；三章按块序进书，块序不因分册而乱
-        volumes = integrator.run(course_title="探针课", blocks=blocks, size_cap_bytes=1)
-        assert len(volumes) == 3, f"超体量未按块分册: {volumes}"
-        assert [v.name for v in volumes] == [
-            "模块01_探针课（第1册）_精读全书.md",
-            "模块02_探针课（第2册）_精读全书.md",
-            "模块03_探针课（第3册）_精读全书.md",
-        ], [v.name for v in volumes]
-        first_text = volumes[0].read_text(encoding="utf-8")
-        assert "## 甲" in first_text and "第 1 册 / 共 3 册" in first_text, first_text[:200]
 
-        # 体量上限调大 → 归一册，且旧的多册被清掉（教材是纯派生）
-        single = integrator.run(course_title="探针课", blocks=blocks, size_cap_bytes=10_000_000)
-        assert len(single) == 1 and single[0].name == "模块01_探针课_精读全书.md", single
+        # (a) 无规划但 parts.json 有平台分节 → 按分节成册，册名=节名；同时导出规划任务书
+        (ws.root_dir / "parts.json").write_text(json.dumps([
+            {"page": 1, "title": "甲", "section_title": "第一章 甲"},
+            {"page": 2, "title": "乙", "section_title": "第一章 甲"},
+            {"page": 3, "title": "丙", "section_title": "第二章 丙"},
+        ], ensure_ascii=False), encoding="utf-8")
+        books = integrator.run(course_title="探针课", blocks=blocks)
+        assert [b.name for b in books] == [
+            "模块01_第一章 甲_精读全书.md", "模块02_第二章 丙_精读全书.md",
+        ], [b.name for b in books]
+        assert "全书按内容分 2 册" in books[0].read_text(encoding="utf-8"), "册信息未写明分册依据"
+        assert (ws.root_dir / "textbook_plan_TASK.md").exists(), "缺规划时未导出分册规划任务书"
+
+        # (b) Agent 规划优先于平台分节：册名来自规划，章按块号排序
+        (ws.root_dir / "textbook_plan.json").write_text(json.dumps([
+            {"volume_id": 1, "volume_title": "甲与乙：基础篇", "blocks": [1, 2]},
+            {"volume_id": 2, "volume_title": "丙：进阶篇", "blocks": [3]},
+        ], ensure_ascii=False), encoding="utf-8")
+        books = integrator.run(course_title="探针课", blocks=blocks, force=True)
+        assert [b.name for b in books] == [
+            "模块01_甲与乙：基础篇_精读全书.md", "模块02_丙：进阶篇_精读全书.md",
+        ], [b.name for b in books]
+        text = books[0].read_text(encoding="utf-8")
+        assert "## 甲" in text and "## 乙" in text and "## 丙" not in text, "规划分册的章分配不对"
+        assert "本册内容**：甲与乙：基础篇" in text, "册名未写进册首信息"
+
+        # (c) 体量兜底：单册超上限时在块边界再切，册名加（上）/（中）/（下），跨册章序不乱
+        (ws.root_dir / "textbook_plan.json").write_text(json.dumps(
+            [{"volume_id": 1, "volume_title": "甲乙丙合集", "blocks": [1, 2, 3]}],
+            ensure_ascii=False), encoding="utf-8")
+        books = integrator.run(course_title="探针课", blocks=blocks, force=True, size_cap_bytes=5000)
+        assert len(books) == 3, [b.name for b in books]
+        assert "（上）" in books[0].name and "（下）" in books[-1].name, [b.name for b in books]
+        joined = "".join(b.read_text(encoding="utf-8") for b in books)
+        assert joined.index("## 甲") < joined.index("## 乙") < joined.index("## 丙"), "跨册章序乱了"
         left = sorted(p.name for p in (ws.root_dir / "textbooks").glob("*_精读全书.md"))
-        assert left == ["模块01_探针课_精读全书.md"], f"旧册未被清理: {left}"
-        body = single[0].read_text(encoding="utf-8")
-        assert [body.count(f"## {t}") for t in ("甲", "乙", "丙")] == [1, 1, 1], "章数与块数不符"
-        assert body.index("## 甲") < body.index("## 乙") < body.index("## 丙"), "章序与块序不符"
+        assert left == sorted(b.name for b in books), f"旧册未清理: {left}"
 
-        # 同名章（劈分腿：同一集的上/下两块）必须补范围消歧，过渡句不得变成「A → A」
+        # (d) 缺模块长文的块 gate 跳过：不进书、不落占位
+        (ws.articles_dir / "模块03_丙_精读长文.md").unlink()
+        books = integrator.run(course_title="探针课", blocks=blocks, force=True)
+        joined = "".join(b.read_text(encoding="utf-8") for b in books)
+        assert "⚠️" not in joined and "## 丙" not in joined, "缺长文的块被写进了教材"
+
+        # (e) 同名章（劈分腿）补范围消歧，过渡句不得变成「A → A」；讲数按去重集号
         dup_blocks = [
             {"block_id": 1, "title": "关系数据库（下）", "span": "P06上", "episodes": [6],
              "duration_min": 43.6, "audio": "audio/d1.m4a"},
@@ -2546,7 +2571,7 @@ def check_hardening_probes():
              "duration_min": 43.6, "audio": "audio/d2.m4a"},
         ]
         _write_blocks(ws, dup_blocks)
-        for bid, suffix in ((1, "上"), (2, "下")):
+        for bid in (1, 2):
             (ws.articles_dir / f"模块{bid:02d}_关系数据库（下）_精读长文.md").write_text(
                 "正文内容。" * 300, encoding="utf-8")
         dup_out = integrator.run(course_title="探针课", blocks=dup_blocks, force=True)
@@ -2554,12 +2579,6 @@ def check_hardening_probes():
         assert "## 关系数据库（下）（P06上）" in dup_text and "## 关系数据库（下）（P06下）" in dup_text,             "同名章未按覆盖范围消歧"
         assert "上一节讲完「关系数据库（下）（P06上）」，下一节接着讲「关系数据库（下）（P06下）」" in dup_text,             "过渡句未使用消歧后的章标题"
         assert "共 1 讲" in dup_text, "讲数未按去重集号统计（劈分腿被重复计数）"
-
-        # 缺长文的块不纳入（gate），也不落占位册
-        (ws.articles_dir / "模块03_丙_精读长文.md").unlink()
-        kept = integrator.run(course_title="探针课", blocks=blocks, force=True, size_cap_bytes=10_000_000)
-        text = kept[0].read_text(encoding="utf-8")
-        assert "⚠️" not in text and "## 丙" not in text, "缺长文的块被写进了教材"
 
     # 6) grounding 冒烟：脚本子进程跑通、exit 0、对「尚无模块长文」如实报告
     with tempfile.TemporaryDirectory() as tmp:
@@ -2699,10 +2718,11 @@ def check_block_note_merge_contract():
         assert 已移除 not in _inspect.getsource(BlockSynthesizer), \
             f"笔记派发路径不得再做体积切分：{已移除}"
     integrator_text = (SKILL_ROOT / "src" / "generator" / "integrator.py").read_text(encoding="utf-8")
-    for 已移除 in ("group_episodes_by_module", "topic_plan.json", "parts.json"):
-        assert 已移除 not in integrator_text, f"教材不再按集号分组、也不再读模块规划：{已移除}"
-    # 体量上限仍在，但语义变了：只为**读者**分册（册=书、章=块），与「模块语料体积」无关
-    assert "SIZE_CAP_BYTES" in integrator_text,         "分册上限不得被删：一本几 MB 的书在阅读器里翻不动"
+    assert "topic_plan.json" not in integrator_text, "教材不再读模块规划"
+    assert "group_episodes_by_module" not in integrator_text, "教材不再按集号分组"
+    # 分册首选**内容**（Agent 规划 → 平台分节 → 章节标记），体量上限只作读者侧兜底
+    for 内容依据 in ("textbook_plan.json", "section_title", "_CHAPTER_MARK_RE", "SIZE_CAP_BYTES"):
+        assert 内容依据 in integrator_text, f"分册依据缺失：{内容依据}"
 
 
 def check_heading_number_discipline():
