@@ -51,17 +51,6 @@ class AudioChunker:
 
         return 0.0
 
-    @classmethod
-    def extract_audio_from_video(
-        cls,
-        video_path: Union[str, Path],
-        output_audio_path: Optional[Union[str, Path]] = None,
-    ) -> Path:
-        """Universal audio extractor: extracts 64kbps 16kHz mono AAC audio from any video format."""
-        from .local_media import LocalMediaParser
-        target = Path(output_audio_path) if output_audio_path else Path(video_path).with_suffix(".m4a")
-        return LocalMediaParser.extract_audio(video_path, target)
-
     @staticmethod
     def format_seconds(seconds: float) -> str:
         """Format seconds into HH:MM:SS string."""

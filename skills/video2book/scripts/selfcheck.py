@@ -491,8 +491,21 @@ def check_transcript_pipeline():
         "逐集长文入口（export_article_task）不得回加：成文必须按块派发"
     assert not hasattr(pipeline, "export_transcribe_task"), \
         "逐集转录任务书入口（export_transcribe_task）不得回加：转录必须按块派发"
-    assert str(pipeline.TRANSCRIBE_TIMESTAMP_INSTRUCTION).strip(), \
-        "转录时间戳要求不得为空——缺了它，块级逐字稿无法机械切回分集"
+    assert hasattr(pipeline, "TRANSCRIBE_INSTRUCTION"), \
+        "纯文本转录指令（TRANSCRIBE_INSTRUCTION）应已提供"
+    assert str(pipeline.TRANSCRIBE_INSTRUCTION).strip(), \
+        "纯文本转录指令不得为空"
+    assert hasattr(pipeline, "TRANSCRIBE_TIMESTAMP_INSTRUCTION"), \
+        "向后兼容别名 TRANSCRIBE_TIMESTAMP_INSTRUCTION 应保留"
+
+    import tempfile
+    from src.core.workspace import TaskWorkspace
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_ws = TaskWorkspace(task_name="test_task_ep", base_dir=tmp_dir)
+        task_f = pipeline.export_block_transcribe_task(tmp_ws, {"block_id": 1, "episodes": [1], "duration_min": 10.0})
+        task_txt = task_f.read_text(encoding="utf-8")
+        assert "gemini-proxy-asr" not in task_txt, "任务书不得硬编码本机私有端点 gemini-proxy-asr"
+        assert "时间戳份数" not in task_txt, "任务书回报格式不得残留时间戳份数"
 
 
 def check_audio_block_contract():
@@ -874,6 +887,10 @@ def check_dead_modules_removed():
         "scripts/validate_skill.py",
     ):
         assert not (SKILL_ROOT / rel).exists(), f"{rel} 应已删除"
+
+    # 物理构建残留防呆断言
+    assert not (REPO_ROOT / "build").exists(), "仓库根不得滞留 build/ 构建产物目录"
+    assert not (SKILL_ROOT / "video2book.egg-info").exists(), "技能根不得滞留 video2book.egg-info/ 目录"
 
     if not _require_plugin_layout("仓库根的死代码清单"):
         return
@@ -1939,6 +1956,7 @@ def check_dispatch_discipline_documented():
     skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
     for 关键词 in ("60 分钟", "转录角色", "写作角色", "不回传正文", "BVB_AUDIO_TOKENS_PER_SEC"):
         assert 关键词 in skill, f"SKILL.md 缺少阶段一派发纪律关键词：{关键词}"
+    assert "next_start_time" in skill, "SKILL.md 续读参数必须使用 next_start_time（防死循环）"
 
     if _require_plugin_layout("README 的阶段一派发阈值"):
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")

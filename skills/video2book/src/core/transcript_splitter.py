@@ -144,8 +144,7 @@ class TranscriptSplitter:
         mode = "timestamp" if stats["timestamps"] > 0 else "unsplit"
         if mode == "unsplit":
             diag.append(
-                "[!] 逐字稿里没有可用时间戳，不做机械切分（落块级逐字稿并标记 unsplit，"
-                "由写作角色照块时间表定位）"
+                "[i] 逐字稿为纯文本（无时间戳，保留块级逐字稿，不切分单集；下游按块写作直接消费）"
             )
             return {"mode": "unsplit", "buckets": {}, "stats": stats, "diag": diag}
 

@@ -13,10 +13,9 @@
   与提示语——新链路按块对账，这类工作区要先用 `merge-audio` 重装块才能纳入统一会计。
 """
 
-import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from . import fsutil
 from .audio_merger import AudioMerger

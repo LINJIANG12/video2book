@@ -11,7 +11,9 @@ Commands:
   cluster-notes    - Two-pass aggregation: blocks -> review notes (task files)
   cluster-articles - Consolidate module long-forms into modular textbooks
   dedup            - Synchronize duplicate audio assets to save LLM tokens
-  login / logout   - Persist or clear the Bilibili SESSDATA credential
+  cleanup          - Reclaim completed dispatch task-files (*_TASK.md), keeping N samples per category
+  sync             - Reconcile manifest.json with on-disk products (disk is the source of truth)
+  login / logout   - Persist or clear Bilibili SESSDATA / Douyin credentials (--sessdata / --douyin-cookie)
   info             - Show environment & toolchain readiness status
 """
 
@@ -32,8 +34,6 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.core import fsutil
 from src.core import paths as _paths
 from src.core.console import enable_utf8_console
-from src.core.local_media import LocalMediaParser
-from src.core.fetcher import AudioFetcher
 from src.core.workspace import TaskWorkspace, sanitize_filename
 from src.core.credentials import (
     DouyinCookieStore,
@@ -1148,7 +1148,7 @@ def main():
 
     # cluster-notes
     p_cl = subparsers.add_parser("cluster-notes", help="Merge audio blocks into notes (note_plan.json dispatch) and export note task-files")
-    p_cl.add_argument("url", help="Bilibili URL or BV ID")
+    p_cl.add_argument("url", help="Bilibili URL, BV ID, or local media path")
     p_cl.add_argument("--block-id", type=int, default=None, help="Only process this note number (second-pass note id; legacy flag name)")
     p_cl.add_argument("--start-block", type=int, default=None, help="Start note number")
     p_cl.add_argument("--end-block", type=int, default=None, help="End note number")
@@ -1159,7 +1159,7 @@ def main():
 
     # cluster-articles
     p_ca = subparsers.add_parser("cluster-articles", help="Compile each block's module article into a textbook volume in textbooks/")
-    p_ca.add_argument("url", help="Bilibili URL or BV ID")
+    p_ca.add_argument("url", help="Bilibili URL, BV ID, or local media path")
     p_ca.add_argument("--task", default=None, help="Custom task workspace folder name")
     p_ca.add_argument("--base-dir", default=None, help=BASE_DIR_HELP)
     p_ca.add_argument("--force", action="store_true", help="Force re-integrating modular textbooks (default: reuse existing textbooks/)")

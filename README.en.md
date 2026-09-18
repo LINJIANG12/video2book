@@ -189,7 +189,7 @@ flowchart TD
     class G,I data
 ```
 
-- **Audio is read only by the transcriber roles, and block by block**: audio is packed into 40–60 minute blocks along episode boundaries (`audio/_blocks/`, target configurable, 50 min by default; oversized episodes are split into upper/lower halves). Each block is titled by semantically combining its episodes' names and transcribed in one pass with line-leading timestamps; writer roles read the block transcript only and never touch audio.
+- **Audio is read only by the transcriber roles, and block by block**: audio is packed into 40–60 minute blocks along episode boundaries (`audio/_blocks/`, target configurable, 50 min by default; oversized episodes are split into upper/lower halves). Each block is titled by semantically combining its episodes' names and transcribed in one pass into high-fidelity pure text; writer roles read the block transcript only and never touch audio.
 - **Dispatch thresholds live in `src/core/budget.py`**: under 60 minutes total the main agent handles work serially; over 60 minutes it must dispatch — two transcriber roles consuming the block queue, plus writer roles (one sub-agent per block, one module article per block). The window fallback applies only to transcriber roles on Channel A: a block whose computed audio tokens exceed 60% of the context window must be read in continuation chunks.
 - **Module level needs no plan, and note merging never stalls**: a block *is* the knowledge module (audio is packed into 40–60 minute blocks, each block titled by semantically combining its episodes' names), so textbooks simply compile block articles in block order; notes merge blocks into a number of notes (`note_plan.json`, one note may span several blocks). Unknown or duplicate block claims are rescued in place (first-come-wins, orphan blocks get fallback notes), the command always exits normally, and the on-disk `note_plan.json` is never overwritten by fallback results.
 - **Stage 1 and Stage 2 are decoupled by content boundaries**, so a long course can resume from a breakpoint.
@@ -365,7 +365,7 @@ Three equivalent entry points with identical behaviour:
 | `split-transcript` | Optional: split block transcripts back per episode | `python src/cli.py split-transcript "<workspace>" --block 1` |
 | `cluster-articles` | Compile module articles in block order (volume = book, chapter = block) | `python src/cli.py cluster-articles "<url>"` |
 | `cluster-notes` | Two-pass semantic aggregation, export note task files | `python src/cli.py cluster-notes "<url>"` |
-| `dedup` | Synchronize duplicate audio assets to save tokens | `python src/cli.py dedup --dry-run` |
+| `dedup` | Synchronize duplicate audio assets to save tokens | `python src/cli.py dedup "<url>" --dry-run` |
 | `cleanup` | Reclaim three kinds of completed task files (transcribe / module article / note), 1 sample each (`--keep 0` clears all) | `python src/cli.py cleanup --dry-run` |
 | `sync` | Reconcile manifest.json from on-disk products | `python src/cli.py sync --dry-run` |
 | `info` | Show environment and toolchain readiness | `python src/cli.py info` |
@@ -379,9 +379,10 @@ Three equivalent entry points with identical behaviour:
 | `--article-type` | `pipeline` | Prompt style: `learning` (recommended) / `legacy` | missing ⇒ exit code 4 |
 | `--all` / `--range X-Y` / `--page N` | `pipeline` / `audio` | Scope: all / a range / one episode | single episode |
 | `--force` | most commands | Force re-run, ignoring existing products | off |
-| `--base-dir` | all | Products root path | `BVB_OUTPUT_DIR`, or `<working_dir>/output` by default (`<container_root>/output` when working inside that container) |
-| `--task` | all | Workspace directory name | the most recently active one |
-| `--sessdata` | all | Credential for this run, overrides the local store | stored copy |
+| `--base-dir` | `pipeline` / `audio` / `cluster-*` / `dedup` / `cleanup` / `sync` | Products root path | `BVB_OUTPUT_DIR`, or `<working_dir>/output` by default (`<container_root>/output` when working inside that container) |
+| `--task` | `pipeline` / `audio` / `cluster-*` / `dedup` / `cleanup` / `sync` | Workspace directory name | the most recently active one |
+| `--sessdata` | `parse` / `audio` / `pipeline` / `cluster-*` / `dedup` / `login` / `info` | Bilibili SESSDATA credential, overrides local store | stored copy |
+| `--douyin-cookie` | `parse` / `audio` / `pipeline` / `login` / `info` | Douyin Cookie string to bypass anonymous quota window | stored copy |
 | `--dry-run` | `dedup` / `cleanup` / `sync` | Report only, write nothing | off |
 | `--json` | `parse` / `audio` / scripts | JSON output | off |
 
@@ -390,14 +391,19 @@ Three equivalent entry points with identical behaviour:
 | Script | Description | Common arguments |
 |---|---|---|
 | `scripts/queue_tracker.py` | Block progress, stage gate, dispatch payload and ledger | `--next-transcribe N` / `--next-module N` / `--summary` / `--pattern` / `--log-dispatch` / `--json` |
+| `scripts/article_grounding_check.py` | Evidence grounding check (whether module long-form genuinely quotes block transcript entities) | `--strict`, `--min-coverage F`, `--min-freq N` |
 | `scripts/note_quality_check.py` | Note quality check | `--strict`, `--require-structure`, `--max-truncated N` |
 | `scripts/render_compat_check.py` | Rendering compliance check | `--strict`, `--require-lang` |
+| `scripts/strip_heading_numbers.py` | In-place removal of heading numbers in legacy module articles | `--dry-run` |
 | `scripts/selfcheck.py` | The repository's single gate selfcheck | — |
 | `scripts/run.py` | No-install CLI entry point | passes subcommands through |
 
 ### Exit codes
 
 - `0` — normal completion
+- `1` — general error / workspace missing or invalid parameters
+- `2` — stage 1 preparation error (audio downloading/extraction incomplete or parsing failure)
+- `3` — audio block packing/splitting error, or task-file export failure
 - `4` — article prompt style not confirmed, i.e. `--article-type` missing or invalid
 
 <div align="right">

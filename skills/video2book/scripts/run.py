@@ -4,7 +4,6 @@
 支持在任意工作目录下调用当前项目的 CLI 入口。
 """
 
-import os
 import sys
 from pathlib import Path
 

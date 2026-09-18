@@ -5,7 +5,7 @@
 Tracks completed vs pending episodes in real time, supporting sliding-window
 continuous dispatch ("完成一个，立即派生一个") without manual offsets.
 
-`--next N --json` 输出的是**可直接转交子智能体的派发载荷**（任务书路径、音频切片清单、
+`--next-module N` / `--next-transcribe N`（配合 `--json`）输出的是**可直接转交子智能体的派发载荷**（任务书路径、音频切片清单、
 长文目标路径、本集 token 预算），并附带派发建议（并发数 / 打包粒度 / 是否必须派发）。
 `--log-dispatch` 可选地把本次建议写入 `<task>/.dispatch_log.jsonl` 作为派发台账。
 """
@@ -149,22 +149,29 @@ def load_parts(ws: Path) -> List[Dict]:
         if found:
             candidates.append(found)
 
-    # 3) 讲义文件名：排除任务书
+    # 3) 长文文件名：排除任务书
     articles_dir = ws / "articles"
     if articles_dir.exists():
         found = []
-        for f in sorted(articles_dir.glob("P*_*.md")):
+        for f in sorted(articles_dir.glob("模块*.md")):
             if f.name.endswith("_TASK.md"):
                 continue
-            m = re.match(r"P(\d+)_(.*?)(?:_精读文章)?\.md$", f.name)
+            m = re.match(r"模块(\d+)_(.*?)(?:_精读长文)?\.md$", f.name)
             if m:
                 found.append({"page": int(m.group(1)), "title": m.group(2).strip()})
+        if not found:
+            for f in sorted(articles_dir.glob("P*_*.md")):
+                if f.name.endswith("_TASK.md"):
+                    continue
+                m = re.match(r"P(\d+)_(.*?)(?:_精读文章)?\.md$", f.name)
+                if m:
+                    found.append({"page": int(m.group(1)), "title": m.group(2).strip()})
         if found:
             candidates.append(found)
 
-    # 4) 模块规划分集编号：覆盖全量但无逐集标题，仅作兜底
+    # 4) 块规划分集编号：覆盖全量但无逐集标题，仅作兜底
     planned = sorted({
-        ep for b in (manifest.get("knowledge_blocks_plan") or [])
+        ep for b in (manifest.get("blocks") or manifest.get("knowledge_blocks_plan") or [])
         for ep in (b.get("episodes") or [])
     })
     if planned:

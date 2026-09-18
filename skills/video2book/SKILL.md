@@ -192,9 +192,9 @@ python src/cli.py logout                                   # 撤销保存（两�
   转录角色取载荷：python scripts/queue_tracker.py --next-transcribe 2 --json
   ├── 1. 读块：subtitles/BLK01_P01-P07_转录任务书.md（块音频绝对路径 + 块内时间表）
   ├── 2. 转录：read_media(file_path=块音频, mode="transcribe", duration_minutes=块时长)
-  │      并把任务书 2.1 节那段「行首 [HH:MM:SS] 时间戳」要求**原样**传进 instruction
+  │      并把任务书 2.1 节那段「纯文本忠实转录」要求**原样**传进 instruction（无需时间戳）
   ├── 3. 落盘：完整转录正文写入 subtitles/BLK01_P01-P07_逐字稿.md（**唯一事实来源**）
-  └── 4. 回报一行：BLK01 | 逐字稿路径 | 字节数 | 末时间戳（**不回传正文**）
+  └── 4. 回报一行：BLK01 | 逐字稿路径 | 字节数 | 执行者（**不回传正文**）
           │
           ▼
 【阶段一 B：模块长文成文（派发回路；块逐字稿一就绪就派写作，不必等全部转录完）】
@@ -258,7 +258,7 @@ python src/cli.py logout                                   # 撤销保存（两�
 
 | 任务书 | 位置 | 交给谁 | 内含 |
 | :--- | :--- | :--- | :--- |
-| **块级转录任务书** | `subtitles/BLK01_P01-P07_转录任务书.md` | **专职转录角色** | 块音频绝对路径、块内每集起止时间表、逐字稿目标路径、时间戳要求 |
+| **块级转录任务书** | `subtitles/BLK01_P01-P07_转录任务书.md` | **专职转录角色** | 块音频绝对路径、块内每集起止时间表、逐字稿目标路径、纯文本转录要求 |
 | **模块长文任务书** | `articles/模块XX_<块标题>_TASK.md` | 写作角色（子智能体） | 本块逐字稿路径（**唯一事实来源**）、块覆盖分集清单、目标长文路径、所选类型的文章撰写提示词 |
 
 模块长文任务书**只给逐字稿、不夹带任何音频切片清单**：写作侧只吃文本，音频留在块里、由转录角色消费。
@@ -280,19 +280,16 @@ python src/cli.py logout                                   # 撤销保存（两�
   可带 `_course` 指定课程短名）后重跑 `merge-audio`，幂等改名并刷新全部引用；标题缺失时退化为
   「首集标题 + 集号区间」，**绝不空名**；
 - 清单落在 `audio/_blocks/blocks.json`，是模块边界与交付物命名的**唯一事实源**；
-- 转录角色按块调用 `read_media(mode="transcribe")`（**必须**把任务书 2.1 节的
-  「行首 `[HH:MM:SS]` 时间戳」要求原样传进 `instruction`），把整块正文写入
-  `subtitles/BLK01_P01-P07_逐字稿.md`。时间戳不是长文的必需品（长文按块写），
-  但没有它就无法机械切回分集——所以照传，代价是零；
+- 转录角色按块调用 `read_media(mode="transcribe")`（把任务书 2.1 节的
+  「纯文本忠实转录」要求原样传进 `instruction`），把整块正文写入
+  `subtitles/BLK01_P01-P07_逐字稿.md`。逐字稿**无需标注任何时间戳**，专注保证讲授内容忠实度、
+  技术术语、代码公式与推导脉络的完整性；
 - **写作按块成文**：一个块写**一篇模块长文**（不是把几集拼在一起，也不逐集机械分小节），
-  落盘 `articles/模块XX_<块标题>_精读长文.md`；块内各集标题列在任务书中，供成文时定位知识点，
-  但正文按知识脉络自拟标题、**不写序号**；
-- **按集切分是可选动作**（事后想逐集查阅时才做）：
-  `python src/cli.py split-transcript "<工作区>" --block 1` 按块内时间表把块级稿切成
-  `subtitles/PXX_<标题>_逐字稿.md`。切分是**确定性**的：时间戳落在哪一集的时间区间里就归哪一集；
-  边界未锚定、切后出现空集，或某集内容占比达到时长占比的 1.5 倍以上时整块标记 `suspect`
-  （保留文件供排障，不参与任何派发）；`unsplit`（完全没有时间戳）不切分、只留块级稿。
-  这些状态**不影响按块写作**——按块写作只依赖块级稿；
+  直接以块级纯文本逐字稿为唯一事实依据，落盘 `articles/模块XX_<块标题>_精读长文.md`；
+  块内各集标题列在任务书中，供成文时定位知识点，但正文按知识脉络自拟标题、**不写序号**；
+- **按集切分是可选动作**（仅供有时间戳的旧逐字稿事后按集查阅）：
+  纯文本逐字稿在 `split-transcript` 下会正常报告 `unsplit` 并保留块级稿，**不报错也不影响任何下游任务**——
+  模块长文、教材、笔记与导图均直接消费块级纯文本逐字稿；
 - **改块时长要留意**：块编号与集号区间由「目标时长 + 集时长分布」决定，改一次
   `--block-minutes` 就可能把 15 块变成 12 块。重跑时会自动**作废与本次装箱不符的旧转录任务书**
   （否则它是一份可被派发的幽灵任务），块音频与块级逐字稿只报告不删。
@@ -313,13 +310,13 @@ python src/cli.py logout                                   # 撤销保存（两�
 1. **取切片**：对任务书清单中的切片调用 MCP 工具 `omni-media:read_audio`：
    ```json
    {
-     "file_path": "<task_dir>/audio/P01_xxx.m4a",
+     "file_path": "<task_dir>/audio/_blocks/BLK01_xxx.m4a",
      "output_mode": "file"
    }
    ```
    任务书里的切片本就是按 **60 分钟预算**切好的（每片 ≤ 60 分钟，`omni-media` 对 ≤ 75 分钟文件一次性整片就绪），
    因此**不要传 `duration_minutes`**，一次听完整片即可；只有返回文本里 `OMNI_STATUS` 显示 `is_finished=false`（超长媒体自动分卷）时，
-   才用返回的 `start_time` / `duration_minutes` 续读下一卷；
+   才按其中的 `next_start_time` / `next_duration_minutes` 续读下一卷；
 2. **多模态感知**：用**宿主自己的文件查看能力**（能直接感知音频内容的那件工具；各平台工具名见 `references/host-tools/`）打开切片绝对路径，直接聆听讲师原声、例题推导与板书讲解；超长音频按返回的续读参数逐片听完；
 
 **通道 B（只有 `read_media` 时）**：
@@ -327,7 +324,7 @@ python src/cli.py logout                                   # 撤销保存（两�
 1. **代读**：对任务书清单中的切片调用 MCP 工具 `omni-media-ext:read_media`：
    ```json
    {
-     "file_path": "<task_dir>/audio/P01_xxx.m4a",
+     "file_path": "<task_dir>/audio/_blocks/BLK01_xxx.m4a",
      "mode": "transcribe"
    }
    ```
@@ -364,7 +361,7 @@ python src/cli.py logout                                   # 撤销保存（两�
 | 子智能体输入 | **直接转交该块任务书**（`articles/模块XX_*_TASK.md`）——它已含完整撰写提示词与红线，派发词不必也不得重述规范；**主 Agent 不代读、不代听** |
 | 子智能体输出 | 只写 `articles/模块XX_*_精读长文.md`，**不回传正文**（正文回传会把主上下文重新撑满） |
 | 回报格式 | 固定一行：`BLK03 | 文件路径 | 字节数 | 执行者` |
-| 验收 | `queue_tracker.py --summary` 看 `STAGE1_DONE`；`--next N` 复核剩余待办 |
+| 验收 | `queue_tracker.py --summary` 看 `STAGE1_DONE`；`--next-module N` / `--next-transcribe N` 复核剩余待办 |
 | 返修 | 质检不达标时，把「文件:行号:原文」贴回该块子智能体重派，最多 2 轮；仍不达标由主 Agent 亲自返修该块 |
 
 > **派发台账（观察性证据）**：加 `--log-dispatch` 会把本次建议的块追加写入 `<task>/.dispatch_log.jsonl`。
@@ -638,7 +635,7 @@ python src/cli.py logout
 | `audio` | `--page N` `--all` `--range X-Y` `--quality low\|medium\|high` `--url-only` `--output DIR` `--json` `--force` | 单集或批量取音频；`--url-only` 只打印直链不下载；`--output` 覆盖音频目录 |
 | `pipeline` | `--all` `--range X-Y` `--page N` `--quality <档>` `--prefetch-workers N` `--skip-failed` `--block-minutes N` `--force` `--article-type <风格>` `--task NAME` `--base-dir DIR` | 阶段一主入口；`--skip-failed` 把音频失败集记入跳过名单继续跑；`--block-minutes` 是**块时长目标**（默认取 `BVB_AUDIO_BLOCK_MINUTES`，再默认 50，落进 40–60 带；硬上限看 `BVB_AUDIO_ONESHOT_LIMIT_MINUTES`）；`--force` 重派已完成块 |
 | `merge-audio` | `<工作区目录>` `--block-minutes N` `--force` | 单独重跑音频装箱合并并重出块级转录任务书（幂等；改完 `block_titles.json` 后重跑即按新标题改名；`--force` 忽略指纹重建块） |
-| `split-transcript` | `<工作区目录>` `--block N` | **可选动作**：把块级逐字稿按块内时间表切成 `subtitles/PXX_*_逐字稿.md` 供逐集查阅（幂等；`--block` 只处理指定块）。写作按块进行，不依赖它 |
+| `split-transcript` | `<工作区目录>` `--block N` | **可选动作**：把带时间戳的旧逐字稿切回分集（幂等；纯文本稿自动标记 unsplit 并保留块级稿，不影响写作） |
 | `cluster-notes` | `--force` `--block-id N` `--start-block N` `--end-block N` | 块 → 笔记归并派发；后三个按**笔记序号**只处理指定区间（参数名是历史遗留）；`--force` 强制重导笔记任务书 |
 | `cluster-articles` | `--force` | 默认复用已有教材，`--force` 按最新章节重编 |
 | `dedup` | `--dry-run` | 只报告重复分集，不复制语料与长文 |

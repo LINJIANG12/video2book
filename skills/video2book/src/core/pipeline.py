@@ -22,8 +22,6 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from src.core.parser import BilibiliParser
-from src.core.local_media import LocalMediaParser
 from src.core.fetcher import AudioFetcher
 from src.core.workspace import TaskWorkspace, sanitize_filename
 from src.core import fsutil
@@ -221,14 +219,19 @@ def export_block_article_task(
     return task_file
 
 
-# 转录时必须追加的时间戳要求。它是「块级逐字稿能机械切回分集」的前提：没有行首时间戳，
-# 切分器只能降级为 unsplit，写作角色就得自己照时间表猜段落归属。
-TRANSCRIBE_TIMESTAMP_INSTRUCTION = (
-    "请在逐字稿正文里为每个自然段标注该段起始时间，格式为行首的 [HH:MM:SS]，例如：\n"
-    "[00:12:35] 下面我们看 mov 指令的用法……\n"
-    "要求：① 每个自然段都要标，不要只在开头标一次；② 时间戳必须对应音频的真实位置；"
-    "③ 不要只标话题转折处。这份时间戳用于把整块音频的逐字稿切回单集，缺了就无法自动切分。"
+# 块级逐字稿纯文本高保真转录指令。
+# 下游写作（模块长文、教材全书、复习笔记）直接以块级逐字稿为唯一事实依据，按块成文；
+# 逐字稿无需时间戳，重点保障转录忠实度、专业术语、推导细节与代码公式的完整性。
+TRANSCRIBE_INSTRUCTION = (
+    "请忠实转录音频全文为纯文本逐字稿：\n"
+    "1. 忠实完整：完整转录讲师的原声讲解、口述推导与对话，严禁大意摘要、节选跳过或提前截断；\n"
+    "2. 术语准确：准确识别领域专业术语、英文标识符、指令名、API、变量与缩写；\n"
+    "3. 代码公式：讲师口述推导的数学公式、代码逻辑与配置参数如实记录；\n"
+    "4. 纯净正文：不需要也不得标注时间戳（严禁臆测添加 [HH:MM:SS]），按自然语意与话题分段成通顺的段落正文。"
 )
+
+# 保持向后兼容别名（以防外部脚本或测试引用）
+TRANSCRIBE_TIMESTAMP_INSTRUCTION = TRANSCRIBE_INSTRUCTION
 
 
 def export_block_transcribe_task(
@@ -279,7 +282,7 @@ def export_block_transcribe_task(
         f"# BLK{block_id:02d} {span} 块级转录任务书（TRANSCRIBE_TASK）\n\n"
         f"> 状态：need-agent-transcript | **只做转录这一件事**，不要写长文\n"
         f"> 执行者：由**专职转录子智能体**承担（建议 2 个角色各领一半块队列、连续消费）\n"
-        f"> 完成后只回报一行 `BLK{block_id:02d} | 逐字稿路径 | 字节数 | 时间戳份数`，**不回传正文**\n"
+        f"> 完成后只回报一行 `BLK{block_id:02d} | 逐字稿路径 | 字节数 | 执行者`，**不回传正文**\n"
         + (f"> 块标题（语义组合）：{block_title}\n" if block_title else "")
         + f"> 块时长 {duration_min:.1f} 分钟 / 覆盖 {len(pages)} 集；块内时间表见第 1 节\n\n"
         f"## 1. 任务输入\n\n"
@@ -287,27 +290,26 @@ def export_block_transcribe_task(
         f"- 块音频（本地绝对路径）：`{block_audio}`\n"
         f"- 覆盖分集：{'、'.join(episode_list)}\n"
         f"- 原始逐字稿落盘路径：`{block_transcript}`\n\n"
-        f"### 块内时间表（核对覆盖与后续按集补切都用它，由合并时的 ffprobe 实测时长推出）\n\n"
+        f"### 块内时间表（供知识点定位核对，由合并时的 ffprobe 实测时长推出）\n\n"
         f"{table}\n\n"
         f"---\n\n"
         f"## 2. 执行指引\n\n"
         f"1. **转录整块**：调用 `omni-media-ext:read_media`：\n"
         f"   - `file_path` = 第 1 节的块音频绝对路径；\n"
         f"   - `mode` = `\"transcribe\"`；\n"
-        f"   - `endpoint` = 配置里**逐字最忠实**的 ASR 端点（本机为 `gemini-proxy-asr`）；\n"
+        f"   - `endpoint` = （可选）指定外部 ASR 端点名（不传走默认端点，或按 omni-media-ext 配置指定）；\n"
         f"   - `duration_minutes` = {max(1.0, round(duration_min, 1))}（一次读完）；\n"
-        f"   - `instruction` = 第 2.1 节那段时间戳要求（**必须原样传入**）；\n"
-        f"   - 返回文本里 `OMNI_STATUS` 的 `is_finished=false` 时，用 `start_time=next_start_time`"
+        f"   - `instruction` = 第 2.1 节纯文本转录要求（**必须原样传入**）；\n"
+        f"   - 返回文本里 `OMNI_STATUS` 的 `is_finished=false` 时，按其中的 `next_start_time` / `next_duration_minutes`"
         f"继续读下一卷，并按顺序拼接各卷正文；\n"
         f"2. **落盘原始逐字稿**：把完整转录正文写入第 1 节的「原始逐字稿落盘路径」"
         f"（`OMNI_STATUS` 注释行可丢弃，正文原样保留，不要自己摘要或改写）；\n"
-        f"3. **核对完整性后回报**：确认正文覆盖到块尾（末时间戳接近块时长，或字数与块时长相称），"
+        f"3. **核对完整性后回报**：确认正文完整覆盖整块音频（字数与音频时长相称，通常每分钟约 200~300 字），"
         f"然后按抬头格式回报一行即可。\n"
-        f"   - 长文**按块撰写**（一个块一篇模块长文），因此**不需要**把逐字稿切回分集；\n"
-        f"   - 只有事后想按集查阅时，才可选执行 split-transcript（有时间戳时是机械切分；"
-        f"报告 `unsplit` 说明本次逐字稿无时间戳，不影响按块写作）。\n\n"
-        f"### 2.1 时间戳要求（原样传给 `instruction`）\n\n"
-        f"```text\n{TRANSCRIBE_TIMESTAMP_INSTRUCTION}\n```\n\n"
+        f"   - 模块长文**按块撰写**（一个块一篇模块长文），下游直接以纯文本逐字稿为事实依据；\n"
+        f"   - 逐字稿**无需时间戳**，下游长文成文、教材全书与复习笔记均直接消费块级纯文本正文。\n\n"
+        f"### 2.1 纯文本转录要求（原样传给 `instruction`）\n\n"
+        f"```text\n{TRANSCRIBE_INSTRUCTION}\n```\n\n"
         f"---\n\n"
         f"## 3. 纪律\n\n"
         f"- 本任务**只产出逐字稿**：不写长文、不动 `articles/`、不派发任何写作任务；\n"

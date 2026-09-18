@@ -8,17 +8,15 @@
 
 import http.cookiejar
 import json
-import os
 import shutil
 import subprocess
-import sys
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from .wbi import WbiSigner
 from .proc import run_quiet

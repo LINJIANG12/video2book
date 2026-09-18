@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """Task-file Reclaim (任务书回收) —— 独立可执行入口。
 
-任务书（`*_TASK.md`）是工具层写给宿主 Agent 的临时派发物，成品（`articles/` /
-`subtitles/kernels/` / `notes/`）落地后即可回收，每个类别保留编号最小的 N 份作为提示词范本。
+任务书（`*_TASK.md` / `*_转录任务书.md`）是工具层写给宿主 Agent 的临时派发物，成品（`articles/` /
+`subtitles/` / `notes/`）落地后即可回收，每个类别保留编号最小的 N 份作为提示词范本。
 成品尚未产出的任务书一律保留，不会误删正在进行的派发。
 
 用法：
@@ -69,6 +69,17 @@ def main() -> int:
         total_failed_delete += len(result.get("failed_delete", []))
         report.append({"workspace": ws.root_dir.name, **result})
 
+    strict_failed = False
+    if args.strict:
+        if total_failed_delete > 0:
+            strict_failed = True
+        elif not args.dry_run:
+            for item in report:
+                for p_str in item.get("deleted", []):
+                    if Path(p_str).exists():
+                        strict_failed = True
+                        break
+
     if args.json:
         print(json.dumps({
             "dry_run": bool(args.dry_run),
@@ -76,9 +87,10 @@ def main() -> int:
             "total_kept": total_kept,
             "total_skipped_pending": total_skipped,
             "total_failed_delete": total_failed_delete,
+            "strict_passed": not strict_failed,
             "workspaces": report,
         }, ensure_ascii=False, indent=2))
-        return 0
+        return 1 if strict_failed else 0
 
     print("=" * 68)
     print(f"[*] 任务书回收（{'预演，不落盘' if args.dry_run else '执行删除'}；每类保留 {keep_n} 份范本）")
@@ -99,6 +111,10 @@ def main() -> int:
     print(f"[✓] {verb}任务书 {total_deleted} 份 | 保留范本 {total_kept} 份 | "
           f"成品未产出仍保留 {total_skipped} 份 | 删除失败 {total_failed_delete} 份")
     print("[i] note_plan_TASK.md 属课程级规划任务书，唯一存在，永不回收。")
+    if strict_failed:
+        print("[ERROR] --strict 校验失败：存在删除失败或未成功移除的任务书", file=sys.stderr)
+        print("=" * 68, file=sys.stderr)
+        return 1
     print("=" * 68)
     return 0
 

@@ -7,7 +7,6 @@ Supports:
 4. Providing standard metadata schema compatible with BilibiliParser for downstream pipelines.
 """
 
-import os
 import re
 import shutil
 import subprocess

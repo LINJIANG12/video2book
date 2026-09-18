@@ -189,7 +189,7 @@ flowchart TD
     class G,I data
 ```
 
-- **取音只发生在转录角色身上，且按块取**：音频按集边界装箱成 40–60 分钟的块（`audio/_blocks/`，目标时长默认 50 分钟；超长集劈上/下两条腿分块转录），块标题由块内分集名语义组合而来、写进块音频文件名。转录角色一次读完整块、按行首时间戳产出块级逐字稿；写作角色只读逐字稿，一个块写一篇模块长文，不再接触音频。
+- **取音只发生在转录角色身上，且按块取**：音频按集边界装箱成 40–60 分钟的块（`audio/_blocks/`，目标时长默认 50 分钟；超长集劈上/下两条腿分块转录），块标题由块内分集名语义组合而来、写进块音频文件名。转录角色一次读完整块产出高保真纯文本块级逐字稿；写作角色只读逐字稿，一个块写一篇模块长文，不再接触音频。
 - **派发阈值写在 `src/core/budget.py`**：课程总时长在 60 分钟以内时由主 Agent 串行处理，超过则必须派发——转录角色建议 2 个并行消费块队列，写作角色**一个块一个子智能体**（一块一篇模块长文）。窗口兜底只对**走通道 A 的转录角色**成立：实算音频 token 超过上下文窗口 60% 的块必须分卷续读。
 - **模块层没有规划，只有归并一趟，且缺归并不停机**：块就是知识模块（音频按 40–60 分钟装箱，块标题由块内分集名语义组合而来），教材直接按块序整编块长文；笔记侧把块归并成若干篇（`note_plan.json`，一篇可跨多个块）。漏认领／重复认领／引用不存在的块都当场抢救，命令始终正常退出，盘上的 `note_plan.json` 不会被兜底结果覆盖。
 - **阶段一与阶段二按内容边界解耦**，较长课程也能在断点后续跑。
@@ -366,7 +366,7 @@ skill/
 | `split-transcript` | 可选：块逐字稿切回分集逐字稿（按集查阅） | `python src/cli.py split-transcript "<工作区目录>" --block 1` |
 | `cluster-articles` | 按块序把模块长文整编成册（册=书、章=块） | `python src/cli.py cluster-articles "<链接>"` |
 | `cluster-notes` | 块 → 笔记归并，导出笔记任务书 | `python src/cli.py cluster-notes "<链接>"` |
-| `dedup` | 同步重复音频资产以节省 token | `python src/cli.py dedup --dry-run` |
+| `dedup` | 同步重复音频资产以节省 token | `python src/cli.py dedup "<链接>" --dry-run` |
 | `cleanup` | 回收三类已完成任务书（转录/模块长文/笔记），每类留 1 份范本（`--keep 0` 全清） | `python src/cli.py cleanup --dry-run` |
 | `sync` | 以磁盘产物为准回填 manifest.json | `python src/cli.py sync --dry-run` |
 | `info` | 显示环境与工具链就绪状态 | `python src/cli.py info` |
@@ -380,9 +380,10 @@ skill/
 | `--article-type` | `pipeline` | 长文提示词风格：`learning`（学习，推荐）/ `legacy`（旧版） | 不传即退出码 4 |
 | `--all` / `--range X-Y` / `--page N` | `pipeline` / `audio` | 选集范围：全部 / 区间 / 单集 | 单集 |
 | `--force` | 多数命令 | 强制重跑，忽略已有产物 | 关 |
-| `--base-dir` | 全部 | 产物根路径 | `BVB_OUTPUT_DIR`，或 `<工作目录>/output`（无容器标记时） |
-| `--task` | 全部 | 指定课程工作区目录名 | 最近活动的那个 |
-| `--sessdata` | 全部 | 本次执行的凭证，优先于本地存档 | 已保存的存档 |
+| `--base-dir` | `pipeline` / `audio` / `cluster-*` / `dedup` / `cleanup` / `sync` | 产物根路径 | `BVB_OUTPUT_DIR`，或 `<工作目录>/output`（无容器标记时） |
+| `--task` | `pipeline` / `audio` / `cluster-*` / `dedup` / `cleanup` / `sync` | 指定课程工作区目录名 | 最近活动的那个 |
+| `--sessdata` | `parse` / `audio` / `pipeline` / `cluster-*` / `dedup` / `login` / `info` | B 站登录凭证，优先于本地存档 | 已保存的存档 |
+| `--douyin-cookie` | `parse` / `audio` / `pipeline` / `login` / `info` | 抖音完整 Cookie 串，用于突破匿名抓取硬窗口 | 已保存的存档 |
 | `--dry-run` | `dedup` / `cleanup` / `sync` | 只报告不落盘 | 关 |
 | `--json` | `parse` / `audio` / 脚本 | 以 JSON 输出 | 关 |
 
@@ -391,14 +392,19 @@ skill/
 | 脚本 | 说明 | 常用参数 |
 |---|---|---|
 | `scripts/queue_tracker.py` | 块级转录/写作进度、阶段门禁、派发载荷与台账 | `--next-transcribe N` / `--next-module N` / `--summary` / `--pattern` / `--log-dispatch` / `--json` |
+| `scripts/article_grounding_check.py` | 依据级校验（模块长文是否真实基于块逐字稿技术实体） | `--strict`、`--min-coverage F`、`--min-freq N` |
 | `scripts/note_quality_check.py` | 笔记成色体检 | `--strict`、`--require-structure`、`--max-truncated N` |
 | `scripts/render_compat_check.py` | 渲染合规体检 | `--strict`、`--require-lang` |
+| `scripts/strip_heading_numbers.py` | 存量模块长文标题序号就地剥除 | `--dry-run` |
 | `scripts/selfcheck.py` | 仓库唯一门禁自检 | — |
 | `scripts/run.py` | 免安装 CLI 入口 | 透传子命令 |
 
 ### 退出码
 
 - `0` — 正常结束
+- `1` — 通用错误 / 目标工作区缺失或参数非法
+- `2` — 阶段一准备错误（音频下载未 100% 就绪或解析异常）
+- `3` — 块级转录装箱/切分异常，或任务书导出失败
 - `4` — 未确认长文提示词风格，即 `--article-type` 缺失或取值非法
 
 <div align="right">
