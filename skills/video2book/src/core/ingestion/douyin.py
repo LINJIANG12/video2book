@@ -58,7 +58,7 @@ class DouyinProvider(BaseMediaProvider):
 
     def _get_client(self, **kwargs: Any) -> Any:
         from .dyaudio.client import DouyinClient
-        from .dyaudio.config import Config, load_config
+        from .dyaudio.config import load_config
 
         cfg_path = kwargs.get("config_path")
         cfg = load_config(cfg_path)
@@ -71,12 +71,10 @@ class DouyinProvider(BaseMediaProvider):
         return DouyinClient(cfg), cfg
 
     def probe(self, target: str, **kwargs: Any) -> Dict[str, Any]:
-        from .dyaudio.share_parser import ParseError, parse_share_url
+        from .dyaudio.share_parser import parse_share_url
         from .dyaudio.user_crawler import (
-            UserError,
             collect_awemes_by_mix,
             extract_sec_uid,
-            get_user_profile,
         )
         from .dyaudio.utils import sanitize_filename
 

@@ -106,13 +106,11 @@ class TranscriptSplitter:
 
         pages = [int(seg["page"]) for seg in ordered]
         starts = [float(seg.get("start_sec") or 0.0) for seg in ordered]
-        ends = [float(seg.get("end_sec") or 0.0) for seg in ordered]
 
         buckets: Dict[int, List[str]] = {page: [] for page in pages}
         preamble: List[str] = []
         seen: List[float] = []
         current_page: Optional[int] = None
-        current_sec: Optional[float] = None
 
         for raw_line in (text or "").splitlines():
             stats["lines"] += 1
@@ -121,7 +119,6 @@ class TranscriptSplitter:
             if stamp is not None:
                 stats["timestamps"] += 1
                 seen.append(stamp)
-                current_sec = stamp
                 match = _LEADING_TS_RE.match(raw_line)
                 body = (match.group("rest") if match else raw_line).rstrip()
                 # 落在哪一集：取最后一个 start<=t 的集

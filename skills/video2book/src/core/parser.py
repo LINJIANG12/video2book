@@ -17,6 +17,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
+from .bili_web import BROWSER_HEADERS, is_retryable_status
 from .wbi import WbiSigner
 
 
@@ -27,21 +28,7 @@ class BilibiliParser:
     SEASON_ARCHIVES_API = "https://api.bilibili.com/x/space/fav/season/list"
     SEASON_ARCHIVES_FALLBACK_API = "https://api.bilibili.com/x/polymer/web-space/seasons_archives_list"
 
-    DEFAULT_HEADERS = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Referer": "https://www.bilibili.com/",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "Origin": "https://www.bilibili.com",
-        "Connection": "keep-alive",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-site",
-    }
+    DEFAULT_HEADERS = dict(BROWSER_HEADERS)
 
     @staticmethod
     def _resolve_keys_path(keys_file: Optional[Any] = None, workspace: Optional[Any] = None) -> Optional[str]:
@@ -315,7 +302,7 @@ class BilibiliParser:
                     data = json.loads(resp.read().decode("utf-8"))
                     break
             except urllib.error.HTTPError as err:
-                retryable = (err.code == 412) or (500 <= err.code <= 599)
+                retryable = is_retryable_status(err.code)
                 if retryable and attempt <= max_retries:
                     retry_after = err.headers.get("Retry-After") if hasattr(err, "headers") else None
                     if retry_after and retry_after.isdigit():

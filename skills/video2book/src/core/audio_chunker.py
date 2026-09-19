@@ -8,8 +8,6 @@
 import re
 import shutil
 import subprocess
-from pathlib import Path
-from typing import Optional, Union
 
 from .local_media import PROBE_TIMEOUT_SEC
 from .proc import run_quiet

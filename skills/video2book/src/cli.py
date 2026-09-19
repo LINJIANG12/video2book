@@ -638,7 +638,7 @@ def cmd_cluster_notes(args):
     course_title = resolve_course_title(info, ws)
 
     print("=" * 65)
-    print(f"[*] 启动笔记流水线（块清单 → 语义归并 → 笔记任务书）")
+    print("[*] 启动笔记流水线（块清单 → 语义归并 → 笔记任务书）")
     print(f"[*] 课程标题: 《{course_title}》 (共 {len(parts)} 个分集)")
     print(f"[*] 任务工作区: {ws.root_dir}")
     print("=" * 65)
@@ -675,7 +675,7 @@ def cmd_cluster_notes(args):
 
     print("\n" + "=" * 65)
     if outcome["note_status"] == "no-blocks":
-        print(f"[✓] 本命令已正常结束（未派发笔记）：块清单缺失，界面已给出装箱命令。")
+        print("[✓] 本命令已正常结束（未派发笔记）：块清单缺失，界面已给出装箱命令。")
     else:
         _gen = sum(1 for r in outcome["results"] if r.get("status") == "generated")
         _cached = len(outcome["results"]) - _gen
@@ -701,7 +701,7 @@ def cmd_cluster_articles(args):
     course_title = resolve_course_title(info, ws)
 
     print("=" * 65)
-    print(f"[*] 启动教材整编流水线：按块序把各块模块长文整编成册 (Modular Textbook Integration)")
+    print("[*] 启动教材整编流水线：按块序把各块模块长文整编成册 (Modular Textbook Integration)")
     print(f"[*] 课程标题: 《{course_title}》")
     print(f"[*] 任务工作区: {ws.root_dir}")
     print(f"[*] 目标教材目录: {ws.root_dir / 'textbooks'}")
@@ -711,7 +711,7 @@ def cmd_cluster_articles(args):
     # 没有块清单就没有模块可整编——提示先装箱，而不是退回按标题前缀硬分组（那正是被废除的老路）。
     blocks = (AudioMerger.load_manifest(ws) or {}).get("blocks") or []
     if not blocks:
-        print(f"[!] 本工作区没有块清单，无法整编教材：模块边界来自音频装箱。")
+        print("[!] 本工作区没有块清单，无法整编教材：模块边界来自音频装箱。")
         print(f"[*] 请先跑：python src/cli.py merge-audio \"{Path(ws.root_dir).as_posix()}\"")
         print("=" * 65)
         sys.exit(2)
@@ -749,7 +749,7 @@ def cmd_dedup(args):
     ws = TaskWorkspace.create(title=info["title"], bvid=bvid, custom_name=args.task, base_dir=args.base_dir, info_name=info.get("workspace_name"))
 
     print("=" * 65)
-    print(f"[*] 启动音频 SHA-256 指纹去重扫描流水线 (Audio Fingerprint Deduplication)")
+    print("[*] 启动音频 SHA-256 指纹去重扫描流水线 (Audio Fingerprint Deduplication)")
     print(f"[*] 任务工作区: {ws.root_dir}")
     print("=" * 65)
 

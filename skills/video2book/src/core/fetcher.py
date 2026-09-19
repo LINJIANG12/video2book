@@ -18,25 +18,11 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from .bili_web import BROWSER_HEADERS as 浏览器请求头
+from .bili_web import is_retryable_status
 from .wbi import WbiSigner
 from .proc import run_quiet
 
-
-# 浏览器级请求头（模拟桌面浏览器行为）
-浏览器请求头 = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Referer": "https://www.bilibili.com/",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-    "Origin": "https://www.bilibili.com",
-    "Connection": "keep-alive",
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-site",
-}
 
 # 集中限速状态（元数据接口调用间隔不小于最小间隔，线程安全）
 _限速锁 = threading.Lock()
@@ -141,7 +127,7 @@ def _请求元数据(地址: str, 请求头: Dict[str, str], 超时: int = 15) -
             最后错误 = 错误
             状态 = 错误.code
             响应头 = getattr(错误, "headers", None)
-            可重试 = (状态 == 412) or (500 <= 状态 <= 599)
+            可重试 = is_retryable_status(状态)
             if 可重试 and 轮次 <= _最大重试次数:
                 等待 = _解析等待秒数(响应头, 轮次)
                 print(f"[重试]元数据接口状态异常（{状态}），{等待:.1f}秒后重试（第{轮次}次）")
@@ -185,7 +171,6 @@ def _请求元数据(地址: str, 请求头: Dict[str, str], 超时: int = 15) -
 
 def _atomic_replace(src: Path, dst: Path, retries: int = 3, delay: float = 0.2) -> None:
     """Windows-safe atomic file replacement with brief retry on transient file locks."""
-    last_err = None
     for i in range(retries):
         try:
             if dst.exists():
@@ -193,11 +178,9 @@ def _atomic_replace(src: Path, dst: Path, retries: int = 3, delay: float = 0.2) 
             else:
                 src.rename(dst)
             return
-        except PermissionError as err:
-            last_err = err
+        except PermissionError:
             time.sleep(delay * (i + 1))
-        except OSError as err:
-            last_err = err
+        except OSError:
             time.sleep(delay)
     # Final attempt fallback
     if src.exists():

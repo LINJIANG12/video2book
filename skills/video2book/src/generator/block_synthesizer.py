@@ -371,7 +371,7 @@ class BlockSynthesizer:
             if missing:
                 missing_str = "、".join(f"块 {m:02d}" for m in missing)
                 print(f"    [gate] 本篇尚有 {len(missing)} 块无模块长文（{missing_str}），跳过笔记派发")
-                print(f"    [gate] 请先让 Agent 补齐 articles/ 后再重跑本命令（已产出的笔记会自动复用）")
+                print("    [gate] 请先让 Agent 补齐 articles/ 后再重跑本命令（已产出的笔记会自动复用）")
                 continue
             print(f"    [✓] 语料齐备：已锁定 {len(articles)} 篇模块长文")
 

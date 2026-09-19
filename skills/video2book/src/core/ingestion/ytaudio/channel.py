@@ -22,7 +22,7 @@ YouTube 没有「合集」概念，对应物是**播放列表(Playlist)**。做�
 from __future__ import annotations
 
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 from .config import Config
 from .engine import Engine

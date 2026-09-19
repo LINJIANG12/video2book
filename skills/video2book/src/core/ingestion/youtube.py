@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import re
 import shutil
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -25,7 +24,7 @@ class YouTubeProvider(BaseMediaProvider):
         return any(domain in low for domain in self._YT_DOMAINS)
 
     def _get_engine_and_cfg(self, **kwargs: Any) -> Tuple[Any, Any]:
-        from .ytaudio.config import Config, load_config
+        from .ytaudio.config import load_config
         from .ytaudio.engine import Engine
 
         cfg_path = kwargs.get("config_path")
@@ -41,9 +40,9 @@ class YouTubeProvider(BaseMediaProvider):
         return Engine(cfg), cfg
 
     def probe(self, target: str, **kwargs: Any) -> Dict[str, Any]:
-        from .ytaudio.channel import canonical_url, collect_channel, normalize_channel_base
+        from .ytaudio.channel import canonical_url, collect_channel
         from .ytaudio.single import resolve_video
-        from .ytaudio.utils import is_video_url, sanitize_filename, slugify
+        from .ytaudio.utils import is_video_url, normalize_channel_base, sanitize_filename, slugify
 
         engine, cfg = self._get_engine_and_cfg(**kwargs)
         clean_target = target.strip()
@@ -60,25 +59,28 @@ class YouTubeProvider(BaseMediaProvider):
             uploader = str(info.get("uploader") or info.get("channel") or "YouTube")
             desc = str(info.get("description") or "")[:500]
 
+            # 标识符口径与其它来源一致：有原生 id 用 id，缺 id 则退回清洗后的标题
+            # （yt-dlp 正常都带 id；缺 id 时旧写法退化成 "yt_"，工作区名会与别门课撞车）
+            ident = video_id or sanitize_filename(title, max_len=60)[:20]
+
             parts = [{
                 "page": 1,
                 "title": title,
-                "cid": f"yt_{video_id}",
+                "cid": f"yt_{ident}",
                 "duration": duration,
                 "url": canonical_url(video_id),
                 "filepath": "",
             }]
 
-            safe_title = sanitize_filename(title, max_len=60)
             return {
-                "bvid": f"yt_{video_id}",
+                "bvid": f"yt_{ident}",
                 "title": title,
                 "desc": desc,
                 "duration": duration,
                 "owner": {"name": uploader, "mid": 0},
                 "video_type": "single",
                 "type_desc": "YouTube 单视频",
-                "cid": f"yt_{video_id}",
+                "cid": f"yt_{ident}",
                 "has_multi_pages": False,
                 "has_ugc_season": False,
                 "season_episodes": [],

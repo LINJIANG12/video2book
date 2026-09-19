@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from . import paths as _paths
+from .bili_web import NAV_HEADERS
 
 
 class WbiSigner:
@@ -130,17 +131,7 @@ class WbiSigner:
     def get_wbi_keys(cls, sessdata: Optional[str] = None) -> Tuple[str, str]:
         """从导航接口获取图片密钥与子密钥。"""
         cls.wait_rate_limit()
-        头 = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            ),
-            "Referer": "https://www.bilibili.com/",
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Origin": "https://www.bilibili.com",
-            "Connection": "keep-alive",
-        }
+        头 = dict(NAV_HEADERS)
         if sessdata:
             头["Cookie"] = f"SESSDATA={sessdata}"
 
