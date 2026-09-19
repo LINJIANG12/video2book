@@ -203,59 +203,22 @@ flowchart TD
 
 ## 使用方法
 
-### 处理整门课程
+最小可用示例（**在技能目录下执行**，`--article-type` 必填）：
 
 ```bash
-# B 站合集
+# 处理整门 B 站网课合集
 python src/cli.py pipeline "https://www.bilibili.com/video/BV14VqVBrEhc" --all --article-type learning
 
-# B 站“每个分集都是独立 BV”的旧版合集：任一入口都会自动展开整季
-python src/cli.py pipeline "https://space.bilibili.com/87476569/lists/695667?type=season" --all --article-type learning
-python src/cli.py pipeline "https://www.bilibili.com/list/87476569?sid=695667&type=season" --all --article-type learning
-python src/cli.py pipeline "https://www.bilibili.com/video/BV1RV4y1T7jf" --all --article-type learning
-
-# 本地课程目录
-python src/cli.py pipeline "D:\courses\software_engineering\" --all --article-type learning
-
-# YouTube 单视频 / 频道
-python src/cli.py pipeline "https://www.youtube.com/@freecodecamp" --all --article-type learning
-
-# 抖音单视频 / 博主合集
-python src/cli.py pipeline "https://www.douyin.com/user/MS4wLjAB..." --all --article-type learning
+# 处理本地课程目录
+python src/cli.py pipeline "D:\courses\software_engineering" --all --article-type learning
 ```
 
-### 处理指定分集或区间
+其余用法按需查 [CLI 场景手册](skills/video2book/references/cli-cookbook.md)（CLI 细节的单一真源）：
 
-```bash
-python src/cli.py pipeline "https://www.bilibili.com/video/BV14VqVBrEhc" --page 1 --article-type learning
-python src/cli.py pipeline "https://www.bilibili.com/video/BV14VqVBrEhc" --range 2-5 --article-type learning
-```
-
-### 查看派发队列与阶段门禁
-
-```bash
-python scripts/queue_tracker.py --next-module 5 --log-dispatch --json  # 写作侧取载荷（块任务书/逐字稿/目标长文）
-python scripts/queue_tracker.py --next-transcribe 2 --json             # 转录侧取载荷（块音频/时间表/逐字稿目标）
-python scripts/queue_tracker.py --summary                        # 单行状态：STAGE1_DONE 等
-python scripts/queue_tracker.py --pattern "微机原理" --next-module 5   # 多课程并存时指定工作区
-```
-
-### 生成模块教材与复习笔记
-
-```bash
-python src/cli.py cluster-articles "https://www.bilibili.com/video/BV14VqVBrEhc"           # 模块全书
-python src/cli.py cluster-notes "https://www.bilibili.com/video/BV14VqVBrEhc"              # 块 → 笔记归并 → 笔记任务书
-python src/cli.py cluster-notes "https://www.bilibili.com/video/BV14VqVBrEhc" --force      # 强制重导笔记任务书
-```
-
-### 交付前质检与对账
-
-```bash
-python scripts/note_quality_check.py --strict      # 笔记成色
-python scripts/render_compat_check.py --strict     # 渲染合规
-python src/cli.py cleanup --dry-run                # 任务书回收预演
-python src/cli.py sync                             # 以磁盘产物回填 manifest.json
-```
+- **按平台 / 按区间取音**：B 站合集与「每个分集都是独立 BV」的旧版合集、YouTube 频道、抖音博主合集、`--page` / `--range` 选集；
+- **派发队列与阶段门禁**：`queue_tracker.py` 的转录侧 / 写作侧 / 笔记侧取载荷与单行状态；
+- **生成教材与笔记**：`cluster-articles` / `cluster-notes`（含 `--force` 重编）；
+- **质检与收尾**：三个体检脚本、`cleanup` 任务书回收、`sync` 对账。
 
 笔记成色的五类致命项为**套话填充、空壳标题、分集平铺标题、行内残缺引用、分集口吻**，命中即判失败；断句与结构缺件属提示项，加 `--require-structure` 才纳入门禁。渲染合规的致命项为 GitHub 告警块、围栏外裸字符画与围栏配对；**围栏语言标识**默认只提示，加 `--require-lang` 才纳入门禁。
 
@@ -352,60 +315,20 @@ skill/
 三个等价入口，功能一致：
 
 - 仓库推荐：`python src/cli.py <子命令>`
-- 免安装脚本：`python scripts/run.py <子命令>`
+- 免安装脚本：`python scripts/run.py <子命令>`（可任意工作目录调用）
 - 系统命令：`video2book <子命令>`（`pip install -e .` 后可用）
 
-### 子命令速查
+最常见的四条示例（`--article-type` 必填，不传即退出码 4）：
 
-| 命令 | 说明 | 示例 |
-|---|---|---|
-| `parse` | 解析视频拓扑并列分集 | `python src/cli.py parse "<链接>" --limit 10` |
-| `audio` | 下载或抽取音频流 | `python src/cli.py audio "<链接>" --all` |
-| `pipeline` | 执行完整流水线 | `python src/cli.py pipeline "<链接>" --all --article-type learning` |
-| `merge-audio` | 单独重跑装箱合并（幂等，可改块标题） | `python src/cli.py merge-audio "<工作区目录>"` |
-| `split-transcript` | 可选：块逐字稿切回分集逐字稿（按集查阅） | `python src/cli.py split-transcript "<工作区目录>" --block 1` |
-| `cluster-articles` | 按块序把模块长文整编成册（册=书、章=块） | `python src/cli.py cluster-articles "<链接>"` |
-| `cluster-notes` | 块 → 笔记归并，导出笔记任务书 | `python src/cli.py cluster-notes "<链接>"` |
-| `dedup` | 同步重复音频资产以节省 token | `python src/cli.py dedup "<链接>" --dry-run` |
-| `cleanup` | 回收三类已完成任务书（转录/模块长文/笔记），每类留 1 份范本（`--keep 0` 全清） | `python src/cli.py cleanup --dry-run` |
-| `sync` | 以磁盘产物为准回填 manifest.json | `python src/cli.py sync --dry-run` |
-| `info` | 显示环境与工具链就绪状态 | `python src/cli.py info` |
-| `login` | 持久化 B 站 SESSDATA | `python src/cli.py login --sessdata "<SESSDATA>"` |
-| `logout` | 清除已保存的 SESSDATA | `python src/cli.py logout` |
+```bash
+python src/cli.py pipeline "https://www.bilibili.com/video/BV14VqVBrEhc" --all --article-type learning
+python scripts/queue_tracker.py --next-module 5 --json    # 写作侧取载荷（含任务书/逐字稿/目标路径）
+python src/cli.py cluster-notes "<链接或本地路径>"          # 块 → 笔记归并，导出笔记任务书
+python src/cli.py cleanup --dry-run                       # 任务书回收预演
+```
 
-### 关键参数
-
-| 参数 | 适用命令 | 说明 | 默认 |
-|---|---|---|---|
-| `--article-type` | `pipeline` | 长文提示词风格：`learning`（学习，推荐）/ `legacy`（旧版） | 不传即退出码 4 |
-| `--all` / `--range X-Y` / `--page N` | `pipeline` / `audio` | 选集范围：全部 / 区间 / 单集 | 单集 |
-| `--force` | 多数命令 | 强制重跑，忽略已有产物 | 关 |
-| `--base-dir` | `pipeline` / `audio` / `cluster-*` / `dedup` / `cleanup` / `sync` | 产物根路径 | `BVB_OUTPUT_DIR`，或 `<工作目录>/output`（无容器标记时） |
-| `--task` | `pipeline` / `audio` / `cluster-*` / `dedup` / `cleanup` / `sync` | 指定课程工作区目录名 | 最近活动的那个 |
-| `--sessdata` | `parse` / `audio` / `pipeline` / `cluster-*` / `dedup` / `login` / `info` | B 站登录凭证，优先于本地存档 | 已保存的存档 |
-| `--douyin-cookie` | `parse` / `audio` / `pipeline` / `login` / `info` | 抖音完整 Cookie 串，用于突破匿名抓取硬窗口 | 已保存的存档 |
-| `--dry-run` | `dedup` / `cleanup` / `sync` | 只报告不落盘 | 关 |
-| `--json` | `parse` / `audio` / 脚本 | 以 JSON 输出 | 关 |
-
-### 质检与运维脚本
-
-| 脚本 | 说明 | 常用参数 |
-|---|---|---|
-| `scripts/queue_tracker.py` | 块级转录/写作进度、阶段门禁、派发载荷与台账 | `--next-transcribe N` / `--next-module N` / `--summary` / `--pattern` / `--log-dispatch` / `--json` |
-| `scripts/article_grounding_check.py` | 依据级校验（模块长文是否真实基于块逐字稿技术实体） | `--strict`、`--min-coverage F`、`--min-freq N` |
-| `scripts/note_quality_check.py` | 笔记成色体检 | `--strict`、`--require-structure`、`--max-truncated N` |
-| `scripts/render_compat_check.py` | 渲染合规体检 | `--strict`、`--require-lang` |
-| `scripts/strip_heading_numbers.py` | 存量模块长文标题序号就地剥除 | `--dry-run` |
-| `scripts/selfcheck.py` | 仓库唯一门禁自检 | — |
-| `scripts/run.py` | 免安装 CLI 入口 | 透传子命令 |
-
-### 退出码
-
-- `0` — 正常结束
-- `1` — 通用错误 / 目标工作区缺失或参数非法
-- `2` — 阶段一准备错误（音频下载未 100% 就绪或解析异常）
-- `3` — 块级转录装箱/切分异常，或任务书导出失败
-- `4` — 未确认长文提示词风格，即 `--article-type` 缺失或取值非法
+**13 个子命令的完整清单、每个开关的用途、全部参数、逐场景示例与退出码（0–4）** 集中在
+[CLI 场景手册](skills/video2book/references/cli-cookbook.md)——那是 CLI 细节的单一真源，本文不再重复维护。
 
 <div align="right">
 
@@ -417,12 +340,13 @@ skill/
 
 ### 运行时
 
-- **Python 3.10 及以上** — 唯一运行时，只用标准库
+- **Python 3.10 及以上** — 唯一运行时；B 站与本地两条链路只依赖标准库（`urllib`）
 - **setuptools** — 构建后端，见 `pyproject.toml`
 
 ### 外部依赖
 
-- **FFmpeg** — 音频抽取与切片，16kHz 单声道
+- **FFmpeg** — 音频抽取与切片，16kHz 单声道（系统程序，需在 `PATH`）
+- **`yt-dlp` / `requests`** — 声明依赖，见 `pyproject.toml`；YouTube 与抖音链路按需导入（`yt_dlp` 在 `ytaudio`/`youtube`，`requests` 在 `dyaudio`），这两条链路不装就跑不通
 
 ### 摄取与听音
 

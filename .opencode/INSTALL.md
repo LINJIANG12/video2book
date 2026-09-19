@@ -3,7 +3,8 @@
 ## Prerequisites
 
 - [OpenCode](https://opencode.ai) installed
-- Python 3.10+ and system `ffmpeg` on `PATH` (the skill's toolchain is pure standard library;
+- Python 3.10+ and system `ffmpeg` on `PATH` (the Bilibili and local chains are pure standard library;
+  the YouTube and Douyin chains also need the declared `yt-dlp` / `requests`, installed via `pip install -e .`;
   ffmpeg is a hard requirement for the audio stage)
 - One listening channel available to the host: MCP tool `read_audio` (native audio modality)
   or `read_media` (external multimodal model). See `skills/video2book/references/install.md`.

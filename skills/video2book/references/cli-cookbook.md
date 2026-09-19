@@ -116,6 +116,68 @@ python src/cli.py sync
 
 ---
 
+## 子命令全表
+
+所有任务必须通过以下标准入口调用（功能一致，三选一均可）：
+
+- 仓库推荐：`python src/cli.py <子命令>`
+- 免安装脚本：`python scripts/run.py <子命令>`（可任意工作目录调用）
+- 系统命令：`video2book <子命令>`（`pip install -e .` 后可用）
+
+| 子命令 | 用途 |
+| :--- | :--- |
+| `parse` | 解析视频拓扑并列分集（B 站 / YouTube / 抖音 / 本地目录） |
+| `audio` | 下载或抽取音频流 |
+| `pipeline` | 阶段一主入口：取音频 → 装箱成块 → 导出转录与长文任务书 |
+| `merge-audio` | 单独重跑装箱合并（幂等，可改块标题） |
+| `split-transcript` | 可选：块逐字稿切回分集逐字稿（按集查阅） |
+| `cluster-articles` | 按块序把模块长文整编成册（册=书、章=块） |
+| `cluster-notes` | 块 → 笔记归并，导出笔记任务书 |
+| `dedup` | 音频指纹去重，复用相同分集的语料与长文（0 Token） |
+| `cleanup` | 回收已完成的任务书，每类保留编号最小的 1 份范本 |
+| `sync` | 以磁盘产物为准回填 `manifest.json` |
+| `info` | 环境与工具链就绪状态（含凭证来源与上次 412/熔断记录） |
+| `login` | 持久化 B 站 `SESSDATA` / 抖音 Cookie |
+| `logout` | 清除已保存的凭证 |
+
+## 完整参数表
+
+| 入口 | 参数 | 用途 |
+| :--- | :--- | :--- |
+| `parse` | `--limit N` / `--json` | 列表最多显示 N 条（默认 10）/ 输出 JSON |
+| `audio` | `--page N` `--all` `--range X-Y` `--quality low\|medium\|high` `--url-only` `--output DIR` `--json` `--force` | 单集或批量取音频；`--url-only` 只打印直链不下载；`--output` 覆盖音频目录 |
+| `pipeline` | `--all` `--range X-Y` `--page N` `--quality <档>` `--prefetch-workers N` `--skip-failed` `--block-minutes N` `--force` `--article-type <风格>` `--task NAME` `--base-dir DIR` | 阶段一主入口；`--skip-failed` 把音频失败集记入跳过名单继续跑；`--block-minutes` 是**块时长目标**（默认取 `BVB_AUDIO_BLOCK_MINUTES`，再默认 50，落进 40–60 带；硬上限看 `BVB_AUDIO_ONESHOT_LIMIT_MINUTES`）；`--force` 重派已完成块 |
+| `merge-audio` | `<工作区目录>` `--block-minutes N` `--force` | 单独重跑音频装箱合并并重出块级转录任务书（幂等；改完 `block_titles.json` 后重跑即按新标题改名；`--force` 忽略指纹重建块） |
+| `split-transcript` | `<工作区目录>` `--block N` | **可选动作**：把带时间戳的旧逐字稿切回分集（幂等；纯文本稿自动标记 unsplit 并保留块级稿，不影响写作） |
+| `cluster-notes` | `--force` `--block-id N` `--start-block N` `--end-block N` | 块 → 笔记归并派发；后三个按**笔记序号**只处理指定区间（参数名是历史遗留）；`--force` 强制重导笔记任务书 |
+| `cluster-articles` | `--force` | 默认复用已有教材，`--force` 按最新章节重编 |
+| `dedup` | `--dry-run` | 只报告重复分集，不复制语料与长文 |
+| `cleanup` | `--keep N`（默认 1） `--dry-run` `--task 关键字` `--all` | 每类保留 N 份任务书范本；`--all` 为兼容保留（不加即全量） |
+| `sync` | `--dry-run` `--task 关键字` `--all` | 按磁盘对账回填 manifest |
+| `note_quality_check.py` | `--strict` `--require-structure` `--max-truncated N`（默认 4） `--dir` `--task` `--base-dir` `--json` | 结构缺件默认只提示，`--require-structure` 才纳入门禁 |
+| `render_compat_check.py` | `--strict` `--require-lang` `--dir` `--task` `--base-dir` `--json` | 围栏语言标识默认只提示，`--require-lang` 才纳入门禁 |
+| `queue_tracker.py` | `--next-transcribe N` `--next-module N` `--next-note N` `--summary` `--json` `--dir PATH` `--pattern 关键字` `--base-dir DIR` `--log-dispatch` | 派发前取载荷：`--next-transcribe N`（转录侧：待转录的块）、`--next-module N`（写作侧：待写模块长文）、`--next-note N`（笔记侧：待写复习笔记），均自带预制 `dispatch_prompt`；`--summary` 额外给出 `BLOCKS/BLOCKS_TRANSCRIBED/TRANSCRIPT_READY`（就绪口径是块）；多课程并存时必须用 `--dir`/`--pattern`；`--log-dispatch` 追加派发台账（默认关闭） |
+| `article_grounding_check.py` | `--strict` `--min-freq N`（默认 2） `--min-coverage F`（默认 0.5） `--dir` `--task` `--base-dir` `--json` | 依据级校验（**一块一验**）：块级逐字稿的技术实体在模块长文里的覆盖率，低于下限报警（默认提示级，`--strict` 才纳入门禁）；无逐字稿的块不参与判定 |
+| `cleanup_tasks.py` | `--keep N` `--dry-run` `--task` `--json` `--strict` | `cleanup` 的独立脚本入口（功能一致） |
+
+## 其余脚本入口
+
+| 脚本 | 用途 | 常用参数 |
+| :--- | :--- | :--- |
+| `python scripts/strip_heading_numbers.py` | 存量产物的标题手写序号就地剥除（幂等） | `--dry-run` |
+| `python scripts/selfcheck.py` | 仓库唯一门禁自检（技能自包含 + 多宿主声明 + 三域分离） | — |
+| `python scripts/run.py <子命令>` | 免安装 CLI 入口，等价于 `python src/cli.py <子命令>` | 透传子命令 |
+
+## 退出码
+
+- `0` — 正常结束
+- `1` — 通用错误 / 目标工作区缺失或参数非法
+- `2` — 阶段一准备错误（音频下载未 100% 就绪或解析异常）
+- `3` — 块级转录装箱/切分异常，或任务书导出失败
+- `4` — 未确认长文提示词风格，即 `--article-type` 缺失或取值非法
+
+---
+
 ## 环境与凭证
 
 安装前置、平台对照与缺失处理见 [`install.md`](install.md)；

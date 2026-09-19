@@ -567,63 +567,30 @@ python src/cli.py sync                           # 按磁盘对账回填 manifes
 
 ---
 
-## 6. CLI 常用命令速查表
+## 6. CLI 命令导航
 
 所有任务必须通过以下标准入口调用（功能一致，三选一均可）：
 - 仓库推荐：`python src/cli.py <子命令>`
-- 免安装脚本：`python scripts/run.py <子命令>`
-- 系统命令：`video2book <子命令>`
+- 免安装脚本：`python scripts/run.py <子命令>`（可任意工作目录调用）
+- 系统命令：`video2book <子命令>`（`pip install -e .` 后可用）
 
-```bash
-# 1. 解析合集结构与时长
-python src/cli.py parse "<链接或本地目录>" [--json]
+| 子命令 | 用途 |
+| :--- | :--- |
+| `parse` | 解析视频拓扑并列分集（B 站 / YouTube / 抖音 / 本地目录） |
+| `audio` | 下载或抽取音频流 |
+| `pipeline` | 阶段一主入口：取音频 → 装箱成块 → 导出转录与长文任务书 |
+| `merge-audio` | 单独重跑装箱合并（幂等，可改块标题） |
+| `split-transcript` | 可选：块逐字稿切回分集逐字稿（按集查阅） |
+| `cluster-articles` | 按块序把模块长文整编成册（册=书、章=块） |
+| `cluster-notes` | 块 → 笔记归并，导出笔记任务书 |
+| `dedup` | 音频指纹去重，复用相同分集的语料与长文（0 Token 消耗） |
+| `cleanup` | 回收已完成的任务书，每类保留编号最小的 1 份范本 |
+| `sync` | 以磁盘产物为准回填 `manifest.json` |
+| `info` | 环境与工具链就绪状态（含凭证来源与上次 412/熔断记录） |
+| `login` / `logout` | 持久化或清除 B 站 `SESSDATA` / 抖音 Cookie |
 
-# 2. 执行音频下载流水线（准备阶段 + 导出两类任务书：收音频 → 装箱成块 → 块级转录任务书 + 模块长文任务书）
-#    注意：--article-type 是长文提示词风格，**必填**；learning=学习（推荐）/ legacy=旧版
-#    不传则打印风格菜单并当场询问，确认不了即 exit 4 终止
-python src/cli.py pipeline "<链接或本地路径>" --all --article-type learning
-python src/cli.py pipeline "<链接或本地路径>" --range 1-10 --article-type legacy
-python src/cli.py pipeline "<链接或本地路径>" --all --article-type learning --block-minutes 45  # 块时长目标（默认 50，落进 40–60 带）
-
-# 2b. 块级链路的两个离线入口（幂等，可反复重跑）
-python src/cli.py merge-audio "<工作区目录>" [--block-minutes 45] [--force]  # 只重跑装箱合并 + 重出块级转录任务书
-python src/cli.py split-transcript "<工作区目录>" [--block 1]                # 可选：块逐字稿 → subtitles/PXX_*_逐字稿.md
-
-# 3. 音频指纹去重（自动复用相同分集的语料与长文，0 Token 消耗）
-python src/cli.py dedup "<链接或本地路径>"
-
-# 4. 动态任务队列追踪器（阶段门禁 + 派发载荷/台账 + 块级转录进度）
-python scripts/queue_tracker.py --next-transcribe 2 --json         # 转录侧：取待转录的块（内含 dispatch_prompt）
-python scripts/queue_tracker.py --next-module 5 --json --log-dispatch   # 写作侧：取待写模块长文（内含 dispatch_prompt）
-python scripts/queue_tracker.py --next-note 5 --json               # 笔记侧：取待写复习笔记（内含 dispatch_prompt）
-python scripts/queue_tracker.py --summary                         # 单行状态 + SUGGEST_WORKERS/BATCH + 块级转录进度
-
-# 5. 阶段二：整编教材（按块序把模块长文整编成册 → textbooks/，册=书、章=块，articles/ 完整保留）
-python src/cli.py cluster-articles "<链接或本地路径>"                             # 已有教材默认复用
-python src/cli.py cluster-articles "<链接或本地路径>" --force                     # 按最新章节强制重编
-
-# 6. 阶段二：复习笔记（只有一种版式）
-#    注意：归并（块 ➔ 成篇笔记）由 Agent 产出；缺归并不会卡住，命令始终正常退出。
-#    笔记建议由子智能体按「一篇笔记一个子智能体」并行产出（见 § 5.3）。
-python src/cli.py cluster-notes "<链接或本地路径>"                                # 笔记只有一种风格，无需 --style
-python src/cli.py cluster-notes "<链接或本地路径>" --force                        # 强制重导全部笔记任务书
-python src/cli.py cluster-notes "<链接或本地路径>" --block-id 3                   # 只派发第 3 篇笔记（--start-block/--end-block 同理）
-
-# 7. 交付前质检与收尾（手动体检，不在流水线上拦人）
-python scripts/article_grounding_check.py --strict  # 模块长文是否真的基于本块逐字稿（实体覆盖率，启发式）
-python scripts/note_quality_check.py --strict      # 笔记成色体检（套话/空壳标题/分集标题/断句/结构缺件；含默认不拦的提示项）
-python scripts/render_compat_check.py --strict     # 渲染合规体检（告警块/裸字符画/围栏配对；含默认不拦的提示项）
-python src/cli.py cleanup --dry-run                # 任务书回收预演（成品产出后才回收，每类留 1 份范本）
-python src/cli.py sync                             # 按磁盘对账回填 manifest.json
-
-# 9. 环境与工具链自检
-python scripts/selfcheck.py
-python src/cli.py info
-
-# 10. 登录凭证：持久化保存 SESSDATA（保存一次，后续命令免传）
-python src/cli.py login --sessdata "<SESSDATA>"
-python src/cli.py logout
-```
+> **完整命令清单、每个开关、逐场景示例与退出码见 [`references/cli-cookbook.md`](references/cli-cookbook.md)**——
+> 那是 CLI 细节的**单一真源**；本节只保留入口与用途导航，命令的**执行时序与阶段门禁**见 §3 SOP。
 
 > 阶段一的音频处理依赖 MCP 工具：**有原生音频模态的宿主**用 `omni-media:read_audio`（零凭证，服务本体在配套仓库的 `mcp/`），
 > **没有原生音频模态的宿主**用 `omni-media-ext:read_media`（服务本体在配套仓库的 `mcp-ext/`，由配置文件指定的外部模型代读）。
@@ -631,37 +598,20 @@ python src/cli.py logout
 > 两者各自独立成包、**互不 import**，与技能无运行时依赖，装一次即可长期使用；**分页契约同构**（同一 `OMNI_STATUS` 注释、`contract_version: 1` 与续读循环），
 > 切换只需换工具名。选择规则见 §4.2，接入方式见 `references/install.md`。
 
-### 6.1 完整参数表（速查表之外的开关都在这里）
-
-| 入口 | 参数 | 用途 |
-| :--- | :--- | :--- |
-| `parse` | `--limit N` / `--json` | 列表最多显示 N 条（默认 10）/ 输出 JSON |
-| `audio` | `--page N` `--all` `--range X-Y` `--quality low\|medium\|high` `--url-only` `--output DIR` `--json` `--force` | 单集或批量取音频；`--url-only` 只打印直链不下载；`--output` 覆盖音频目录 |
-| `pipeline` | `--all` `--range X-Y` `--page N` `--quality <档>` `--prefetch-workers N` `--skip-failed` `--block-minutes N` `--force` `--article-type <风格>` `--task NAME` `--base-dir DIR` | 阶段一主入口；`--skip-failed` 把音频失败集记入跳过名单继续跑；`--block-minutes` 是**块时长目标**（默认取 `BVB_AUDIO_BLOCK_MINUTES`，再默认 50，落进 40–60 带；硬上限看 `BVB_AUDIO_ONESHOT_LIMIT_MINUTES`）；`--force` 重派已完成块 |
-| `merge-audio` | `<工作区目录>` `--block-minutes N` `--force` | 单独重跑音频装箱合并并重出块级转录任务书（幂等；改完 `block_titles.json` 后重跑即按新标题改名；`--force` 忽略指纹重建块） |
-| `split-transcript` | `<工作区目录>` `--block N` | **可选动作**：把带时间戳的旧逐字稿切回分集（幂等；纯文本稿自动标记 unsplit 并保留块级稿，不影响写作） |
-| `cluster-notes` | `--force` `--block-id N` `--start-block N` `--end-block N` | 块 → 笔记归并派发；后三个按**笔记序号**只处理指定区间（参数名是历史遗留）；`--force` 强制重导笔记任务书 |
-| `cluster-articles` | `--force` | 默认复用已有教材，`--force` 按最新章节重编 |
-| `dedup` | `--dry-run` | 只报告重复分集，不复制语料与长文 |
-| `cleanup` | `--keep N`（默认 1） `--dry-run` `--task 关键字` `--all` | 每类保留 N 份任务书范本；`--all` 为兼容保留（不加即全量） |
-| `sync` | `--dry-run` `--task 关键字` `--all` | 按磁盘对账回填 manifest |
-| `note_quality_check.py` | `--strict` `--require-structure` `--max-truncated N`（默认 4） `--dir` `--task` `--base-dir` `--json` | 结构缺件默认只提示，`--require-structure` 才纳入门禁 |
-| `render_compat_check.py` | `--strict` `--require-lang` `--dir` `--task` `--base-dir` `--json` | 语言标识默认只提示，`--require-lang` 才纳入门禁 |
-| `queue_tracker.py` | `--next-transcribe N` `--next-module N` `--next-note N` `--summary` `--json` `--dir PATH` `--pattern 关键字` `--base-dir DIR` `--log-dispatch` | 派发前取载荷：`--next-transcribe N`（转录侧：待转录的块）、`--next-module N`（写作侧：待写模块长文）、`--next-note N`（笔记侧：待写复习笔记），均自带预制 `dispatch_prompt`；`--summary` 额外给出 `BLOCKS/BLOCKS_TRANSCRIBED/TRANSCRIPT_READY`（就绪口径是块）；多课程并存时必须用 `--dir`/`--pattern`；`--log-dispatch` 追加派发台账（默认关闭） |
-| `article_grounding_check.py` | `--strict` `--min-freq N`（默认 2） `--min-coverage F`（默认 0.5） `--dir` `--task` `--base-dir` `--json` | 依据级校验（**一块一验**）：块级逐字稿的技术实体在模块长文里的覆盖率，低于下限报警（默认提示级，`--strict` 才纳入门禁）；无逐字稿的块不参与判定 |
-| `cleanup_tasks.py` | `--keep N` `--dry-run` `--task` `--json` `--strict` | `cleanup` 的独立脚本入口（功能一致） |
-
 ---
 
 ## 7. 交付产物与格式标准
 
-完成处理后，系统输出三类结构化资产：
+完成处理后，系统输出三类结构化资产（路径均相对产物根）：
 
-| 产物 | 路径（相对产物根） | 说明 |
+| 产物 | 路径 | 一句话 |
 | :--- | :--- | :--- |
-| **模块精读长文** | `<产物根>/<task>/articles/模块XX_<块标题>_精读长文.md` | **一块一篇**：读该块级逐字稿写成一篇文章（不是把几集拼在一起），按所选**长文风格**的提示词撰写（`learning` 学习＝保住讲师讲课风格 + 高信息密度 + 成稿好读好看；`legacy` 旧版＝客观学术第一视角 + 随堂自测），含真实教学案例与讲师亲口讲的推导。教材整编后**严格保留，不予删除** |
-| **复习笔记** | `<产物根>/<task>/notes/笔记XX_*_笔记.md` | 按**归并后的笔记**分篇（一篇可跨多个块），语料是该篇涵盖各块的模块长文，按任务书内的 `MODULE_NOTE_PROMPT` 产出：只有 H1 + 按知识主题分节的条目（**不写抬头元信息、知识拓扑树、节级主旨句、来源标注**），标题最多到 `####` 且**不得手写序号**（阅读器会自动编号，手写会叠字）。**笔记只有这一种风格**（旧版八种风格矩阵已删除），无需 `--style`；原生支持 Markmap / XMind 导入 |
-| **模块合辑教材** | `<产物根>/<task>/textbooks/模块<册号>_<册名>_精读全书.md` | **册=书、章=块**：各块模块长文按内容整编成书（册名来自 `textbook_plan.json`，或平台分节/章节标记兜底），含导读、全景目录（本册各章）、章间承前启后与册尾小结；一册超过 300KB 时按块边界继续切分。章标题取**长文 H1**（取不到才退回块标题=分集名，并保留在章下「对应块」备注供按集溯源）且**不写序号**（序号交给渲染器），同名章自动补覆盖分集消歧，继承自长文的手写序号在整编时被幂等剥掉 |
+| **模块精读长文** | `<产物根>/<task>/articles/模块XX_<块标题>_精读长文.md` | **一块一篇**；教材整编后**严格保留，不予删除** |
+| **复习笔记** | `<产物根>/<task>/notes/笔记XX_*_笔记.md` | 按**归并后的笔记**分篇（一篇可跨多个块） |
+| **模块合辑教材** | `<产物根>/<task>/textbooks/模块<册号>_<册名>_精读全书.md` | **册=书、章=块**，各块长文按内容整编成书 |
+
+> **格式细节（版式骨架样例、长文类型矩阵、排版与渲染兼容）见 [`references/delivery_matrix.md`](references/delivery_matrix.md)**——
+> 那是交付格式的**单一真源**；本节只保留产物清单、路径契约与工作区结构。
 
 > **笔记与教材的分册粒度不同，这是有意的**：教材按**块**分册（覆盖全、便于通读），
 > 笔记按**归并后的笔记**分篇（成体系、便于检索）。一个块整体只进一篇笔记，一篇笔记可以装多个块。

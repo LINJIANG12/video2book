@@ -203,59 +203,22 @@ flowchart TD
 
 ## Usage
 
-### Process an entire course
+Quick examples (run them **from the skill directory**; `--article-type` is mandatory):
 
 ```bash
-# Bilibili collection
+# Process an entire Bilibili course collection
 python src/cli.py pipeline "https://www.bilibili.com/video/BV14VqVBrEhc" --all --article-type learning
 
-# Legacy Bilibili collections where every episode is its own BV (any entry auto-expands the season)
-python src/cli.py pipeline "https://space.bilibili.com/87476569/lists/695667?type=season" --all --article-type learning
-python src/cli.py pipeline "https://www.bilibili.com/list/87476569?sid=695667&type=season" --all --article-type learning
-python src/cli.py pipeline "https://www.bilibili.com/video/BV1RV4y1T7jf" --all --article-type learning
-
-# Local course directory
-python src/cli.py pipeline "D:\courses\software_engineering\" --all --article-type learning
-
-# YouTube single video / channel
-python src/cli.py pipeline "https://www.youtube.com/@freecodecamp" --all --article-type learning
-
-# Douyin single video / creator collection
-python src/cli.py pipeline "https://www.douyin.com/user/MS4wLjAB..." --all --article-type learning
+# Process a local course directory
+python src/cli.py pipeline "D:\courses\software_engineering" --all --article-type learning
 ```
 
-### Process specific episodes or a range
+For everything else see the [CLI cookbook](skills/video2book/references/cli-cookbook.md) (the single source for CLI detail):
 
-```bash
-python src/cli.py pipeline "https://www.bilibili.com/video/BV14VqVBrEhc" --page 1 --article-type learning
-python src/cli.py pipeline "https://www.bilibili.com/video/BV14VqVBrEhc" --range 2-5 --article-type learning
-```
-
-### Inspect the dispatch queue and stage gate
-
-```bash
-python scripts/queue_tracker.py --next-module 5 --log-dispatch --json  # writer payloads (block task file / transcript / target article)
-python scripts/queue_tracker.py --next-transcribe 2 --json             # transcriber payloads (block audio / timetable / transcript target)
-python scripts/queue_tracker.py --summary                        # one-line status incl. STAGE1_DONE
-python scripts/queue_tracker.py --pattern "keyword" --next-module 5    # pick a workspace when several coexist
-```
-
-### Generate modular textbooks and review notes
-
-```bash
-python src/cli.py cluster-articles "https://www.bilibili.com/video/BV14VqVBrEhc"           # modular book
-python src/cli.py cluster-notes "https://www.bilibili.com/video/BV14VqVBrEhc"              # two-pass aggregation → note task files
-python src/cli.py cluster-notes "https://www.bilibili.com/video/BV14VqVBrEhc" --force      # re-export all note task-files
-```
-
-### Quality checks and reconciliation
-
-```bash
-python scripts/note_quality_check.py --strict      # note quality
-python scripts/render_compat_check.py --strict     # rendering compliance
-python src/cli.py cleanup --dry-run                # dry-run task-file reclamation
-python src/cli.py sync                             # reconcile manifest.json from disk
-```
+- **Per platform / per range fetching**: Bilibili collections and legacy collections where every episode is its own BV, YouTube channels, Douyin creator collections, `--page` / `--range`;
+- **Dispatch queue and stage gate**: `queue_tracker.py` payloads for the transcriber / writer / note side, plus one-line status;
+- **Textbooks and notes**: `cluster-articles` / `cluster-notes` (with `--force`);
+- **Quality checks and close-out**: the three check scripts, `cleanup` task-file reclamation, `sync` reconciliation.
 
 Five note-quality checks are fatal and fail the delivery outright: **boilerplate filler, hollow headings, per-episode headings, inline quote fragments and episode voice**. Sentence truncation and missing structure are advisory; add `--require-structure` to gate on them. Rendering fatals are GitHub alert blocks, bare ASCII art outside fences and fence pairing; a missing fence **language tag** is advisory unless you pass `--require-lang`.
 
@@ -351,60 +314,20 @@ By default the products root is `output/` under **the working directory**; when 
 Three equivalent entry points with identical behaviour:
 
 - Repository-preferred: `python src/cli.py <subcommand>`
-- No-install script: `python scripts/run.py <subcommand>`
+- No-install script: `python scripts/run.py <subcommand>` (runs from any working directory)
 - System command: `video2book <subcommand>` (available after `pip install -e .`)
 
-### Subcommands
+The four most common examples (`--article-type` is mandatory; missing it exits with code 4):
 
-| Command | Description | Example |
-|---|---|---|
-| `parse` | Parse video topology and list episodes | `python src/cli.py parse "<url>" --limit 10` |
-| `audio` | Download or extract the audio stream | `python src/cli.py audio "<url>" --all` |
-| `pipeline` | Run the complete pipeline | `python src/cli.py pipeline "<url>" --all --article-type learning` |
-| `merge-audio` | Re-run block packing alone (idempotent; also renames blocks after editing titles) | `python src/cli.py merge-audio "<workspace>"` |
-| `split-transcript` | Optional: split block transcripts back per episode | `python src/cli.py split-transcript "<workspace>" --block 1` |
-| `cluster-articles` | Compile module articles in block order (volume = book, chapter = block) | `python src/cli.py cluster-articles "<url>"` |
-| `cluster-notes` | Two-pass semantic aggregation, export note task files | `python src/cli.py cluster-notes "<url>"` |
-| `dedup` | Synchronize duplicate audio assets to save tokens | `python src/cli.py dedup "<url>" --dry-run` |
-| `cleanup` | Reclaim three kinds of completed task files (transcribe / module article / note), 1 sample each (`--keep 0` clears all) | `python src/cli.py cleanup --dry-run` |
-| `sync` | Reconcile manifest.json from on-disk products | `python src/cli.py sync --dry-run` |
-| `info` | Show environment and toolchain readiness | `python src/cli.py info` |
-| `login` | Persist the Bilibili SESSDATA | `python src/cli.py login --sessdata "<SESSDATA>"` |
-| `logout` | Remove the stored SESSDATA | `python src/cli.py logout` |
+```bash
+python src/cli.py pipeline "https://www.bilibili.com/video/BV14VqVBrEhc" --all --article-type learning
+python scripts/queue_tracker.py --next-module 5 --json    # writer payloads (task file / transcript / target path)
+python src/cli.py cluster-notes "<url or local path>"     # block → note aggregation, export note task files
+python src/cli.py cleanup --dry-run                       # dry-run task-file reclamation
+```
 
-### Key arguments
-
-| Argument | Applies to | Description | Default |
-|---|---|---|---|
-| `--article-type` | `pipeline` | Prompt style: `learning` (recommended) / `legacy` | missing ⇒ exit code 4 |
-| `--all` / `--range X-Y` / `--page N` | `pipeline` / `audio` | Scope: all / a range / one episode | single episode |
-| `--force` | most commands | Force re-run, ignoring existing products | off |
-| `--base-dir` | `pipeline` / `audio` / `cluster-*` / `dedup` / `cleanup` / `sync` | Products root path | `BVB_OUTPUT_DIR`, or `<working_dir>/output` by default (`<container_root>/output` when working inside that container) |
-| `--task` | `pipeline` / `audio` / `cluster-*` / `dedup` / `cleanup` / `sync` | Workspace directory name | the most recently active one |
-| `--sessdata` | `parse` / `audio` / `pipeline` / `cluster-*` / `dedup` / `login` / `info` | Bilibili SESSDATA credential, overrides local store | stored copy |
-| `--douyin-cookie` | `parse` / `audio` / `pipeline` / `login` / `info` | Douyin Cookie string to bypass anonymous quota window | stored copy |
-| `--dry-run` | `dedup` / `cleanup` / `sync` | Report only, write nothing | off |
-| `--json` | `parse` / `audio` / scripts | JSON output | off |
-
-### Quality and operations scripts
-
-| Script | Description | Common arguments |
-|---|---|---|
-| `scripts/queue_tracker.py` | Block progress, stage gate, dispatch payload and ledger | `--next-transcribe N` / `--next-module N` / `--summary` / `--pattern` / `--log-dispatch` / `--json` |
-| `scripts/article_grounding_check.py` | Evidence grounding check (whether module long-form genuinely quotes block transcript entities) | `--strict`, `--min-coverage F`, `--min-freq N` |
-| `scripts/note_quality_check.py` | Note quality check | `--strict`, `--require-structure`, `--max-truncated N` |
-| `scripts/render_compat_check.py` | Rendering compliance check | `--strict`, `--require-lang` |
-| `scripts/strip_heading_numbers.py` | In-place removal of heading numbers in legacy module articles | `--dry-run` |
-| `scripts/selfcheck.py` | The repository's single gate selfcheck | — |
-| `scripts/run.py` | No-install CLI entry point | passes subcommands through |
-
-### Exit codes
-
-- `0` — normal completion
-- `1` — general error / workspace missing or invalid parameters
-- `2` — stage 1 preparation error (audio downloading/extraction incomplete or parsing failure)
-- `3` — audio block packing/splitting error, or task-file export failure
-- `4` — article prompt style not confirmed, i.e. `--article-type` missing or invalid
+**All 13 subcommands, every flag, the full argument list, per-scenario examples and the exit codes (0–4)** live in the
+[CLI cookbook](skills/video2book/references/cli-cookbook.md) — the single source for CLI detail; this README no longer duplicates them.
 
 <div align="right">
 
@@ -416,12 +339,13 @@ Three equivalent entry points with identical behaviour:
 
 ### Runtime
 
-- **Python 3.10 or later** — the only runtime, standard library only
+- **Python 3.10 or later** — the only runtime; the Bilibili and local chains need the standard library (`urllib`) only
 - **setuptools** — build backend, see `pyproject.toml`
 
 ### External dependencies
 
-- **FFmpeg** — audio extraction and slicing, 16 kHz mono
+- **FFmpeg** — audio extraction and slicing, 16 kHz mono (system program, must be on `PATH`)
+- **`yt-dlp` / `requests`** — declared in `pyproject.toml`; imported on demand by the YouTube chain (`yt_dlp` in `ytaudio`/`youtube`) and the Douyin chain (`requests` in `dyaudio`). Those two chains cannot run without them.
 
 ### Ingestion and listening
 
