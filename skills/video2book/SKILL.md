@@ -55,6 +55,8 @@ metadata:
 >      - 两类角色**交错推进**：先推一波转录，块级逐字稿一就绪就派写作，不要等全部转录结束才开工；
 >    - **写作粒度按块**：一个子智能体领一个块、写一篇模块长文（块级语料与块内各集标题共用同一份上下文，
 >      比「一集一篇」既省调用又更成体系）；
+>    - **派发词原样透传（严禁自编提示词）**：调用子智能体工具时，prompt 参数**必须直接原样传入载荷中的 `dispatch_prompt` 字段**，
+>      严禁自行拼接、修改、扩写或手写任何格式规则（任务书内部已完整烘焙全部提示词与排版约束，外部自编不仅无效且会被门禁拦截）；
 >    - **窗口兜底（只对转录角色成立）**：走通道 A（宿主原生听音）时，实算音频 token（时长 × 系数）超过窗口 60% 的块必须分卷续读。
 >      音频 token 系数与窗口**随宿主而异**，可用 `BVB_AUDIO_TOKENS_PER_SEC`（默认 `32`，Gemini 原生音频口径；
 >      OpenAI input_audio 约 `100`）与 `BVB_CONTEXT_WINDOW_TOKENS`（默认 `1000000`）覆盖；工具会打印实算值；
@@ -355,10 +357,10 @@ python src/cli.py logout                                   # 撤销保存（两�
 
 | 环节 | 做法 |
 | :--- | :--- |
-| 取载荷 | 派发前**必须**跑工具取载荷，**禁止手抄路径**（手抄会导致同一个块被派两遍，白烧几十万 token）。两侧各一个入口：**转录侧** `queue_tracker.py --next-transcribe N --json`（块音频 / 块内时间表 / 逐字稿目标路径）；**写作侧** `queue_tracker.py --next-module N --log-dispatch --json`（只返回块逐字稿已就绪且模块长文缺失的块，载荷含 `task_file` / `transcript_file` / `block_audio` / `target_article`） |
+| 取载荷 | 派发前**必须**跑工具取载荷，**禁止手抄路径**（手抄会导致同一个块被派两遍，白烧几十万 token）。两侧各一个入口：**转录侧** `queue_tracker.py --next-transcribe N --json`（块音频 / 块内时间表 / 逐字稿目标路径）；**写作侧** `queue_tracker.py --next-module N --log-dispatch --json`（只返回块逐字稿已就绪且模块长文缺失的块，载荷含 `task_file` / `transcript_file` / `block_audio` / `target_article`）。**两类载荷均已预制开箱即用的 `dispatch_prompt` 字段** |
 | 派发粒度 | **一个块（= 一个知识模块）一个子智能体**，一篇模块长文；块已是 40–60 分钟粒度，不再二次打包 |
 | 并发 | 建议 5~6（`suggest_workers` 给出建议值；不得超过宿主并发上限） |
-| 子智能体输入 | **直接转交该块任务书**（`articles/模块XX_*_TASK.md`）——它已含完整撰写提示词与红线，派发词不必也不得重述规范；**主 Agent 不代读、不代听** |
+| 子智能体输入 | **直接原样透传载荷中的 `dispatch_prompt`**（已锁定任务书路径与单行回报格式），**严禁主 Agent 自编或扩充提示词**；任务书（`articles/模块XX_*_TASK.md`）已含完整撰写提示词与红线，**主 Agent 不代读、不代听** |
 | 子智能体输出 | 只写 `articles/模块XX_*_精读长文.md`，**不回传正文**（正文回传会把主上下文重新撑满） |
 | 回报格式 | 固定一行：`BLK03 | 文件路径 | 字节数 | 执行者` |
 | 验收 | `queue_tracker.py --summary` 看 `STAGE1_DONE`；`--next-module N` / `--next-transcribe N` 复核剩余待办 |
@@ -480,8 +482,9 @@ Agent 需按任务书内的 `MODULE_NOTE_PROMPT`（专属提示词）撰写，�
 
 | 环节 | 做法 |
 | :--- | :--- |
+| 取载荷 | `python scripts/queue_tracker.py --next-note N --json`，只返回尚未完成的笔记，载荷内自带预制 `dispatch_prompt` |
 | 派发粒度 | **一篇笔记 = 一个子智能体**，互不交叉，避免上下文互相污染 |
-| 输入 | **直接转交该篇任务书**（`notes/笔记XX_*_TASK.md`）——它已含专属性提示词与版式规范，派发词不必也不得重述；子智能体再按清单**逐篇整篇读完**该篇涵盖的全部**模块长文**（主 Agent 不代读） |
+| 输入 | **直接原样透传载荷中的 `dispatch_prompt`**（严禁主 Agent 自编或扩写提示词）；任务书（`notes/笔记XX_*_TASK.md`）已含专属性提示词与版式规范，子智能体再按清单**逐篇整篇读完**该篇涵盖的全部**模块长文**（主 Agent 不代读） |
 | 输出 | 子智能体只写 `notes/笔记XX_*_笔记.md`，**不回传正文**；回报固定一行：`笔记XX \| 文件路径 \| 字节数 \| 覆盖块` |
 | 并发 | 建议 5~6 个并发；笔记多时分批派发 |
 | 返修 | 质检不达标时，把质检脚本输出的「文件:行号:原文」贴给该篇子智能体重派，最多 2 轮；仍不达标则由主 Agent 亲自返修该篇 |
@@ -590,8 +593,9 @@ python src/cli.py split-transcript "<工作区目录>" [--block 1]              
 python src/cli.py dedup "<链接或本地路径>"
 
 # 4. 动态任务队列追踪器（阶段门禁 + 派发载荷/台账 + 块级转录进度）
-python scripts/queue_tracker.py --next-transcribe 2 --json         # 转录侧：取待转录的块（块音频/时间表/逐字稿目标）
-python scripts/queue_tracker.py --next-module 5 --json --log-dispatch   # 写作侧：只取「块逐字稿已就绪且模块长文缺失」的块
+python scripts/queue_tracker.py --next-transcribe 2 --json         # 转录侧：取待转录的块（内含 dispatch_prompt）
+python scripts/queue_tracker.py --next-module 5 --json --log-dispatch   # 写作侧：取待写模块长文（内含 dispatch_prompt）
+python scripts/queue_tracker.py --next-note 5 --json               # 笔记侧：取待写复习笔记（内含 dispatch_prompt）
 python scripts/queue_tracker.py --summary                         # 单行状态 + SUGGEST_WORKERS/BATCH + 块级转录进度
 
 # 5. 阶段二：整编教材（按块序把模块长文整编成册 → textbooks/，册=书、章=块，articles/ 完整保留）
@@ -643,7 +647,7 @@ python src/cli.py logout
 | `sync` | `--dry-run` `--task 关键字` `--all` | 按磁盘对账回填 manifest |
 | `note_quality_check.py` | `--strict` `--require-structure` `--max-truncated N`（默认 4） `--dir` `--task` `--base-dir` `--json` | 结构缺件默认只提示，`--require-structure` 才纳入门禁 |
 | `render_compat_check.py` | `--strict` `--require-lang` `--dir` `--task` `--base-dir` `--json` | 语言标识默认只提示，`--require-lang` 才纳入门禁 |
-| `queue_tracker.py` | `--next-transcribe N` `--next-module N` `--summary` `--json` `--dir PATH` `--pattern 关键字` `--base-dir DIR` `--log-dispatch` | 派发前取载荷，两个入口互斥：`--next-transcribe N`（转录侧：待转录的块）、`--next-module N`（写作侧：只返回块逐字稿已就绪且模块长文缺失的块）；`--summary` 额外给出 `BLOCKS/BLOCKS_TRANSCRIBED/TRANSCRIPT_READY`（就绪口径是块）；多课程并存时必须用 `--dir`/`--pattern`；`--log-dispatch` 追加派发台账（默认关闭） |
+| `queue_tracker.py` | `--next-transcribe N` `--next-module N` `--next-note N` `--summary` `--json` `--dir PATH` `--pattern 关键字` `--base-dir DIR` `--log-dispatch` | 派发前取载荷：`--next-transcribe N`（转录侧：待转录的块）、`--next-module N`（写作侧：待写模块长文）、`--next-note N`（笔记侧：待写复习笔记），均自带预制 `dispatch_prompt`；`--summary` 额外给出 `BLOCKS/BLOCKS_TRANSCRIBED/TRANSCRIPT_READY`（就绪口径是块）；多课程并存时必须用 `--dir`/`--pattern`；`--log-dispatch` 追加派发台账（默认关闭） |
 | `article_grounding_check.py` | `--strict` `--min-freq N`（默认 2） `--min-coverage F`（默认 0.5） `--dir` `--task` `--base-dir` `--json` | 依据级校验（**一块一验**）：块级逐字稿的技术实体在模块长文里的覆盖率，低于下限报警（默认提示级，`--strict` 才纳入门禁）；无逐字稿的块不参与判定 |
 | `cleanup_tasks.py` | `--keep N` `--dry-run` `--task` `--json` `--strict` | `cleanup` 的独立脚本入口（功能一致） |
 

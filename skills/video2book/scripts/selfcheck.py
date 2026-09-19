@@ -1685,7 +1685,6 @@ def check_module_note_contract():
     assert "可选结构化索引" not in prompt, "知识元索引已随逐集链路移除，不得回加"
 
     # 6) 任务书回收：成品已产出才回收，每类保留 1 份范本，未产出的一律保留
-    import json
     import tempfile
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -2028,6 +2027,17 @@ def check_dispatch_payload_shape():
             assert key in payload["budget"], f"budget 缺少字段：{key}"
         assert payload["next"] == [], f"逐字稿未就绪却派发了块: {payload['next']}"
 
+        # 1b) 此时块 01 尚未转录 → 测试 --next-transcribe 载荷及其预制 dispatch_prompt
+        res_trans = _run("--next-transcribe", "1", "--json")
+        assert res_trans.returncode == 0, f"--next-transcribe 失败: {res_trans.stdout[-300:]}"
+        trans_items = json.loads(res_trans.stdout)["next_transcribe"]
+        assert len(trans_items) == 1, f"待转录块未返回: {trans_items}"
+        t_item = trans_items[0]
+        for key in ("block_id", "span", "audio_file", "task_file", "block_transcript", "dispatch_prompt"):
+            assert key in t_item, f"转录载荷缺少字段：{key}"
+        assert "转录任务书文件" in t_item["dispatch_prompt"]
+        assert t_item["block_transcript"] in t_item["dispatch_prompt"]
+
         # 2) 落一份块逐字稿 → 载荷给出块、语料、任务书与目标长文
         transcript = ws.subtitles_dir / "BLK01_P01-P02_逐字稿.md"
         transcript.parent.mkdir(parents=True, exist_ok=True)
@@ -2036,13 +2046,49 @@ def check_dispatch_payload_shape():
         assert res.returncode == 0, f"模块载荷失败: {res.stdout[-300:]}"
         item = json.loads(res.stdout)["next"][0]
         for key in ("block_id", "span", "title", "episodes", "duration_min", "block_audio",
-                    "transcript_file", "transcript_bytes", "task_file", "target_article"):
+                    "transcript_file", "transcript_bytes", "task_file", "target_article", "dispatch_prompt"):
             assert key in item, f"模块载荷缺少字段：{key}"
         assert item["block_id"] == 1 and item["span"] == "P01-P02" and item["episodes"] == [1, 2]
         assert item["transcript_file"].endswith("BLK01_P01-P02_逐字稿.md"), item["transcript_file"]
         assert item["transcript_bytes"] > 0
         assert item["target_article"].endswith("模块01_导学与变量_精读长文.md"), item["target_article"]
         assert item["task_file"].endswith("模块01_导学与变量_TASK.md"), item["task_file"]
+        assert item["task_file"] in item["dispatch_prompt"], "派发词未包含任务书路径"
+        assert item["target_article"] in item["dispatch_prompt"], "派发词未包含目标长文路径"
+
+        # 2a) 笔记载荷测试：--next-note（未落盘派发、落盘后闭环、归并模式防旧成品遮蔽）
+        note_task = ws.notes_dir / "笔记01_导学与变量_TASK.md"
+        note_task.parent.mkdir(parents=True, exist_ok=True)
+        note_task.write_text("# 笔记 01 导学与变量 笔记任务书（NOTE_TASK）\n> 涵盖块：块 01\n", encoding="utf-8")
+        res_note = _run("--next-note", "1", "--json")
+        assert res_note.returncode == 0, f"--next-note 失败: {res_note.stdout[-300:]}"
+        note_items = json.loads(res_note.stdout)["next_note"]
+        assert len(note_items) == 1, f"未正确返回待派发笔记: {note_items}"
+        for key in ("note_id", "title", "blocks_str", "task_file", "target_note", "dispatch_prompt"):
+            assert key in note_items[0], f"笔记载荷缺少字段：{key}"
+        assert note_items[0]["note_id"] == 1
+        assert "复习笔记任务书文件" in note_items[0]["dispatch_prompt"]
+        assert note_items[0]["target_note"] in note_items[0]["dispatch_prompt"]
+
+        # 归并模式下：同编号旧粒度成品不得遮蔽新归并任务书的派发
+        (ws.root_dir / "note_plan.json").write_text(json.dumps(
+            [{"note_id": 1, "note_title": "导学与变量", "blocks": [1], "core_theme": "x"}],
+            ensure_ascii=False
+        ), encoding="utf-8")
+        old_note = ws.notes_dir / "笔记01_旧粒度主题_笔记.md"
+        old_note.write_text("旧笔记成品" * 300, encoding="utf-8")
+        res_note_merged = _run("--next-note", "1", "--json")
+        assert len(json.loads(res_note_merged.stdout)["next_note"]) == 1, "归并模式下新任务书被同编号旧笔记错误遮蔽"
+        old_note.unlink()
+        (ws.root_dir / "note_plan.json").unlink()
+
+        # 笔记成品落盘后 → --next-note 不再派发
+        note_product = ws.notes_dir / "笔记01_导学与变量_笔记.md"
+        note_product.write_text("笔记成品正文" * 300, encoding="utf-8")
+        assert json.loads(_run("--next-note", "1", "--json").stdout)["next_note"] == [], \
+            "笔记成品已落盘却仍被派发"
+        note_product.unlink()
+        note_task.unlink()
 
         # 2b) 模块长文落盘 → 该块不再派发（≥1000 字节才算完成）
         article = ws.articles_dir / "模块01_导学与变量_精读长文.md"

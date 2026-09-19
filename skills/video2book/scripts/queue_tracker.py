@@ -5,8 +5,8 @@
 Tracks completed vs pending episodes in real time, supporting sliding-window
 continuous dispatch ("完成一个，立即派生一个") without manual offsets.
 
-`--next-module N` / `--next-transcribe N`（配合 `--json`）输出的是**可直接转交子智能体的派发载荷**（任务书路径、音频切片清单、
-长文目标路径、本集 token 预算），并附带派发建议（并发数 / 打包粒度 / 是否必须派发）。
+`--next-module N` / `--next-transcribe N` / `--next-note N`（配合 `--json`）输出的是**可直接转交子智能体的派发载荷**（内含开箱即用的预制派发提示词 `dispatch_prompt`、任务书路径、音频切片清单、
+目标文件路径、本集 token 预算），并附带派发建议（并发数 / 打包粒度 / 是否必须派发）。
 `--log-dispatch` 可选地把本次建议写入 `<task>/.dispatch_log.jsonl` 作为派发台账。
 """
 
@@ -16,7 +16,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 # 允许从任意工作目录运行（SKILL.md 推荐直接调用 scripts/queue_tracker.py）
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -379,6 +379,19 @@ def _transcribe_payload(tstatus: Dict, n: int) -> List[Dict]:
             continue
         subtitles_dir = Path(block["block_transcript"]).parent
         task_file = subtitles_dir / f"BLK{block['block_id']:02d}_{block['span']}_转录任务书.md"
+        block_transcript = block["block_transcript"]
+        block_id = int(block["block_id"])
+        dispatch_prompt = (
+            f"请阅读转录任务书文件：\n"
+            f"`{task_file}`\n"
+            f"调用宿主当前可用的听音工具（有 read_audio 则使用 output_mode=\"file\" 获取切片并聆听，"
+            f"只有 read_media 则以 mode=\"transcribe\" 外部代读），严格按照任务书 2.1 节的要求进行纯文本忠实转录（无需时间戳），"
+            f"将完整逐字稿直接写入目标文件：\n"
+            f"`{block_transcript}`\n"
+            f"落盘后仅在最后汇报单行：\n"
+            f"BLK{block_id:02d} | {block_transcript} | 字节数 | 执行者\n"
+            f"（严禁在对话中回传逐字稿正文）"
+        )
         items.append({
             "block_id": block["block_id"],
             "span": block["span"],
@@ -390,6 +403,7 @@ def _transcribe_payload(tstatus: Dict, n: int) -> List[Dict]:
             "task_file_exists": task_file.exists(),
             "block_transcript": block["block_transcript"],
             "episode_transcripts": block["episode_transcripts"],
+            "dispatch_prompt": dispatch_prompt,
         })
         if len(items) >= n:
             break
@@ -443,6 +457,8 @@ def _module_payload(ws: Path, n: int) -> List[Dict]:
     一个块一篇、读块逐字稿写——这是块级链路对写作角色的全部约束，载荷里给全路径与语料状态，
     主 Agent 不需要自己拼文件名。
     """
+    from src.core.audio_merger import AudioMerger
+
     items: List[Dict] = []
     articles_dir = ws / "articles"
     subtitles_dir = ws / "subtitles"
@@ -456,6 +472,17 @@ def _module_payload(ws: Path, n: int) -> List[Dict]:
         if _find_module_article(articles_dir, block) is not None:
             continue
         target = _module_article_path(articles_dir, block)
+        task_file = articles_dir / f"{target.name[:-len('_精读长文.md')]}_TASK.md"
+        dispatch_prompt = (
+            f"请阅读模块长文任务书文件：\n"
+            f"`{task_file}`\n"
+            f"以任务书指定的块级逐字稿（`{transcript}`）为唯一事实来源，严格遵循任务书内嵌的撰写规范与 Typora 渲染硬要求"
+            f"（标题严禁手写数字序号，字符画必须进围栏），撰写深度模块精读长文，直接写入目标路径：\n"
+            f"`{target}`\n"
+            f"落盘后仅在最后汇报单行：\n"
+            f"BLK{block_id:02d} | {target} | 字节数 | 执行者\n"
+            f"（严禁在对话中回传长文正文）"
+        )
         items.append({
             "block_id": block_id,
             "span": span,
@@ -465,8 +492,90 @@ def _module_payload(ws: Path, n: int) -> List[Dict]:
             "block_audio": str(ws / str(block.get("audio") or "")),
             "transcript_file": str(transcript),
             "transcript_bytes": transcript.stat().st_size,
-            "task_file": str(articles_dir / f"{target.name[:-len('_精读长文.md')]}_TASK.md"),
+            "task_file": str(task_file),
             "target_article": str(target),
+            "dispatch_prompt": dispatch_prompt,
+        })
+        if len(items) >= n:
+            break
+    return items
+
+
+def _note_payload(ws: Path, n: int) -> List[Dict]:
+    """复习笔记的派发载荷（笔记侧取载荷入口）：扫描 notes/ 下的任务书，只返回尚无成品或成品不达标的笔记。
+
+    一篇笔记一个子智能体、读涵盖块的长文写——载荷内直接内嵌预制派发词，主 Agent 无需自编提示词。
+    """
+    notes_dir = ws / "notes"
+    if not notes_dir.exists():
+        return []
+    items: List[Dict] = []
+    merged_mode = (ws / "note_plan.json").exists()
+    task_files = sorted(notes_dir.glob("笔记*_TASK.md"))
+    for task_file in task_files:
+        m = re.match(r"^笔记(\d+)_(.*)_TASK\.md$", task_file.name)
+        if not m:
+            continue
+        note_id = int(m.group(1))
+        title = m.group(2)
+        target_note = notes_dir / f"笔记{note_id:02d}_{title}_笔记.md"
+
+        # 检查是否已有达标成品（>= 1000 字节）
+        # 注意：若存在 note_plan.json（归并模式），严禁宽泛匹配同编号旧粒度笔记，防止旧成品误拦新归并任务书派发
+        has_done = False
+        try:
+            if target_note.exists() and target_note.stat().st_size >= 1000:
+                has_done = True
+            elif not merged_mode:
+                candidates = sorted(notes_dir.glob(f"笔记{note_id:02d}_*.md"))
+                for cand in candidates:
+                    if cand.name.endswith("_TASK.md"):
+                        continue
+                    if cand.exists() and cand.stat().st_size >= 1000:
+                        has_done = True
+                        break
+            else:
+                candidates = sorted(notes_dir.glob(f"笔记{note_id:02d}_{title}*.md"))
+                for cand in candidates:
+                    if cand.name.endswith("_TASK.md"):
+                        continue
+                    if cand.exists() and cand.stat().st_size >= 1000:
+                        has_done = True
+                        break
+        except OSError:
+            pass
+
+        if has_done:
+            continue
+
+        # 提取涵盖块说明（备查）
+        blocks_str = f"笔记{note_id:02d}涵盖块"
+        try:
+            head = task_file.read_text(encoding="utf-8")[:1200]
+            bm = re.search(r"涵盖块[：:]\s*([^\n|]+)", head)
+            if bm:
+                blocks_str = bm.group(1).strip()
+        except Exception:
+            pass
+
+        dispatch_prompt = (
+            f"请阅读复习笔记任务书文件：\n"
+            f"`{task_file}`\n"
+            f"逐篇通读任务书指定涵盖的全部模块长文，严格遵循任务书内嵌的专属笔记提示词与排版规范"
+            f"（高密度速查、无序号标题、条目骨架与 Typora 渲染兼容），撰写复习笔记，直接写入目标路径：\n"
+            f"`{target_note}`\n"
+            f"落盘后仅在最后汇报单行：\n"
+            f"笔记{note_id:02d} | {target_note} | 字节数 | 覆盖块: {blocks_str}\n"
+            f"（严禁在对话中回传笔记正文）"
+        )
+
+        items.append({
+            "note_id": note_id,
+            "title": title,
+            "blocks_str": blocks_str,
+            "task_file": str(task_file),
+            "target_note": str(target_note),
+            "dispatch_prompt": dispatch_prompt,
         })
         if len(items) >= n:
             break
@@ -506,6 +615,8 @@ def main():
                         help="写作侧取载荷（块级链路）：只返回「块逐字稿已就绪且模块长文缺失」的块")
     parser.add_argument("--next-transcribe", type=int, default=0, dest="next_transcribe_n",
                         help="转录侧取载荷：返回尚未转录的块（含块音频、块内时间表与逐字稿目标路径）")
+    parser.add_argument("--next-note", type=int, default=0, dest="next_note_n",
+                        help="笔记侧取载荷：返回尚未撰写或不达标的复习笔记（含任务书、目标笔记路径与预制派发提示词）")
     parser.add_argument("--log-dispatch", action="store_true", dest="log_dispatch",
                         help="把本次建议派发的块追加写入 <task>/.dispatch_log.jsonl（派发台账；默认关闭）")
     parser.add_argument("--json", action="store_true", help="Output in JSON format")
@@ -540,13 +651,16 @@ def main():
         )
         return
 
-    # 取载荷：转录侧（块）与写作侧（模块长文）互斥，各自只返回「还没做完」的那批
+    # 取载荷：转录侧（块）、写作侧（模块长文）与笔记侧各自只返回「还没做完」的那批
     transcribe_payload: List[Dict] = []
     if args.next_transcribe_n > 0:
         transcribe_payload = _transcribe_payload(tstatus, args.next_transcribe_n)
     payload: List[Dict] = []
     if args.next_module_n > 0:
         payload = _module_payload(Path(status["workspace"]), args.next_module_n)
+    note_payload: List[Dict] = []
+    if args.next_note_n > 0:
+        note_payload = _note_payload(Path(status["workspace"]), args.next_note_n)
 
     if args.json:
         out = {
@@ -569,6 +683,7 @@ def main():
             },
             "next": payload,
             "next_transcribe": transcribe_payload,
+            "next_note": note_payload,
         }
         print(json.dumps(out, ensure_ascii=False, indent=2))
         if args.log_dispatch and payload:
@@ -617,6 +732,14 @@ def main():
             print(f"    - 目标长文: {item['target_article']}")
         if args.log_dispatch:
             print(f"\n[i] 已追加派发台账: {Path(status['workspace']) / '.dispatch_log.jsonl'}")
+
+    if note_payload:
+        print(f"\n【待派发复习笔记 Next {len(note_payload)} 篇（一篇一个子智能体）】：")
+        for item in note_payload:
+            print(f"  • 笔记{item['note_id']:02d}: 《{item['title']}》 ({item['blocks_str']})")
+            print(f"    - 任务书:   {item['task_file']}")
+            print(f"    - 目标笔记: {item['target_note']}")
+            print(f"    - 派发提示词预览:\n{item['dispatch_prompt']}")
 
     if args.log_dispatch and payload and not args.json:
         _log_dispatch(status, len(payload), payload, budget)
