@@ -94,6 +94,8 @@ def get_task_workspace(
         if matched:
             matched.sort(key=get_latest_mtime, reverse=True)
             return matched[0]
+        avail = ", ".join(repr(d.name) for d in valid_dirs[:5])
+        raise RuntimeError(f"在 {out_dir} 下未找到匹配 '{pattern}' 的工作区（当前已有工作区: {avail}）")
 
     # Default: sort by most recent activity across workspaces
     valid_dirs.sort(key=get_latest_mtime, reverse=True)
@@ -613,7 +615,7 @@ def main():
     parser.add_argument("--dir", default=None, help="Path to task workspace")
     parser.add_argument("--base-dir", default=None,
                         help="产物根（默认：由 src/core/paths.py 解析——默认 <当前工作目录>/output，在容器内工作时为 <容器根>/output）")
-    parser.add_argument("--pattern", default=None, help="Workspace directory name keyword filter")
+    parser.add_argument("--pattern", "--task", default=None, help="Workspace directory name keyword filter")
     parser.add_argument("--next-module", type=int, default=0, dest="next_module_n",
                         help="写作侧取载荷（块级链路）：只返回「块逐字稿已就绪且模块长文缺失」的块")
     parser.add_argument("--next-transcribe", type=int, default=0, dest="next_transcribe_n",

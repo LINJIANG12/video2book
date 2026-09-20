@@ -239,11 +239,19 @@ def run_stage1(
         print("\n" + "=" * 72)
 
     any_low = any(r["low_coverage"] > 0 for r in reports)
-    if any_low and strict:
-        print("[FAIL] 存在模块长文未达依据覆盖率下限（详见上方 [✗]）")
+    any_no_article = any(r["no_article"] > 0 for r in reports)
+    any_unready = any(r["total"] > 0 and r["checked"] == 0 for r in reports)
+    if (any_low or any_no_article or any_unready) and strict:
+        if any_no_article:
+            print("[FAIL] 存在块尚未产出模块长文（阶段一长文未就绪）")
+        elif any_unready:
+            print("[FAIL] 未检测到任何可校验的长文或逐字稿（阶段一未就绪）")
+        if any_low:
+            print("[FAIL] 存在模块长文未达依据覆盖率下限（详见上方 [✗]）")
         return 1
     if not as_json:
-        print("[OK] 依据级校验完成" + ("（提示级：加 --strict 可纳入门禁）" if any_low else ""))
+        has_warnings = any_low or any_no_article or any_unready
+        print("[OK] 依据级校验完成" + ("（提示级：加 --strict 可纳入门禁）" if has_warnings else ""))
     return 0
 
 

@@ -49,9 +49,10 @@ metadata:
                  → 写 articles/模块XX_<块标题>_精读长文.md
 【第 5 步：放行】python src/cli.py check --stage1 --strict      # 长文确实基于块逐字稿
                  通过后才允许进入阶段二
-【第 6 步：聚合】python src/cli.py cluster-notes "<链接或路径>"    # 块 → 笔记（Agent 写 note_plan.json）
-                 python src/cli.py cluster-articles "<链接或路径>" # 块 → 教材分册
-                 两者收尾自动执行 cleanup + sync
+【第 6 步：聚合】① 规划笔记：python src/cli.py cluster-notes "<链接或路径>"（导出任务书）
+                 ② 撰写笔记：python scripts/queue_tracker.py --next-note 5 --json（子智能体写笔记）
+                 ③ 整编教材：python src/cli.py cluster-articles "<链接或路径>"（模块长文整编成册）
+                 收尾自动执行 cleanup + sync
 【第 7 步：体检】python src/cli.py check --deliver --strict     # 笔记成色 + 渲染合规
 ```
 

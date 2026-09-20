@@ -89,16 +89,20 @@ def check(name, fn):
 
 
 def check_imports():
-    import src.cli  # noqa: F401
-    import src.core.console  # noqa: F401
-    import src.core.fsutil  # noqa: F401
-    import src.core.paths  # noqa: F401
-    import src.core.pipeline  # noqa: F401
-    import src.core.workspace  # noqa: F401
-    import src.core.ingestion  # noqa: F401
-    import src.generator.topic_planner  # noqa: F401
-    import src.generator.integrator  # noqa: F401
-    import src.generator.block_synthesizer  # noqa: F401
+    import importlib
+    for mod in (
+        "src.cli",
+        "src.core.console",
+        "src.core.fsutil",
+        "src.core.paths",
+        "src.core.pipeline",
+        "src.core.workspace",
+        "src.core.ingestion",
+        "src.generator.topic_planner",
+        "src.generator.integrator",
+        "src.generator.block_synthesizer",
+    ):
+        importlib.import_module(mod)
 
 
 # 收敛后的 CLI 唯一入口面（`check_cli_help` / `check_cli_surface_consolidated` / 文档全表共用）。
