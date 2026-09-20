@@ -58,6 +58,7 @@ config.json
 .douyin_cookie.json
 .zcode/
 .workbuddy/
+.codebuddy/
 .aide/
 temp_bilinote/
 

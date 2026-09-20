@@ -9,7 +9,7 @@
 | 内容 | 路径 | 说明 |
 | :--- | :--- | :--- |
 | 技能定义 | `skills/video2book/SKILL.md` | **唯一真源** |
-| 参考文档 | `skills/video2book/references/` | 含各平台安装对照、工具映射、交付矩阵与 CLI 场景手册（`cli-cookbook.md`） |
+| 参考文档 | `skills/video2book/references/` | 含 `workflow.md`（阶段一/二细则）、`runtime.md`（依赖/听音通道/凭证）、各平台安装对照、工具映射、交付矩阵与 CLI 场景手册（`cli-cookbook.md`） |
 | 工具链（技能的依赖） | `skills/video2book/src/`、`skills/video2book/scripts/` | 必须与 SKILL.md 一起安装 |
 
 ## 安装：只装技能目录

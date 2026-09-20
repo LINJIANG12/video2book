@@ -3,7 +3,8 @@
 > **文档定位**：面向**开发与维护者**，讲清楚"代码怎么组织、任务怎么落地、改一处要动哪些地方"。
 > 使用者上手看 `README.md`；Agent 执行契约看 `skills/video2book/SKILL.md`；上轮审计与精简结论看 `AUDIT_REPORT.md`。
 >
-> **校订基线**：提交 `fd72412`。本文所有行数、文件清单、模块可达性结论均取自该提交；改动代码后请同步更新受影响的小节。
+> **校订基线**：提交 `fd72412`；**v2.9.0「入口收敛重构」** 后的入口集合、脚本清单与本文章节已同步。
+> 改动代码后请同步更新受影响的小节。
 >
 > **命名说明**：文件名沿用本项目既有的 `sikll` 写法（与容器目录 `笔记sikll` 一致）。
 
@@ -32,12 +33,12 @@
 | 层 | 位置 | 职责 | 明确不做 |
 |---|---|---|---|
 | 契约层 | `SKILL.md` | Agent 行为契约：红线、SOP、阶段门禁、交付纪律 | 不写实现细节（细节在 `references/`） |
-| 入口层 | `src/cli.py`、`scripts/*.py` | 13 个子命令 + 8 个独立脚本；参数解析、退出码、用户可见输出 | 不承载业务逻辑（转发给 core/generator） |
+| 入口层 | `src/cli.py`、`scripts/*.py` | 10 个子命令 + 3 个独立脚本；参数解析、退出码、用户可见输出 | 不承载业务逻辑（转发给 core/generator） |
 | 领域服务层 | `src/core/pipeline.py` | 流水线编排：来源解析 → 取音 → 装箱 → 任务书导出 → 412 状态记录 | 不写长文/笔记内容 |
 | 基础能力层 | `src/core/*.py` | 路径、工作区、凭证、抓取、签名、音频、质检内核、对账、回收 | 不关心 CLI 参数形状 |
 | 摄取层 | `src/core/ingestion/**` | 多平台统一媒体内核：4 个 Provider + 协调器 + 抖音/YouTube 自有引擎 | 不产出任务书 |
 | 生成层 | `src/generator/**` | 提示词模板、任务书渲染、笔记归并、教材整编 | 不发起网络与子进程 |
-| 门禁层 | `scripts/selfcheck.py` | 48 项可复算断言，把文档与机器契约一起钉住 | 不修改任何文件（只读校验） |
+| 门禁层 | `scripts/selfcheck.py` | 49 项可复算断言，把文档与机器契约一起钉住 | 不修改任何文件（只读校验） |
 
 **关键取向：工具层只产出「任务书 + 派发载荷 + 门禁」，内容由宿主 Agent 写。** 这是本项目与常规「脚本生成文档」最大的不同——实现里到处可见「任务书烘焙提示词、禁止主 Agent 自编格式」的约束。
 
@@ -63,15 +64,15 @@ subtitles/BLK01_P01-P07_逐字稿.md ── 写作的唯一事实来源
    │  ⑥ 导出模块长文任务书（pipeline.export_block_article_task）→ 写作角色一块一篇
    ▼
 articles/模块XX_<块标题>_精读长文.md
-   │  ⑦ 阶段门禁（queue_tracker --summary 的 STAGE1_DONE + article_grounding_check）
+   │  ⑦ 阶段门禁（queue_tracker --summary 的 STAGE1_DONE + cli.py check --stage1）
    ▼
    ├─ ⑧ 块 → 笔记归并（Agent 写 note_plan.json）→ 笔记任务书 → 笔记子智能体
    │     ▼ notes/笔记XX_*.md
    └─ ⑨ 教材分册（Agent 写 textbook_plan.json）→ 按块序整编
          ▼ textbooks/模块<册号>_<册名>_精读全书.md
-   │  ⑩ 收尾：cleanup 回收任务书 / sync 对账回填 manifest.json
+   │  ⑩ 收尾（已自动）：pipeline 与 cluster-* 结束时回收任务书 / 对账回填 manifest.json
    ▼
-交付前质检：note_quality_check / render_compat_check / article_grounding_check（默认提示级，--strict 才拦）
+交付前质检：cli.py check --deliver（笔记成色 + 渲染合规）+ check --stage1（依据级；默认提示级，--strict 才拦）
 ```
 
 ### 1.4 参与角色与工具层边界
@@ -120,20 +121,20 @@ articles/模块XX_<块标题>_精读长文.md
 | `references/install.md` | 78 | 各平台安装位置与挂载方式对照 | 被 AGENTS / CLAUDE / README / INSTALL 引用 | 分发契约 |
 | `references/non-video-works.md` | 116 | 抖音图文/图集（无口播）的识别口径与处置 | `pipeline.py` 亦引用 | 非视频作品规则 |
 | `references/host-tools/{README,claude,codex,opencode}.md` | 56/24/47/24 | 各宿主「行动语义 → 私有工具名」映射 | **唯一允许写宿主私有工具名的位置** | 平台适配层 |
-| `scripts/selfcheck.py` | 3161 | 48 项检查（见 §3.12） | 读全部文档与代码 | 主质量门禁 |
 | `scripts/queue_tracker.py` | 749 | 队列、阶段门禁、派发载荷、台账 | `budget.py`、`workspace.py`、`transcript_splitter.py` | 派发中枢 |
-| `scripts/article_grounding_check.py` | 241 | 依据级校验（一块一验，实体覆盖率） | `workspace.py`、`transcript_splitter.py` | 写作质量门禁 |
-| `scripts/note_quality_check.py` | 205 | 笔记成色体检 | `deliverable_lint.py` | 笔记门禁 |
-| `scripts/render_compat_check.py` | 225 | 渲染合规体检 | `deliverable_lint.py` | 渲染门禁 |
-| `scripts/strip_heading_numbers.py` | 286 | 存量产物标题去号（幂等、可 `--dry-run`） | `heading_numbers.py` | 一次性清理 + 巡检 |
-| `scripts/cleanup_tasks.py` | 123 | `cleanup` 的独立脚本入口 | `task_cleanup.py` | 无子命令环境下的回收 |
+| `scripts/selfcheck.py` | ~3180 | 49 项检查（见 §3.12） | 读全部文档与代码 | 主质量门禁 |
 | `scripts/run.py` | 22 | 免安装入口：注入仓库根后调 `src.cli:main` | 与 `python src/cli.py` 行为等价 | 任意工作目录调用 |
+
+> **v2.9.0 入口收敛**：原独立脚本已合并——三个质检脚本（`article_grounding_check` / `note_quality_check` /
+> `render_compat_check`）与 `strip_heading_numbers` 的规则全部落进 `src/core/quality_gate.py` 与
+> `src/core/heading_cleanup.py`，统一由 `cli.py check`（`--stage1` / `--deliver` / `--fix-numbering`）承载；
+> 与 `cleanup` 子命令重复的 `cleanup_tasks.py` 已删除。
 
 ### 2.3 `src/` 入口与领域层
 
 | 文件 | 行数 | 内容 / 关键符号 | 关联 | 作用 |
 |---|---:|---|---|---|
-| `src/cli.py` | 1264 | `main()`、13 个 `cmd_*` 处理函数、`_resolve_base_dir`、`_save_manifest_rel`、`_confirm_article_prompt_style` | 调 pipeline / core / generator / scripts 能力 | **唯一命令入口**；退出码在这里产生 |
+| `src/cli.py` | ~840 | `main()`、10 个 `cmd_*` 处理函数、`_resolve_base_dir`、`_confirm_article_prompt_style`、`_autoclose_workspace` | 调 pipeline / core / generator / scripts 能力 | **唯一命令入口**；退出码在这里产生 |
 | `src/core/pipeline.py` | 1019 | `PipelineCoordinator`、`export_block_article_task`、`export_block_transcribe_task`、`TRANSCRIBE_INSTRUCTION`、`resolve_target_info`、`resolve_scope_parts`、`is_412`/`record_412_status`/`format_412`、`classify_audio_error` | 依赖 parser、fetcher、audio_merger、workspace、budget、prompt_templates | 领域调度：把「来源 + 参数」变成「工作区 + 音频 + 任务书」 |
 | `src/core/paths.py` | 340 | `code_root`、`home_root`、`is_container_layout`、`resolve_base_dir`、`mcp_candidate_bases` | 被几乎全部模块引用 | **三域路径唯一真相** |
 | `src/core/workspace.py` | 594 | `TaskWorkspace`（root/audio/notes/articles/subtitles + parts_cache/manifest 路径）、`find_module_article`、`sanitize_filename` | 被 pipeline、队列、全部生成器引用 | 工作区与命名契约 |
@@ -179,7 +180,10 @@ articles/模块XX_<块标题>_精读长文.md
 
 ### 2.6 模块可达性（已实测结论）
 
-61 个模块中，从 9 个入口（`src/cli.py` + 8 个 `scripts/*.py`）可达 58 个；未命中的只有 `src.generator`、`ingestion.ytaudio`、`ingestion.dyaudio` 三个包的 `__init__.py`——它们被 `from <pkg>.<mod> import …` 的形式实际加载，**不是死代码**。结论：`src/` 下当前没有可安全删除的模块。
+模块总数随本轮新增的两个内核（`quality_gate.py` / `heading_cleanup.py`）而变化；从 4 个入口
+（`src/cli.py` + `scripts/{queue_tracker,run,selfcheck}.py`）可达的模块集没有死代码——未命中的只有
+`src.generator`、`ingestion.ytaudio`、`ingestion.dyaudio` 等包的 `__init__.py`，它们被
+`from <pkg>.<mod> import …` 的形式实际加载，**不是死代码**。结论：`src/` 下当前没有可安全删除的模块。
 
 ---
 
@@ -187,18 +191,18 @@ articles/模块XX_<块标题>_精读长文.md
 
 每个任务按「参与文件 / 前置条件 / 底层逻辑 / 受影响配置 / 产物 / 验证方式」六项说明。
 
-### 3.1 来源解析与工作区建立（`parse`）
+### 3.1 来源解析与工作区建立（`pipeline --dry-run`）
 
-- **参与文件**：`cli.py:cmd_parse`(149) → `ingestion/coordinator.py` → 4 个 Provider（`bilibili.py`/`local.py`/`youtube.py`/`douyin.py`）→ `parser.py`（B 站）、`local_media.py`（本地）、`ytaudio/channel.py`+`single.py`（YouTube）、`dyaudio/share_parser.py`+`user_crawler.py`（抖音）；落盘走 `workspace.py` 的 `save_parts`。
+- **参与文件**：`cli.py:cmd_pipeline`（`mode="dry-run"`）→ `pipeline.PipelineCoordinator.run` → `ingestion/coordinator.py` → 4 个 Provider（`bilibili.py`/`local.py`/`youtube.py`/`douyin.py`）→ `parser.py`（B 站）、`local_media.py`（本地）、`ytaudio/channel.py`+`single.py`（YouTube）、`dyaudio/share_parser.py`+`user_crawler.py`（抖音）；落盘走 `workspace.py` 的 `save_parts`。
 - **前置条件**：B 站建议 `SESSDATA`（高并发稳定性）；抖音需要 Cookie（否则只抓到约 20 条，**不终止**）；YouTube 需要 `yt-dlp`；抖音需要 `requests`。
 - **底层逻辑**：`coordinator` 遍历 Provider 调 `match()` 选路 → `probe()` 返回统一结构的字典（`bvid`/`title`/`parts[]`/`video_type` 等）→ 工作区名 = 清洗后的课程标题 + `_<bvid>`（`workspace.py`）→ `parts.json` 落盘（**集号基准**）。
 - **受影响配置**：`BVB_OUTPUT_DIR`、`BVB_HOME`、`--base-dir`、`--task`、`--limit`。
 - **产物**：`<产物根>/<task>/parts.json`、`manifest.json`。
-- **验证**：`cli.py parse "<链接>" --limit 3`；离线场景靠 `parts.json` 自愈（`pipeline._offline_candidate_dirs`）。
+- **验证**：`cli.py pipeline "<链接>" --dry-run`；离线场景靠 `parts.json` 自愈（`pipeline._offline_candidate_dirs`）。
 
-### 3.2 音频摄取与装箱成块（`pipeline` / `audio` / `merge-audio`）
+### 3.2 音频摄取与装箱成块（`pipeline` / `pipeline --audio-only` / `merge-audio`）
 
-- **参与文件**：`cli.py:cmd_pipeline`(465)/`cmd_audio`(226)/`cmd_merge_audio`(514) → `pipeline.PipelineCoordinator` → `fetcher.AudioFetcher`（B 站）或 `Provider.fetch_audio`（其它平台）→ `audio_merger.AudioMerger` → `audio_chunker.AudioChunker`（时长）。
+- **参与文件**：`cli.py:cmd_pipeline`（含 `mode="audio-only"`）/`cmd_merge_audio` → `pipeline.PipelineCoordinator` → `fetcher.AudioFetcher`（B 站）或 `Provider.fetch_audio`（其它平台）→ `audio_merger.AudioMerger` → `audio_chunker.AudioChunker`（时长）。
 - **前置条件**：系统 `ffmpeg` 在 `PATH`（硬前置）；`ffprobe` 可选（缺失降级为 `ffmpeg -i`）。
 - **底层逻辑**：① 按集下载/抽取 16kHz 单声道音频 → ② `AudioMerger.plan_units` 把集规划成「装箱单元」（整集一个单元；超长集按上限劈上/下两条腿） → ③ `pack` 把单元装进 `[min, max]` 分钟的连续块（默认目标 50、区间 40–60） → ④ 块标题由块内分集名语义组合，写进块音频文件名 → ⑤ 落 `blocks.json` + `block_titles.json`。箱子是**知识模块边界**，此后不再有独立的模块规划。
 - **受影响配置**：`--block-minutes`、`BVB_AUDIO_BLOCK_MINUTES`、`BVB_AUDIO_BLOCK_MIN_MINUTES`、`BVB_AUDIO_BLOCK_MAX_MINUTES`、`BVB_AUDIO_ONESHOT_LIMIT_MINUTES`（单块硬上限，默认 75）、`--quality`、`--skip-failed`、`--force`。
@@ -241,26 +245,26 @@ articles/模块XX_<块标题>_精读长文.md
 - **产物**：`textbook_plan.json`、`textbook_plan_TASK.md`、`textbooks/模块<册号>_<册名>_精读全书.md`。
 - **验证**：自检「ArticleIntegrator 无硬编码课程数据」「标题序号纪律」。
 
-### 3.7 交付前质检（三个脚本 + `--strict` 语义）
+### 3.7 交付前质检（`check` 统一门禁 + `--strict` 语义）
 
-- **参与文件**：`scripts/note_quality_check.py`、`render_compat_check.py`、`article_grounding_check.py`，三者共用 `core/deliverable_lint.py` 与 `core/heading_numbers.py`、`core/workspace.py`。
-- **前置条件**：产物已落盘；脚本**不在流水线上拦人**（交付前由主 Agent 手动跑）。
-- **底层逻辑**：默认**提示级**，只有 `--strict` 才把致命项变成非零退出码。笔记成色五类致命项（套话填充 / 空壳标题 / 分集平铺标题 / 行内残缺引用 / 分集口吻）定义在 `deliverable_lint.FATAL_NOTE_KEYS`；渲染致命项为告警块 / 围栏外裸字符画 / 围栏配对；缺围栏语言标识默认只统计（`--require-lang` 才拦）；依据级校验用块级逐字稿的技术实体覆盖率（默认 `--min-freq 2`、`--min-coverage 0.5`）。
-- **受影响配置**：`--strict`、`--require-structure`、`--max-truncated`、`--require-lang`、`--min-freq`、`--min-coverage`、`--dir`/`--task`/`--base-dir`/`--json`。
-- **验证**：自检「质检文档口径与门禁一致」（断言致命项恰为 5 类，且 README 中英都写了对应标签）。
+- **参与文件**：`cli.py:cmd_check` → `core/quality_gate.py`（`run_stage1` / `run_deliver`）与 `core/heading_cleanup.py`（`run_fix_numbering`），共用 `core/deliverable_lint.py`、`core/heading_numbers.py`、`core/workspace.py`。
+- **前置条件**：产物已落盘；`check` **不在流水线上拦人**（交付前由主 Agent 手动跑）。
+- **底层逻辑**：默认**提示级**，只有 `--strict` 才把致命项变成非零退出码。`--stage1` 做依据级校验（块级逐字稿技术实体覆盖率，默认 `--min-freq 2`、`--min-coverage 0.5`）；`--deliver`（默认）做笔记成色 + 渲染合规——笔记五类致命项（套话填充 / 空壳标题 / 分集平铺标题 / 行内残缺引用 / 分集口吻）定义在 `deliverable_lint.FATAL_NOTE_KEYS`，渲染致命项为告警块 / 围栏外裸字符画 / 围栏配对，缺围栏语言标识默认只统计（`--require-lang` 才拦）；`--fix-numbering` 就地清理存量标题手写序号。
+- **受影响配置**：`--stage1`/`--deliver`/`--fix-numbering`、`--strict`、`--require-structure`、`--max-truncated`、`--require-lang`、`--require-no-numbering`、`--min-freq`、`--min-coverage`、`--only`、`--dry-run`、`--dir`/`--task`/`--base-dir`/`--json`。
+- **验证**：自检「质检文档口径与门禁一致」（断言致命项恰为 5 类，且 README 中英都写了对应标签）+「标题序号纪律」（`heading_cleanup.clean_text` 真跑、幂等）。
 
 ### 3.8 收尾与对账（`cleanup` / `sync`）
 
-- **参与文件**：`cli.py:cmd_cleanup`(766) → `core/task_cleanup.py`；`cli.py:cmd_sync`(815) → `core/state_sync.py`；`scripts/cleanup_tasks.py` 是 `cleanup` 的等价独立入口。
-- **底层逻辑**：任务书（`*_TASK.md`、`*_转录任务书.md`）是**临时派发物**，只有成品齐备才回收，每类保留编号最小的 N 份作为提示词范本；`note_plan_TASK.md` 属课程级规划，永不回收。`sync` 以磁盘为唯一真相回填 `manifest.json`（含按块对账）。
+- **参与文件**：`cli.py:cmd_cleanup` → `core/task_cleanup.py`；`cli.py:cmd_sync` → `core/state_sync.py`；两处均已被 `cli.py:_autoclose_workspace` 在 `pipeline` / `cluster-*` 收尾时自动调用。
+- **底层逻辑**：任务书（`*_TASK.md`、`*_转录任务书.md`）是**临时派发物**，只有成品齐备才回收，每类保留编号最小的 N 份作为提示词范本；`note_plan_TASK.md` 属课程级规划，永不回收。`sync` 以磁盘为唯一真相回填 `manifest.json`（含按块对账）。两个子命令仍保留，供单独复算。
 - **受影响配置**：`--keep N`、`--dry-run`、`--task`、`--all`。
 - **验证**：自检「对账按块跑通（sync 的静默失败防线）」；`--dry-run` 预演。
 
-### 3.9 去重（`dedup`）
+### 3.9 去重（`pipeline` 自动执行）
 
-- **参与文件**：`cli.py:cmd_dedup`(740)；`workspace.py` 的音频指纹与产物复用判定。
-- **底层逻辑**：对音频算 SHA-256 指纹，相同分集的语料与长文直接复用（0 Token）；`pipeline` **不会自动调用**，需手动执行。
-- **受影响配置**：`--dry-run`。
+- **参与文件**：`pipeline.PipelineCoordinator.run`（音频收齐后自动调用）；`workspace.py` 的音频指纹与产物复用判定。
+- **底层逻辑**：对音频算 SHA-256 指纹，相同分集的语料与长文直接复用（0 Token）；原 `dedup` 子命令已删除，由 `pipeline` 在音频收口后**自动执行**。
+- **受影响配置**：无（需要手动重算时重跑 `pipeline` 即可）。
 - **验证**：自检「重复分集免字幕复用」。
 
 ### 3.10 凭证管理（`login` / `logout` / `info`）
@@ -277,7 +281,7 @@ articles/模块XX_<块标题>_精读长文.md
 - **受影响配置**：`--dir`、`--pattern`、`--base-dir`、`--json`；阈值系数可用 `BVB_AUDIO_TOKENS_PER_SEC`、`BVB_CONTEXT_WINDOW_TOKENS` 覆盖。
 - **验证**：自检「派发载荷与台账契约」「阶段一派发纪律已写入文档」。
 
-### 3.12 技能自检（`scripts/selfcheck.py`，48 项）
+### 3.12 技能自检（`scripts/selfcheck.py`，49 项）
 
 - **职责**：把「代码、文档、机器契约」三者的一致性变成可复算断言。覆盖七类：
   1. **结构与边界**：技能自包含、三域分离、跨仓不互引、容器根不得是版本库；
@@ -392,7 +396,7 @@ articles/模块XX_<块标题>_精读长文.md
 
 1. `src/core/deliverable_lint.py`：规则实现 + 归类（致命项进 `FATAL_NOTE_KEYS`，提示项另计）。
 2. **必须同步**：`FATAL_NOTE_KEYS` 数量被自检断言为 **5**；README 中英各有 5 个标签被断言（中文：套话填充 / 空壳标题 / 分集平铺标题 / 行内残缺引用 / 分集口吻；英文：boilerplate / hollow / per-episode headings / inline quote / episode voice）。加第 6 类要同时改这三处（`deliverable_lint.py`、两个 README、必要时 `SKILL.md`），否则门禁红。
-3. 相应的 `scripts/*_check.py` 要暴露 `--strict` 语义与 `--json`。
+3. 相应的规则要在 `cli.py check` 上暴露 `--strict` 语义与 `--json`。
 
 ### 7.4 新增一项自检
 
@@ -493,7 +497,7 @@ articles/模块XX_<块标题>_精读长文.md
 | 项 | 位置 | 状态 |
 |---|---|---|
 | `fetcher.BROWSER_HEADERS` 零引用别名 | `src/core/fetcher.py` | 待确认：是保留（可能被外部脚本引用）还是删除 |
-| `scripts/selfcheck.py` 单文件 3161 行 | —— | 未拆分：拆分风险高（检查注册与退出码集中），建议按「结构 / 契约 / 端到端 / 安全 / 文档 / 可移植性 / 回归」七类评估后再动 |
+| `scripts/selfcheck.py` 单文件 3100+ 行 | —— | 未拆分：拆分风险高（检查注册与退出码集中），建议按「结构 / 契约 / 端到端 / 安全 / 文档 / 可移植性 / 回归」七类评估后再动 |
 | `topic_planner` 命名 | `src/generator/topic_planner.py` | 概念上等同 `note_planner`，但类名 `SemanticTopicPlanner` 已被 `block_synthesizer` 与自检引用，重命名属破坏性变更 |
 | `src/core/contract.py` 消费者 | 仅 `selfcheck.py` | 生产目录里的门禁专用件；如需更清晰的归属可评估移入 `scripts/` 侧 |
 | `requests` / `yt_dlp` 的惰性导入无门禁覆盖 | 各 Provider | 建议把 §8.2 的 AST 校验固化成一项自检 |

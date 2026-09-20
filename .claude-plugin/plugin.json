@@ -1,7 +1,7 @@
 {
   "name": "video2book",
-  "version": "2.8.0",
-  "description": "Core skills library for Bilibili, YouTube, Douyin & local course videos: deep-dive episode articles, compiled textbooks, and mindmap review notes.",
+  "version": "2.9.0",
+  "description": "Core skills library for Bilibili, YouTube, Douyin & local course videos: deep-dive block articles, compiled textbooks, and mindmap review notes.",
   "author": {
     "name": "LINJIANG12"
   },

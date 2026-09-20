@@ -218,7 +218,7 @@ python src/cli.py pipeline "D:\courses\software_engineering" --all --article-typ
 - **按平台 / 按区间取音**：B 站合集与「每个分集都是独立 BV」的旧版合集、YouTube 频道、抖音博主合集、`--page` / `--range` 选集；
 - **派发队列与阶段门禁**：`queue_tracker.py` 的转录侧 / 写作侧 / 笔记侧取载荷与单行状态；
 - **生成教材与笔记**：`cluster-articles` / `cluster-notes`（含 `--force` 重编）；
-- **质检与收尾**：三个体检脚本、`cleanup` 任务书回收、`sync` 对账。
+- **质检与收尾**：`check` 统一门禁（`--stage1` 放行 / `--deliver` 体检 / `--fix-numbering` 标题去号）、`cleanup` 与 `sync`（已由主流程自动执行）。
 
 笔记成色的五类致命项为**套话填充、空壳标题、分集平铺标题、行内残缺引用、分集口吻**，命中即判失败；断句与结构缺件属提示项，加 `--require-structure` 才纳入门禁。渲染合规的致命项为 GitHub 告警块、围栏外裸字符画与围栏配对；**围栏语言标识**默认只提示，加 `--require-lang` 才纳入门禁。
 
@@ -286,11 +286,11 @@ skill/
 ├── skills/video2book/          # 技能本体，安装时只需这一个目录
 │   ├── SKILL.md                # 技能契约，Agent 的唯一事实源
 │   ├── src/                    # 工具链
-│   │   ├── cli.py              # 入口：13 个子命令
+│   │   ├── cli.py              # 入口：10 个子命令
 │   │   ├── core/               # 路径、音频预算、流水线、抓取、交付物质检
 │   │   │   └── ingestion/      # 多平台统一媒体内核（B 站 / 本地 / YouTube / 抖音）
 │   │   └── generator/          # 任务书、提示词模板与语义聚合
-│   ├── scripts/                # 质检、清理、队列跟踪、自检与运行入口
+│   ├── scripts/                # 派发队列、自检与免安装入口
 │   └── references/             # 安装说明、交付矩阵、CLI 场景手册、宿主工具映射
 ├── agents/                     # 通用 agents 侧的技能元数据
 ├── .claude-plugin/             # Claude Code 插件清单
@@ -324,10 +324,10 @@ skill/
 python src/cli.py pipeline "https://www.bilibili.com/video/BV14VqVBrEhc" --all --article-type learning
 python scripts/queue_tracker.py --next-module 5 --json    # 写作侧取载荷（含任务书/逐字稿/目标路径）
 python src/cli.py cluster-notes "<链接或本地路径>"          # 块 → 笔记归并，导出笔记任务书
-python src/cli.py cleanup --dry-run                       # 任务书回收预演
+python src/cli.py check --deliver --strict                 # 交付前体检（笔记成色 + 渲染合规）
 ```
 
-**13 个子命令的完整清单、每个开关的用途、全部参数、逐场景示例与退出码（0–4）** 集中在
+**10 个子命令的完整清单、每个开关的用途、全部参数、逐场景示例与退出码（0–4）** 集中在
 [CLI 场景手册](skills/video2book/references/cli-cookbook.md)——那是 CLI 细节的单一真源，本文不再重复维护。
 
 <div align="right">

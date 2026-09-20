@@ -541,12 +541,18 @@ class PipelineCoordinator:
         quality: str = "low",
         article_type: str = "",
         block_minutes: float = 0.0,
+        mode: str = "full",
     ) -> Dict[str, Any]:
         """执行完整流水线；硬门禁失败时抛出 PipelineGateError（由 CLI 转换为退出码）。
 
         阶段一固定走**块级转录链路**：音频收齐后按集装箱成块、导出块级转录任务书，长文由
         写作角色读块级逐字稿撰写。块时长目标取 `block_minutes`，为 0 时用 `AudioMerger`
         的默认值（环境变量 `BVB_AUDIO_BLOCK_MINUTES`，默认 50 分钟，落 40–60 带中段）。
+
+        `mode` 控制三个入口共用同一条编排：
+        - `full`（默认）：完整链路；
+        - `dry-run`：只解析拓扑并列出将处理的分集，不下载音频、不写任务书；
+        - `audio-only`：收齐音频并装箱、导出块级转录任务书后即返回（不派发长文任务书）。
         """
         from concurrent.futures import ThreadPoolExecutor
 
@@ -590,6 +596,17 @@ class PipelineCoordinator:
 
         total_episodes = len(selected_parts)
         print(f"[*] 待处理分集总数: {total_episodes}")
+
+        # ===== --dry-run：只解析拓扑（取代原 `parse` 子命令）=====
+        if mode == "dry-run":
+            print("[*] --dry-run：仅解析拓扑并列出分集，不下载音频、不写任务书")
+            for _part in selected_parts:
+                _dur = _part.get("duration")
+                _dur_txt = f"{max(1, int(round(_dur / 60)))} 分钟" if isinstance(_dur, (int, float)) and _dur else "时长未知"
+                print(f"    - P{int(_part.get('page') or 0):02d} {_part.get('title')}（{_dur_txt}）")
+            print(f"[✓] 工作区: {ws.root_dir}")
+            print("=" * 65)
+            return {"workspace": ws, "manifest": {}, "note_plan": [], "note_results": [], "failed_entries": []}
 
         # 断点续派过滤：manifest 中 status==success 的 page 跳过（force 时不过滤）
         if not force:
@@ -757,6 +774,16 @@ class PipelineCoordinator:
             print("=" * 65, file=sys.stderr)
             raise PipelineGateError(2)
 
+        # ===== 自动去重：相同分集（SHA-256 指纹）复用既有语料与长文，0 Token =====
+        # 原 `dedup` 子命令由 pipeline 在音频收齐后自动执行——手动那一步没有存在价值，
+        # 漏跑只会白烧 token；显式去重需求仍可用 `merge-audio` 的幂等重装链路覆盖。
+        try:
+            _dups = ws.sync_duplicate_assets(dry_run=False)
+            if _dups:
+                print(f"[*] 自动去重：复用 {len(_dups)} 组重复分集的既有语料/长文（0 Token）")
+        except Exception as _dup_err:
+            print(f"[!] 自动去重已跳过：{_dup_err}", file=sys.stderr)
+
         # ===== 阶段一点五「音频装箱合并」：把连续的几集拼成块（每块 40–60 分钟）=====
         # 块不只是「少调用几次取音接口」的容器：**块就是知识模块**。转录按块走，长文按块写
         # （一块一篇模块长文），教材按块整编，笔记按块归并——整条链路的下游都以块为粒度。
@@ -832,6 +859,14 @@ class PipelineCoordinator:
                   f"{AudioMerger.block_span(_block)}: {_task.name}")
         if merged["noop"]:
             print("[i] 本次装箱无收益（每块仅一集）：块音频直接指向该集原音频，转录仍按块派发")
+
+        # ===== --audio-only：收齐音频并装箱、导出转录任务书后即返回（取代原 `audio` 子命令）=====
+        if mode == "audio-only":
+            print("[*] --audio-only：音频与块已就绪，未派发长文/笔记任务书")
+            print(f"[✓] 块清单: {AudioMerger.manifest_path(ws)}")
+            print(f"[✓] 下一步：转录角色按 {Path(ws.subtitles_dir).name}/BLK*_转录任务书.md 出块级逐字稿")
+            print("=" * 65)
+            return {"workspace": ws, "manifest": {}, "note_plan": [], "note_results": [], "failed_entries": []}
 
         print("=" * 65)
         print("=" * 65)

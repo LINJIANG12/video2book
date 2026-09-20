@@ -1,6 +1,6 @@
 {
   "name": "video2book",
-  "version": "2.8.0",
+  "version": "2.9.0",
   "description": "Batch-transform Bilibili, YouTube, Douyin course videos & local media into publication-grade deep-dive textbooks and structured review notes.",
   "author": {
     "name": "LINJIANG12"
@@ -24,7 +24,7 @@
   "interface": {
     "displayName": "Video2Book",
     "shortDescription": "Turn Bilibili, YouTube, Douyin and local course videos into deep-dive textbooks and mindmap notes",
-    "longDescription": "Use Video2Book to rebuild long course videos into three linked deliverables: per-episode deep-dive articles, compiled modular textbooks, and mindmap-friendly review notes. The bundled toolchain ingests Bilibili, YouTube, Douyin and local media, extracts lightweight speech audio via ffmpeg, drives a two-pass semantic aggregation, and gates delivery with machine checks. Listening is delegated to the host: use the omni-media MCP tool read_audio when the model has a native audio modality, otherwise use read_media with an external multimodal model.",
+    "longDescription": "Use Video2Book to rebuild long course videos into three linked deliverables: per-block deep-dive articles, compiled modular textbooks, and mindmap-friendly review notes. The bundled toolchain ingests Bilibili, YouTube, Douyin and local media, extracts lightweight speech audio via ffmpeg, packs episodes into 40-60 minute blocks, drives block-level transcription and aggregation, and gates delivery with machine checks. Listening is delegated to the host: use the omni-media MCP tool read_audio when the model has a native audio modality, otherwise use read_media with an external multimodal model.",
     "developerName": "LINJIANG12",
     "category": "Education",
     "capabilities": [

@@ -101,12 +101,17 @@ def check_imports():
     import src.generator.block_synthesizer  # noqa: F401
 
 
+# 收敛后的 CLI 唯一入口面（`check_cli_help` / `check_cli_surface_consolidated` / 文档全表共用）。
+# `parse` / `audio` / `dedup` / `split-transcript` 已分别并入 pipeline 与 check，不许回加。
+CLI_SUBCOMMANDS = (
+    "pipeline", "merge-audio", "cluster-notes", "cluster-articles",
+    "check", "cleanup", "sync", "login", "logout", "info",
+)
+
+
 def check_cli_help():
     # 一集一篇的 `transcribe` 入口已随旧链路整体移除，不许回加
-    for sub in ("parse", "audio",
-                "pipeline", "merge-audio", "split-transcript",
-                "cluster-notes", "cluster-articles", "dedup",
-                "cleanup", "sync", "login", "logout", "info"):
+    for sub in CLI_SUBCOMMANDS:
         res = run_quiet(
             [sys.executable, str(SKILL_ROOT / "src" / "cli.py"), sub, "--help"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60,
@@ -120,8 +125,37 @@ def check_cli_help():
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60,
     )
     assert "--block-minutes" in res.stdout, "pipeline 缺少 --block-minutes（块时长必须可配置）"
+    # 解析 / 取音两个轻量入口已收敛为 pipeline 的开关（取代原 `parse` / `audio` 子命令）
+    for 开关 in ("--dry-run", "--audio-only"):
+        assert 开关 in res.stdout, f"pipeline 缺少 {开关}（解析 / 取音入口已收敛进来）"
     for 已移除 in ("--no-merge", "--chunk-minutes"):
         assert 已移除 not in res.stdout, f"pipeline 不该再有 {已移除}（逐集听音链路已整体移除）"
+
+
+def check_cli_surface_consolidated():
+    """入口面收敛与防膨胀：SKILL.md 行数上限 + 唯一执行路径 + 子命令集合与文档全表一致。
+
+    这条守的是「Agent 读取到执行之间的路径不能再次变长」：契约层（`SKILL.md`）超过 200 行、
+    子命令与文档脱节、或主流程里冒出并列的备选做法，都会在这里转红。
+    """
+    skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    line_count = len(skill.splitlines())
+    assert line_count <= 200, f"SKILL.md 行数 {line_count} 超过 200 行（契约层必须保持精简）"
+
+    # 唯一执行路径：只声明一次，且不出现并列主路径表述
+    assert skill.count("唯一执行路径") == 1, "SKILL.md 应只声明一条唯一执行路径"
+    for 反模式 in ("另一条路径", "备选路径", "可选路径", "两种做法", "也可以只"):
+        assert 反模式 not in skill, f"SKILL.md 出现并列主路径表述「{反模式}」，应只保留一条"
+
+    # CLI 全表必须与实现同源：恰好列出 CLI_SUBCOMMANDS，且已收敛入口不得回流
+    cookbook = (SKILL_ROOT / "references" / "cli-cookbook.md").read_text(encoding="utf-8")
+    table_start = cookbook.find("## 子命令全表")
+    assert table_start >= 0, "cli-cookbook.md 缺少「子命令全表」"
+    table = cookbook[table_start:]
+    for sub in CLI_SUBCOMMANDS:
+        assert f"`{sub}`" in table, f"cli-cookbook 子命令全表缺少 `{sub}`"
+    for 已收敛 in ("`parse`", "`audio`", "`dedup`", "`split-transcript`"):
+        assert 已收敛 not in table, f"cli-cookbook 子命令全表仍列出已收敛入口 {已收敛}"
 
 
 def check_repo_separation():
@@ -664,12 +698,6 @@ def check_audio_block_contract():
             "target_minutes": 30.0,
             "effective_limit_minutes": 75.0,
         })
-        cli_result = run_quiet(
-            [sys.executable, str(SKILL_ROOT / "src" / "cli.py"), "split-transcript", str(ws.root_dir)],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60,
-        )
-        assert cli_result.returncode == 3, \
-            f"suspect 块未以非零退出码阻断派发: {cli_result.returncode}\n{cli_result.stdout}"
 
         valid_text = (
             "[00:00:00] P18 正确内容\n"
@@ -741,9 +769,9 @@ def check_audio_block_contract():
         assert TaskWorkspace._populated(only_transcript) is True, \
             "只有逐字稿的工作区被判成空壳"
         # 渲染门禁必须把逐字稿与转录任务书排除在交付物之外（ASR 文本里围栏不闭合属正常）
-        import render_compat_check as _rcc
+        from src.core.quality_gate import EXCLUDE_NAME_SUFFIXES
         for suffix in ("_逐字稿.md", "_转录任务书.md"):
-            assert suffix in _rcc.EXCLUDE_NAME_SUFFIXES, f"渲染门禁未排除 {suffix}"
+            assert suffix in EXCLUDE_NAME_SUFFIXES, f"渲染门禁未排除 {suffix}"
 
         # 5) 真跑一次拼接 + 幂等（用 ffmpeg 合成正弦音，不依赖课程音频）
         if not shutil.which("ffmpeg"):
@@ -885,6 +913,12 @@ def check_dead_modules_removed():
         "src/generator/classifier.py",
         "src/generator/doc_builder.py",
         "scripts/validate_skill.py",
+        # 入口收敛：与 `cleanup` / `check` 重复或已被合并的独立脚本，不许回流
+        "scripts/cleanup_tasks.py",
+        "scripts/article_grounding_check.py",
+        "scripts/note_quality_check.py",
+        "scripts/render_compat_check.py",
+        "scripts/strip_heading_numbers.py",
     ):
         assert not (SKILL_ROOT / rel).exists(), f"{rel} 应已删除"
 
@@ -2265,7 +2299,6 @@ def check_regression_fixes():
     import json
     import tempfile
 
-    from src.cli import _owner_line
     from src.core.task_cleanup import find_module_note
     from src.core.workspace import TaskWorkspace
     from src.generator.block_synthesizer import BlockSynthesizer
@@ -2280,11 +2313,6 @@ def check_regression_fixes():
     assert merged[1]["title"] == "新", "同 page 未以新结果覆盖"
     assert TaskWorkspace.merge_parts([], [{"page": 5}]) == [{"page": 5}], "空缓存合并不正确"
     assert TaskWorkspace.merge_parts([{"page": 1}], []) == [{"page": 1}], "空增量合并不正确"
-
-    # 2) 离线自愈元数据（owner 为字符串/空）不得让 parse 崩掉
-    assert "未知" in _owner_line({"owner": "", "owner_mid": 0}), "owner 为空串时未兜底"
-    assert "UP主" in _owner_line({"owner": {"name": "UP主", "mid": 7}}), "正常 owner 渲染异常"
-    assert "mid: 9" in _owner_line({"owner_mid": 9}), "仅 owner_mid 时渲染异常"
 
     with tempfile.TemporaryDirectory() as tmp:
         ws = TaskWorkspace(task_name="regression_probe", base_dir=tmp)
@@ -2371,7 +2399,6 @@ def check_regression_fixes():
         # 7) 非视频作品（抖音图文/图集 note）识别与排除
         #    它们没有口播，音频只是图片卡片+BGM，必须识别出来且不派发长文——
         #    否则撰写环节拿不到任何音频事实，只能编造（触红线 2）。
-        from src.cli import _persist_parts_cache
         from src.core.ingestion.dyaudio.share_parser import parse_single_aweme
         from src.core.pipeline import KIND_IMAGE_ALBUM, KIND_VIDEO, part_kind
 
@@ -2413,17 +2440,16 @@ def check_regression_fixes():
         )
         assert _mk2[0]["media_kind"] == KIND_VIDEO, f"incoming 显式值未生效: {_mk2}"
 
-        # 7.5 跨命令契约：`audio` 单独跑一遍不得把 `pipeline` 写好的 media_kind 冲掉。
-        #     这条守的是 _persist_parts_cache 的键白名单——它最容易在新增字段时被漏掉，
-        #     一漏就会静默退化（下次 pipeline 认不出图文集）。
+        # 7.5 落盘契约：分集拓扑写回 parts.json 后必须保留 media_kind（pipeline 是唯一写入方，
+        #     走 merge_parts「只补不缩」；字段一旦在落盘层被漏掉，下次运行就认不出图文集）。
         with tempfile.TemporaryDirectory() as tmp2:
             ws2 = TaskWorkspace(task_name="kind_persist", base_dir=tmp2)
-            _persist_parts_cache(
-                ws2, [{"page": 1, "title": "图文", "media_kind": KIND_IMAGE_ALBUM}]
-            )
+            ws2.save_parts(TaskWorkspace.merge_parts(
+                ws2.load_parts(), [{"page": 1, "title": "图文", "media_kind": KIND_IMAGE_ALBUM}]
+            ))
             _saved = ws2.load_parts()
             assert _saved and _saved[0].get("media_kind") == KIND_IMAGE_ALBUM, \
-                f"parts.json 未保留 media_kind（audio 命令会冲掉标记）: {_saved}"
+                f"parts.json 未保留 media_kind: {_saved}"
 
 
 def check_state_sync_block_accounting():
@@ -2675,13 +2701,13 @@ def check_hardening_probes():
         assert "1. 关系模型结构与数据完整性约束（P05）" in h1_text, "目录未用长文 H1"
         assert "块标题（分集名）：《数据库第2章 关系数据库 （上）》" in h1_text, "分集名未保留在对应块备注"
 
-    # 6) grounding 冒烟：脚本子进程跑通、exit 0、对「尚无模块长文」如实报告
+    # 6) grounding 冒烟：`check --stage1` 子进程跑通、exit 0、对「尚无模块长文」如实报告
     with tempfile.TemporaryDirectory() as tmp:
         ws = TaskWorkspace(task_name="grounding_probe", base_dir=tmp)
         _write_blocks(ws, [{"block_id": 1, "title": "绪论", "span": "P01", "episodes": [1],
                             "duration_min": 46.0, "audio": "audio/a.m4a", "segments": []}])
         res = run_quiet(
-            [sys.executable, str(SKILL_ROOT / "scripts" / "article_grounding_check.py"),
+            [sys.executable, str(SKILL_ROOT / "src" / "cli.py"), "check", "--stage1",
              "--dir", str(ws.root_dir)],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120,
         )
@@ -2826,10 +2852,8 @@ def check_heading_number_discipline():
     背景（实测踩过两轮）：阅读器（Typora）会**自动**给标题编号，标题里再手写一套
     （笔记的 `## 1. …`、教材的 `## 第 3 章：…` 与继承来的 `## 2.1 …`）就会叠成双号。
     所以口径统一为「标题不写序号」：长文提示词不写号、教材整编幂等去号，
-    存量产物由 `scripts/strip_heading_numbers.py` 就清理。
+    存量产物由 `check --fix-numbering` 就地清理。
     """
-    import importlib.util
-
     from src.core.deliverable_lint import lint_heading_numbers
     from src.core.heading_numbers import is_numbered_heading, strip_heading_number
     from src.generator.prompt_templates import ARTICLE_LEARNING_PROMPT
@@ -2872,21 +2896,17 @@ def check_heading_number_discipline():
     assert "- **第 {i} 章**" not in src, "教材目录仍在写「第 N 章」"
     assert "strip_heading_number" in src, "教材整编未对继承来的长文标题去号"
 
-    # 4) 批量清理脚本：真跑一遍（临时文本），去号正确、正文不动、再跑零改动
-    script = SKILL_ROOT / "scripts" / "strip_heading_numbers.py"
-    assert script.is_file(), "缺少标题去号脚本 scripts/strip_heading_numbers.py"
-    spec = importlib.util.spec_from_file_location("_strip_heading_numbers", script)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # 4) 批量清理内核（`check --fix-numbering`）：真跑一遍（临时文本），去号正确、正文不动、再跑零改动
+    from src.core import heading_cleanup
 
     sample = "# 篇名\n\n## 1. 第一节\n\n正文一。\n\n### 2.1 子节\n\n正文二。\n"
-    new_text, headings, toc, _changes, _suspects = module.clean_text(sample)
-    assert (headings, toc) == (2, 0), f"脚本去号条数不对：headings={headings} toc={toc}"
-    assert "## 1." not in new_text and "### 2.1" not in new_text, "脚本未剥掉标题序号"
-    assert "正文一。" in new_text and "正文二。" in new_text, "脚本动了正文"
-    again_text, headings2, toc2, _c2, _s2 = module.clean_text(new_text)
-    assert (headings2, toc2) == (0, 0) and again_text == new_text, "脚本不幂等"
-    toc_text, _h3, toc3, _c3, _s3 = module.clean_text("- **第 1 章**：绪论\n")
+    new_text, headings, toc, _changes, _suspects = heading_cleanup.clean_text(sample)
+    assert (headings, toc) == (2, 0), f"去号条数不对：headings={headings} toc={toc}"
+    assert "## 1." not in new_text and "### 2.1" not in new_text, "未剥掉标题序号"
+    assert "正文一。" in new_text and "正文二。" in new_text, "动了正文"
+    again_text, headings2, toc2, _c2, _s2 = heading_cleanup.clean_text(new_text)
+    assert (headings2, toc2) == (0, 0) and again_text == new_text, "去号不幂等"
+    toc_text, _h3, toc3, _c3, _s3 = heading_cleanup.clean_text("- **第 1 章**：绪论\n")
     assert toc_text == "1. 绪论\n" and toc3 == 1, f"教材目录行归一失败：{toc_text!r}"
 
 
@@ -3101,6 +3121,7 @@ def main():
     print("=" * 62)
     check("模块导入无 ImportError", check_imports)
     check("CLI 全部子命令 --help 可用", check_cli_help)
+    check("入口面收敛（SKILL.md ≤200 行 + 唯一路径 + 子命令与文档同源）", check_cli_surface_consolidated)
     check("三域分离契约（仓库边界/产物在仓库外）", check_repo_separation)
     check("产物根解析（容器标记优先，否则取工作目录）", check_products_root_resolution)
     check("跨仓库不互引（skill ⇎ mcp）", check_no_cross_repo_imports)

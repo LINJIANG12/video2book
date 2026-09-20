@@ -10,7 +10,7 @@
 - 工具链（技能的依赖，必须一起安装）：`skills/video2book/src/` 与 `skills/video2book/scripts/`
 - **安装单元 = `skills/video2book/` 整个目录**（其余 README/平台声明/LICENSE 无需安装）
 - 各平台安装对照：`skills/video2book/references/install.md`
-- CLI 场景手册（六个场景）：`skills/video2book/references/cli-cookbook.md`
+- CLI 场景手册（八个场景）：`skills/video2book/references/cli-cookbook.md`
 - 运行前置：Python 3.10+、系统 `ffmpeg`、以及配套仓库 [`omni-media`](https://github.com/LINJIANG12/omni-media) 提供的 `read_audio` 或 `read_media` 听音通道之一
 - 自检：`cd skills/video2book && python scripts/selfcheck.py`
 - 容器根 `.git` 是 Codex 工作区标记，只允许保持为空；技能自检会拒绝含提交或 tracked 文件的根仓库。

@@ -3,14 +3,12 @@
 """Command-Line Interface for Video2Book (multi-platform video & knowledge extraction).
 
 Commands:
-  parse            - Parse URL/BVID, classify video type, and inspect sub-videos
-  audio            - Fetch audio stream URL and download 16kHz mono m4a per episode
-  pipeline         - Two-stage orchestration: gather audio, pack blocks, then dispatch task-files
+  pipeline         - Stage-1 single entry: parse topology (--dry-run) / gather audio+blocks (--audio-only)
+                     / full run: audio -> blocks -> dispatch task-files -> auto dedup + cleanup + sync
   merge-audio      - (Re)pack per-episode audio into blocks and export block task files
-  split-transcript - Optional: split a block transcript into per-episode transcripts
-  cluster-notes    - Two-pass aggregation: blocks -> review notes (task files)
-  cluster-articles - Consolidate module long-forms into modular textbooks
-  dedup            - Synchronize duplicate audio assets to save LLM tokens
+  cluster-notes    - Aggregate blocks into review notes (task files), then auto cleanup + sync
+  cluster-articles - Consolidate module long-forms into modular textbooks, then auto cleanup + sync
+  check            - Unified quality gate: --stage1 (grounding) / --deliver (note+render) / --fix-numbering
   cleanup          - Reclaim completed dispatch task-files (*_TASK.md), keeping N samples per category
   sync             - Reconcile manifest.json with on-disk products (disk is the source of truth)
   login / logout   - Persist or clear Bilibili SESSDATA / Douyin credentials (--sessdata / --douyin-cookie)
@@ -18,7 +16,6 @@ Commands:
 """
 
 import argparse
-import json
 import os
 import shutil
 import subprocess
@@ -49,8 +46,6 @@ from src.core.pipeline import (
     PipelineGateError,
     _STATUS_FILE,
     export_block_transcribe_task,
-    get_audio_stream,
-    parse_range_string,
     part_kind,
     resolve_course_title,
     resolve_scope_parts,
@@ -81,11 +76,6 @@ DOUYIN_COOKIE_HELP = (
 def _resolve_base_dir(value):
     """把 --base-dir 解析为绝对路径（空值即产物根；无容器标记时它跟随当前工作目录）。"""
     return str(_paths.resolve_base_dir(value))
-
-
-def _save_manifest_rel(ws, data):
-    """保存清单（TaskWorkspace 原生相对路径化，保留兼容入口）。"""
-    ws.save_manifest(data)
 
 
 def _to_relative_str(val):
@@ -130,341 +120,19 @@ def _confirm_article_prompt_style(args) -> str:
     sys.exit(4)
 
 
-def _owner_line(info) -> str:
-    """渲染 UP 主一行：兼容正常元数据（dict）与离线自愈缓存（owner 为字符串/空）。
-
-    离线自愈分支刻意不伪造 UP 主信息（owner 为空），若直接取 info['owner']['name']
-    会抛 TypeError（string indices must be integers），把一条本来可用的离线路径打断。
-    """
-    owner = info.get("owner")
-    if isinstance(owner, dict):
-        name = str(owner.get("name") or "").strip() or "未知"
-        mid = owner.get("mid", 0)
-    else:
-        name = str(owner or "").strip() or "未知（离线缓存）"
-        mid = info.get("owner_mid", 0)
-    return f"{name} (mid: {mid})"
-
-
-def cmd_parse(args):
-    info = resolve_target_info(
-        args.url,
-        sessdata=args.sessdata,
-        custom_task=getattr(args, "task", None),
-        base_dir=getattr(args, "base_dir", None),
-    )
-    if args.json:
-        print(json.dumps(info, ensure_ascii=False, indent=2))
-        return
-
-    source_type = info.get("source_type") or ("local" if info.get("is_local") else "bilibili")
-    mins = info.get("duration", 0) // 60
-    secs = info.get("duration", 0) % 60
-
-    print("=" * 65)
-    print(f"【视频标题】: {info['title']}")
-    if source_type == "local":
-        print(f"【来源路径】: {info.get('source_path')}")
-    else:
-        author_label = "UP 主" if source_type == "bilibili" else ("频道" if source_type == "youtube" else "作者")
-        print(f"【{author_label}】   : {_owner_line(info)}")
-        id_label = "BV 号" if source_type == "bilibili" else "唯一标识"
-        print(f"【{id_label}】   : {info.get('bvid')}")
-    print(f"【来源平台】: {source_type.upper()}")
-    print(f"【类型判定】: {info.get('type_desc')}")
-    print(f"【总时长】  : {mins:02d}:{secs:02d}")
-    if info.get("url_page"):
-        print(f"【定位分P】: P{info['url_page']:02d} 《{info.get('selected_title')}》")
-    print("=" * 65)
-
-    if info.get("has_multi_pages"):
-        print(f"\n▶ 分集列表 (共 {len(info['parts'])} P):")
-        for p in info["parts"][:args.limit]:
-            pmins = p.get("duration", 0) // 60
-            psecs = p.get("duration", 0) % 60
-            print(f"  P{p['page']:02d} [{pmins:02d}:{psecs:02d}] {p['title']}")
-            if p.get("filepath"):
-                print(f"      文件: {p['filepath']}")
-            elif p.get("url"):
-                print(f"      CID: {p.get('cid')} | 链接: {p['url']}")
-        if len(info["parts"]) > args.limit:
-            print(f"  ... 剩余 {len(info['parts']) - args.limit} 个分P已省略，可用 --limit 查看全量")
-
-    if info.get("has_ugc_season"):
-        s_info = info["season_info"]
-        print(f"\n▶ 所属合集【{s_info['title']}】(共 {len(info['season_episodes'])} 个稿件):")
-        for ep in info["season_episodes"][:args.limit]:
-            print(f"  [{ep['section_title']}] 第{ep['episode_index']}集: {ep['title']}")
-            print(f"      BV号: {ep['bvid']} | CID: {ep['cid']} | 链接: {ep['url']}")
-        if len(info["season_episodes"]) > args.limit:
-            print(f"  ... 剩余 {len(info['season_episodes']) - args.limit} 个稿件已省略")
-
-
-def _persist_parts_cache(ws, entries) -> None:
-    """把本命令见过的分集拓扑并进工作区 `parts.json`（局部运行**只补不缩**）。
-
-    为什么要有这个：`parts.json` 是「工作区到底有哪几集」的唯一事实，`cluster-notes` /
-    `cluster-articles` 都拿它当集号基准。只有 `pipeline` 写它的话，`audio` 单独跑出来的
-    音频就成了「磁盘有、拓扑无」的孤儿，后续命令只能回退到在线全集取基准。
-    """
-    try:
-        clean = [
-            {k: v for k, v in e.items()
-             if not k.startswith("_") and k in (
-                 "page", "title", "cid", "duration", "media_kind",
-                 "bvid", "aid", "season_id", "section_title", "episode_index", "url",
-             )}
-            for e in (entries or [])
-            if isinstance(e, dict) and e.get("page") is not None
-        ]
-        if clean:
-            ws.save_parts(TaskWorkspace.merge_parts(ws.load_parts(), clean))
-    except Exception as err:
-        print(f"[!] 分集拓扑缓存写入已跳过: {err}", file=sys.stderr)
-
-
-def cmd_audio(args):
-    info = resolve_target_info(args.url, sessdata=args.sessdata, custom_task=args.task, base_dir=args.base_dir)
-    bvid = info["bvid"]
-
-    # Initialize Task Workspace
-    ws = TaskWorkspace.create(
-        title=info["title"],
-        bvid=bvid,
-        custom_name=args.task,
-        base_dir=args.base_dir,
-    )
-    target_audio_dir = Path(args.output).resolve() if args.output else ws.audio_dir
-    target_audio_dir.mkdir(parents=True, exist_ok=True)
-    print(f"[*] 任务工作区已就绪: {ws.root_dir.name}")
-    print(f"    - 音频目录: {target_audio_dir}")
-
-    # Determine multi-page batch mode
-    is_batch = args.all or bool(args.range)
-    if is_batch and info["has_multi_pages"]:
-        all_parts = info["parts"]
-        if args.range:
-            target_indices = parse_range_string(args.range, len(all_parts))
-            selected_parts = [all_parts[i - 1] for i in target_indices]
-        else:
-            selected_parts = all_parts
-
-        total_parts = len(selected_parts)
-        prefetch_workers = max(1, int(getattr(args, "prefetch_workers", 12) or 1))
-        # 非视频作品（抖音图文/图集 note）没有可用音轨，取下来只有图片卡片+BGM。
-        # 这里预筛掉，既省时间，也避免给后续环节留下「有音频但没人声」的假象。
-        _non_video = [p for p in selected_parts if part_kind(p) != KIND_VIDEO]
-        if _non_video:
-            print(f"[*] 跳过 {len(_non_video)} 集非视频作品（图文作品，无口播）："
-                  f"P{_non_video[0]['page']:02d} 等")
-            selected_parts = [p for p in selected_parts if part_kind(p) == KIND_VIDEO]
-            total_parts = len(selected_parts)
-
-        if args.url_only:
-            source_type = info.get("source_type") or ("local" if info.get("is_local") else "bilibili")
-            rows = []
-            for p in selected_parts:
-                if source_type == "bilibili":
-                    stream_info = get_audio_stream(
-                        p.get("bvid") or bvid,
-                        p["cid"],
-                        sessdata=args.sessdata,
-                        prefer_quality=getattr(args, "quality", "low"),
-                    )
-                    rows.append({
-                        "page": p["page"],
-                        "bvid": p.get("bvid") or bvid,
-                        "cid": p["cid"],
-                        "title": p["title"],
-                        "url": stream_info.get("best_stream_url"),
-                        "quality": stream_info.get("quality_desc"),
-                    })
-                else:
-                    rows.append({
-                        "page": p["page"],
-                        "title": p["title"],
-                        "path": p.get("filepath") or info.get("source_path"),
-                    })
-            if args.json:
-                print(json.dumps(rows, ensure_ascii=False, indent=2))
-            else:
-                for row in rows:
-                    print(row.get("url") or row.get("path") or "")
-            return
-
-        print("=" * 65)
-        print(f"[*] 批量提取与无损转换任务启动 (共 {total_parts} 个分集，并发 {prefetch_workers} 线程)")
-        print(f"[*] 目标音轨存储目录: {target_audio_dir}")
-        print("=" * 65)
-
-        def _download_worker(p):
-            p_num = p["page"]
-            clean_p_title = sanitize_filename(p["title"])
-            target_file = target_audio_dir / f"P{p_num:02d}_{clean_p_title}.m4a"
-
-            # Check if cached and non-empty
-            if target_file.exists() and target_file.stat().st_size > 10240 and not args.force:
-                size_mb = round(target_file.stat().st_size / (1024 * 1024), 2)
-                print(f"[cached] P{p_num:02d} [{size_mb} MB] 已存在，跳过: {target_file.name}")
-                return {
-                    "page": p_num,
-                    "title": p["title"],
-                    "cid": p["cid"],
-                    "duration": p["duration"],
-                    "media_kind": part_kind(p),
-                    "audio_file": str(target_file),
-                    "size_bytes": target_file.stat().st_size,
-                    "status": "cached",
-                }
-
-            source_type = info.get("source_type") or ("local" if info.get("is_local") else "bilibili")
-            print(f"[fetch] 正在提取 P{p_num:02d}: {p['title']} ({source_type})...")
-            try:
-                from src.core.ingestion import get_coordinator
-                coordinator = get_coordinator()
-                coordinator.fetch_episode_audio(
-                    info,
-                    p,
-                    target_file,
-                    force=args.force,
-                    sessdata=args.sessdata,
-                    quality=getattr(args, "quality", "low"),
-                )
-                saved_path = str(target_file)
-                f_size = Path(saved_path).stat().st_size
-                print(f"    [✓] P{p_num:02d} 音频就绪: {Path(saved_path).name} ({round(f_size / (1024 * 1024), 2)} MB)")
-                return {
-                    "page": p_num,
-                    "title": p["title"],
-                    "cid": p.get("cid"),
-                    "duration": p.get("duration", 0),
-                    "media_kind": part_kind(p),
-                    "audio_file": saved_path,
-                    "size_bytes": f_size,
-                    "status": "downloaded",
-                }
-            except Exception as err:
-                print(f"    [✗] 处理 P{p_num:02d} 发生异常: {err}", file=sys.stderr)
-                return {
-                    "page": p_num,
-                    "title": p["title"],
-                    "cid": p["cid"],
-                    "error": str(err),
-                    "status": "failed",
-                }
-
-        from concurrent.futures import ThreadPoolExecutor
-        manifest_items = []
-        with ThreadPoolExecutor(max_workers=prefetch_workers) as pool:
-            futs = [pool.submit(_download_worker, p) for p in selected_parts]
-            for f in futs:
-                manifest_items.append(f.result())
-        manifest_items.sort(key=lambda x: x["page"])
-
-        # 分集拓扑落盘：不写的话，本命令下载的音频会变成「磁盘有、拓扑无」的孤儿，
-        # 后续命令只能回退到在线全集取集号基准。
-        _persist_parts_cache(ws, manifest_items)
-
-        # 中文注释：保存时相对路径化
-        _save_manifest_rel(ws, {
-            "bvid": bvid,
-            "title": info["title"],
-            "total_selected": total_parts,
-            "downloaded_count": sum(1 for m in manifest_items if m.get("status") in ("downloaded", "cached")),
-            "episodes": manifest_items,
-        })
-        print("\n" + "=" * 65)
-        print(f"[✓] 批量任务执行完成！成功同步 {sum(1 for m in manifest_items if m.get('status') in ('downloaded', 'cached'))}/{total_parts} 个分集")
-        print(f"[✓] 任务元数据清单已写入: {ws.manifest_file}")
-        print("=" * 65)
-        return
-
-    # Single Part Mode
-    req_page = args.page if args.page is not None else (info.get("url_page") or 1)
-    target_part = 1
-    target_cid = info["cid"]
-    target_title = info["title"]
-
-    if info["has_multi_pages"]:
-        target_part = max(1, min(req_page, len(info["parts"])))
-        matched = info["parts"][target_part - 1]
-        target_cid = matched["cid"]
-        target_title = f"P{target_part:02d}_{matched['title']}"
-
-    clean_title = sanitize_filename(target_title)
-    target_m4a = target_audio_dir / f"{clean_title}.m4a"
-
-    source_type = info.get("source_type") or ("local" if info.get("is_local") else "bilibili")
-    matched_part = matched if info.get("has_multi_pages") else (info.get("parts") or [{}])[0]
-    target_bvid = (
-        matched.get("bvid")
-        if info.get("has_multi_pages") and isinstance(matched, dict)
-        else bvid
-    ) or bvid
-
-    if args.url_only:
-        if source_type == "bilibili":
-            stream_info = get_audio_stream(
-                target_bvid,
-                target_cid,
-                sessdata=args.sessdata,
-                prefer_quality=getattr(args, "quality", "low"),
-            )
-            if args.json:
-                print(json.dumps({
-                    "bvid": target_bvid,
-                    "cid": target_cid,
-                    "title": target_title,
-                    "url": stream_info.get("best_stream_url"),
-                    "quality": stream_info.get("quality_desc"),
-                }, ensure_ascii=False, indent=2))
-            else:
-                print(stream_info.get("best_stream_url") or "")
-        else:
-            source_path = matched_part.get("filepath") or info.get("source_path") or ""
-            if args.json:
-                print(json.dumps({
-                    "title": target_title,
-                    "path": source_path,
-                }, ensure_ascii=False, indent=2))
-            else:
-                print(source_path)
-        return
-
-    print(f"[*] 正在提取单集音频 ({source_type})...")
-    from src.core.ingestion import get_coordinator
-    coordinator = get_coordinator()
-    coordinator.fetch_episode_audio(
-        info,
-        matched_part,
-        target_m4a,
-        force=args.force,
-        sessdata=args.sessdata,
-        quality=getattr(args, "quality", "low"),
-    )
-    saved_path = str(target_m4a)
-    print(f"[✓] 音频下载/提取完成: {saved_path}")
-
-    # 单集模式同样落分集拓扑（与既有拓扑合并，只补不缩）
-    _persist_parts_cache(
-        ws,
-        [info["parts"][target_part - 1]] if info.get("has_multi_pages") else (info.get("parts") or [])[:1],
-    )
-
-    if args.json:
-        result = {
-            "bvid": target_bvid,
-            "cid": target_cid,
-            "title": target_title,
-            "quality": stream_info["quality_desc"],
-            "audio_file": saved_path,
-        }
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-
-
 def cmd_pipeline(args):
-    """两阶段流水线：调度编排委托领域服务 PipelineCoordinator，CLI 仅负责参数解析与退出码转换。"""
-    article_type = _confirm_article_prompt_style(args)
+    """阶段一唯一入口：解析 / 取音 / 装块 / 派发任务书，三段共用同一条编排。
+
+    `--dry-run`（只解析拓扑）与 `--audio-only`（只收音频并装箱）取代了原先独立的
+    `parse` / `audio` 子命令；完整运行时，去重、任务书回收与账本对账自动执行。
+    """
+    mode = "full"
+    if getattr(args, "dry_run", False):
+        mode = "dry-run"
+    elif getattr(args, "audio_only", False):
+        mode = "audio-only"
+    # 只有完整链路才需要长文风格；解析与取音阶段尚未写长文任务书，不必打扰用户。
+    article_type = _confirm_article_prompt_style(args) if mode == "full" else ""
     coordinator = PipelineCoordinator()
     try:
         coordinator.run(
@@ -481,15 +149,16 @@ def cmd_pipeline(args):
             quality=args.quality,
             article_type=article_type,
             block_minutes=getattr(args, "block_minutes", None) or 0.0,
+            mode=mode,
         )
     except PipelineGateError as gate:
         sys.exit(gate.exit_code)
 
 
 def _workspace_from_path(raw: str) -> TaskWorkspace:
-    """按目录路径绑定一个**已存在**的工作区（`merge-audio` / `split-transcript` 共用）。
+    """按目录路径绑定一个**已存在**的工作区（`merge-audio` 使用）。
 
-    为什么用路径而不是 URL：这两条命令都是**离线重跑**——块清单与音频已经在盘上，再走一次
+    为什么用路径而不是 URL：这是**离线重跑**——块清单与音频已经在盘上，再走一次
     网络解析既慢又可能撞风控。给绝对路径最直接，也让命令与当前工作目录彻底解耦。
     """
     path = Path(str(raw)).expanduser()
@@ -562,66 +231,6 @@ def cmd_merge_audio(args):
     print("[i] 下一步：转录角色照任务书用 read_media 出块级逐字稿；写作角色读它写模块长文（一个块一篇）")
 
 
-def cmd_split_transcript(args):
-    """把块级逐字稿按块时间表切成 `subtitles/PXX_*_逐字稿.md`（机械切分，幂等）。"""
-    from src.core.audio_merger import AudioMerger
-    from src.core.transcript_splitter import TranscriptSplitter
-
-    ws = _workspace_from_path(args.workspace)
-    manifest = AudioMerger.load_manifest(ws)
-    if not manifest or not manifest.get("blocks"):
-        print(f"[✗] 找不到块清单：{AudioMerger.manifest_path(ws)}", file=sys.stderr)
-        print("去向：先跑 pipeline（或 merge-audio）生成块与转录任务书", file=sys.stderr)
-        sys.exit(2)
-
-    titles = _titles_by_page(ws)
-    blocks = list(manifest["blocks"])
-    if args.block is not None:
-        blocks = [b for b in blocks if int(b.get("block_id") or 0) == int(args.block)]
-        if not blocks:
-            print(f"[✗] 块清单里没有 BLK{int(args.block):02d}", file=sys.stderr)
-            sys.exit(2)
-
-    print("=" * 65)
-    print(f"[*] 切分块级逐字稿 → 分集逐字稿（{len(blocks)} 个块）")
-    print("=" * 65)
-    done = pending = unsplit = suspect = 0
-    for block in blocks:
-        label = f"BLK{int(block.get('block_id') or 0):02d} {AudioMerger.block_span(block)}"
-        raw = TranscriptSplitter.block_path(ws, block)
-        if not raw.exists() or raw.stat().st_size == 0:
-            print(f"[skip] {label} 尚无块级逐字稿（{raw.name}）")
-            pending += 1
-            continue
-        outcome = TranscriptSplitter.write_episode_transcripts(
-            ws, block, raw.read_text(encoding="utf-8"), titles=titles,
-        )
-        print(f"[*] {label}: {outcome['status']}")
-        for line in outcome["diag"]:
-            print(f"    {line}")
-        if outcome["status"] == "suspect":
-            suspect += 1
-        elif outcome["mode"] == "timestamp":
-            done += 1
-        else:
-            unsplit += 1
-
-    print(
-        f"[✓] 切分完成：{done} 块成功 / {suspect} 块边界可疑 / "
-        f"{unsplit} 块未切分 / {pending} 块待转录"
-    )
-    if pending:
-        print(f"    [!] 待转录的块见 {Path(ws.subtitles_dir).name}/BLK*_转录任务书.md（转录完重跑本命令）")
-    if unsplit:
-        print("    [!] 未切分的块：模型没给行首时间戳，按转录任务书 2.1 节重读该块后重跑本命令")
-    if suspect:
-        print(
-            "    [!] 边界可疑的块已整体标记 suspect，不会进入写作派发；"
-            "按转录任务书 2.1 节补足逐段时间戳后重跑本命令"
-        )
-        return 3
-
-
 def cmd_cluster_notes(args):
     info = resolve_target_info(
         args.url,
@@ -683,6 +292,7 @@ def cmd_cluster_notes(args):
         print(f"[✓] 已导出 {_gen} 份笔记任务书（另有 {_cached} 篇成品已存在，跳过派发）")
     print(f"[✓] 任务书目录: {ws.notes_dir}")
     print("=" * 65)
+    _autoclose_workspace(ws, "笔记聚合收尾")
 
 
 def cmd_cluster_articles(args):
@@ -735,32 +345,74 @@ def cmd_cluster_articles(args):
           f"缺该规划时按平台分节/章节标记兜底，任务书见 {ws.root_dir / 'textbook_plan_TASK.md'}")
     print(f"[✓] 模块长文保持完整: {ws.articles_dir} (未做任何删除)")
     print("=" * 65)
+    _autoclose_workspace(ws, "教材整编收尾")
 
 
-def cmd_dedup(args):
-    """Scans duplicate audio and reuses the per-episode transcripts already cut from them."""
-    info = resolve_target_info(
-        args.url,
-        sessdata=args.sessdata,
-        custom_task=getattr(args, "task", None),
+def _autoclose_workspace(ws, label: str) -> None:
+    """聚合类命令的固定收尾：回收已完成任务书 + 按磁盘对账回填 manifest.json。
+
+    原 `cleanup` / `sync` 是 Agent 需要额外记两条命令的手动步骤，漏跑只会让账本与产物脱节；
+    既然工具已能判定「成品是否齐备」，就把它们并进主流程（子命令仍保留供单独调用）。
+    """
+    try:
+        from src.core.task_cleanup import cleanup_completed_tasks
+        _reclaim = cleanup_completed_tasks(ws, keep_per_category=1)
+        if _reclaim["deleted"]:
+            print(f"[*] {label}：已回收 {len(_reclaim['deleted'])} 份已完成任务书（每类保留 1 份范本）")
+    except Exception as err:
+        print(f"[!] {label}：任务书回收已跳过：{err}", file=sys.stderr)
+    try:
+        from src.core.state_sync import reconcile_workspace_manifest
+        _sync = reconcile_workspace_manifest(ws)
+        print(f"[*] {label}：账本对账 分集 {_sync['success']}/{_sync['total']} 集达标 | "
+              f"模块笔记 {_sync['notes']} 份 | 教材 {_sync['textbooks']} 部")
+    except Exception as err:
+        print(f"[!] {label}：账本对账已跳过：{err}", file=sys.stderr)
+
+
+def cmd_check(args):
+    """交付质量门禁统一入口（合并原三个质检脚本 + 标题去号清理脚本）。
+
+    - `--stage1`：阶段一放行门禁——模块长文是否基于本块逐字稿（实体覆盖率）；
+    - `--deliver`（默认）：交付前体检——笔记成色 + 渲染合规；
+    - `--fix-numbering`：存量产物标题手写序号就地清理（幂等，可先 `--dry-run` 预演）；
+    - `--strict`：致命项才返回非零退出码（默认提示级）。
+    """
+    if getattr(args, "fix_numbering", False):
+        from src.core.heading_cleanup import run_fix_numbering
+        return run_fix_numbering(
+            base_dir=getattr(args, "base_dir", None),
+            task=getattr(args, "task", None),
+            dir_path=getattr(args, "dir", None),
+            only=getattr(args, "only", "both"),
+            dry_run=bool(getattr(args, "dry_run", False)),
+            as_json=bool(getattr(args, "json", False)),
+            max_samples=int(getattr(args, "max_samples", 5) or 5),
+            hash_nonheading=bool(getattr(args, "hash_nonheading", False)),
+        )
+
+    from src.core.quality_gate import run_deliver, run_stage1
+    if getattr(args, "stage1", False) and not getattr(args, "deliver", False):
+        return run_stage1(
+            base_dir=getattr(args, "base_dir", None),
+            task=getattr(args, "task", None),
+            dir_path=getattr(args, "dir", None),
+            min_freq=int(getattr(args, "min_freq", 2) or 2),
+            min_coverage=float(getattr(args, "min_coverage", 0.5) or 0.5),
+            strict=bool(getattr(args, "strict", False)),
+            as_json=bool(getattr(args, "json", False)),
+        )
+    return run_deliver(
         base_dir=getattr(args, "base_dir", None),
+        task=getattr(args, "task", None),
+        dir_path=getattr(args, "dir", None),
+        max_truncated=int(getattr(args, "max_truncated", 4) or 4),
+        require_structure=bool(getattr(args, "require_structure", False)),
+        require_lang=bool(getattr(args, "require_lang", False)),
+        require_no_numbering=bool(getattr(args, "require_no_numbering", False)),
+        strict=bool(getattr(args, "strict", False)),
+        as_json=bool(getattr(args, "json", False)),
     )
-    bvid = info["bvid"]
-    ws = TaskWorkspace.create(title=info["title"], bvid=bvid, custom_name=args.task, base_dir=args.base_dir, info_name=info.get("workspace_name"))
-
-    print("=" * 65)
-    print("[*] 启动音频 SHA-256 指纹去重扫描流水线 (Audio Fingerprint Deduplication)")
-    print(f"[*] 任务工作区: {ws.root_dir}")
-    print("=" * 65)
-
-    synced = ws.sync_duplicate_assets(dry_run=args.dry_run)
-    if synced:
-        print(f"\n[✓] 发现并同步了 {len(synced)} 组重复音频资产 (0 Token 消耗):")
-        for item in synced:
-            print(f"    - P{item['src_page']:02d} ──► P{item['dst_page']:02d} [Hash: {item['hash']}] (分集逐字稿: {item['synced_transcript']})")
-    else:
-        print("\n[✓] 未发现需要同步的重复分集（所有音频独一无二或已全部同步就绪）。")
-    print("=" * 65)
 
 
 def cmd_cleanup(args):
@@ -922,7 +574,7 @@ def cmd_info(args):
         print(f"• FFmpeg 状态   : 已就绪 ({ffmpeg_path})")
     else:
         print("• FFmpeg 状态   : ✗ 未找到——这是取音频/切片的硬前置，")
-        print("                  `pipeline` / `audio` 会在音频阶段失败。安装并加入 PATH：")
+        print("                  `pipeline` 会在音频阶段失败。安装并加入 PATH：")
         print("                    Windows : winget install Gyan.FFmpeg")
         print("                    macOS   : brew install ffmpeg")
         print("                    Linux   : sudo apt update && sudo apt install -y ffmpeg")
@@ -1058,32 +710,11 @@ def main():
     parser = argparse.ArgumentParser(description="Video2Book Agent Toolkit (multi-platform video & knowledge extraction)")
     subparsers = parser.add_subparsers(dest="subcommand", help="Available subcommands")
 
-    # parse
-    p_parse = subparsers.add_parser("parse", help="Parse video topology & list parts (Bilibili URL or local media)")
-    p_parse.add_argument("url", help="Bilibili URL/BV ID or local video/audio/directory path")
-    p_parse.add_argument("--sessdata", help="Optional SESSDATA cookie", default=None)
-    p_parse.add_argument("--douyin-cookie", dest="douyin_cookie", default=None, help=DOUYIN_COOKIE_HELP)
-    p_parse.add_argument("--limit", type=int, default=10, help="Max items to display")
-    p_parse.add_argument("--json", action="store_true", help="Output in JSON format")
-
-    # audio
-    p_audio = subparsers.add_parser("audio", help="Fetch & download/extract audio stream")
-    p_audio.add_argument("url", help="Bilibili URL/BV ID or local video/audio/directory path")
-    p_audio.add_argument("--page", type=int, default=None, help="Page/Part index (auto-detects ?p=X from URL if omitted)")
-    p_audio.add_argument("--all", action="store_true", help="Batch download/extract all parts")
-    p_audio.add_argument("--range", default=None, help="Episode range to download (e.g. 1-10, 1,3,5)")
-    p_audio.add_argument("--quality", choices=["low", "medium", "high"], default="low", help="Audio quality (low=64k speech default, medium=132k, high=192k)")
-    p_audio.add_argument("--task", default=None, help="Custom task workspace folder name")
-    p_audio.add_argument("--base-dir", default=None, help=BASE_DIR_HELP)
-    p_audio.add_argument("--force", action="store_true", help="Force re-download/re-extraction even if audio file already exists")
-    p_audio.add_argument("--sessdata", help="Optional SESSDATA cookie", default=None)
-    p_audio.add_argument("--douyin-cookie", dest="douyin_cookie", default=None, help=DOUYIN_COOKIE_HELP)
-    p_audio.add_argument("--url-only", action="store_true", help="Only print stream URL without downloading")
-    p_audio.add_argument("--output", default=None, help="Optional explicit output directory override")
-    p_audio.add_argument("--json", action="store_true", help="Output in JSON format")
-
-    # pipeline
-    p_pipe = subparsers.add_parser("pipeline", help="Execute complete automated pipeline (Audio -> ASR -> Notes & Articles)")
+    # pipeline：阶段一唯一入口（解析 / 取音 / 装块 / 派发任务书共用一条编排）
+    p_pipe = subparsers.add_parser(
+        "pipeline",
+        help="Stage-1 single entry: parse topology (--dry-run) / audio+blocks (--audio-only) / full run",
+    )
     p_pipe.add_argument("url", help="Bilibili URL/BV ID, local video file, or local course directory")
     p_pipe.add_argument("--page", type=int, default=None, help="Page/Part index (auto-detects ?p=X from URL if omitted)")
     p_pipe.add_argument("--all", action="store_true", help="Process all episodes in multi-P collection or local course directory")
@@ -1107,6 +738,11 @@ def main():
              "未指定时打印风格菜单并请用户确认，确认不了即终止任务。"
              "另有 consulting/interview/review/livestream 四种形态已登记但提示词未提供，命中即终止。",
     )
+    # 解析 / 取音两个轻量入口收敛进 pipeline（原 `parse` / `audio` 子命令）
+    p_pipe.add_argument("--dry-run", action="store_true", dest="dry_run",
+                        help="只解析拓扑并列出将处理的分集，不下载音频、不写任务书")
+    p_pipe.add_argument("--audio-only", action="store_true", dest="audio_only",
+                        help="只收齐音频并装箱、导出块级转录任务书后即返回（不派发长文任务书）")
 
     # merge-audio：块级转录链路的离线入口（单独重跑装箱合并，幂等）
     p_merge = subparsers.add_parser(
@@ -1119,12 +755,40 @@ def main():
     )
     p_merge.add_argument("--force", action="store_true", help="Rebuild blocks even if the manifest signature matches")
 
-    # split-transcript：把块级逐字稿切回分集（机械切分，幂等）
-    p_split = subparsers.add_parser(
-        "split-transcript", help="Split block transcripts into per-episode transcripts under subtitles/"
+    # check：交付质量门禁统一入口（阶段一放行 / 交付前体检 / 存量标题去号）
+    p_check = subparsers.add_parser(
+        "check",
+        help="Unified quality gate: --stage1 (grounding) / --deliver (note+render, default) / --fix-numbering",
     )
-    p_split.add_argument("workspace", help="Path to an existing course workspace (contains audio/_blocks/blocks.json)")
-    p_split.add_argument("--block", type=int, default=None, help="Only split this block id (default: all blocks)")
+    p_check.add_argument("--stage1", action="store_true", help="阶段一放行门禁：模块长文是否基于本块逐字稿")
+    p_check.add_argument("--deliver", action="store_true", help="交付前体检：笔记成色 + 渲染合规（默认）")
+    p_check.add_argument("--fix-numbering", action="store_true", dest="fix_numbering",
+                         help="存量产物标题手写序号就地清理（幂等；加 --dry-run 预演）")
+    p_check.add_argument("--dir", default=None, help="直接指定单个工作区目录")
+    p_check.add_argument("--task", default=None, help="仅处理目录名包含该关键字的工作区")
+    p_check.add_argument("--base-dir", default=None, help=BASE_DIR_HELP)
+    p_check.add_argument("--json", action="store_true", help="JSON 输出")
+    p_check.add_argument("--strict", action="store_true", help="存在致命项才返回非零（默认提示级）")
+    p_check.add_argument("--min-freq", type=int, default=2, dest="min_freq",
+                         help="[--stage1] 实体在逐字稿里的最低出现次数（默认 2）")
+    p_check.add_argument("--min-coverage", type=float, default=0.5, dest="min_coverage",
+                         help="[--stage1] 覆盖率下限（默认 0.5）")
+    p_check.add_argument("--max-truncated", type=int, default=4, dest="max_truncated",
+                         help="[--deliver] 每份笔记允许的断句上限（默认 4）")
+    p_check.add_argument("--require-structure", action="store_true", dest="require_structure",
+                         help="[--deliver] 把「结构缺件」纳入门禁")
+    p_check.add_argument("--require-lang", action="store_true", dest="require_lang",
+                         help="[--deliver] 把「围栏缺语言标识」纳入门禁")
+    p_check.add_argument("--require-no-numbering", action="store_true", dest="require_no_numbering",
+                         help="[--deliver] 把「标题手写序号」纳入门禁")
+    p_check.add_argument("--only", choices=("textbooks", "articles", "both"), default="both",
+                         help="[--fix-numbering] 只处理哪一类（默认 both）")
+    p_check.add_argument("--dry-run", action="store_true", dest="dry_run",
+                         help="[--fix-numbering] 只报不改")
+    p_check.add_argument("--max-samples", type=int, default=5, dest="max_samples",
+                         help="[--fix-numbering] 每类最多打印几条样例（默认 5）")
+    p_check.add_argument("--hash-nonheading", action="store_true", dest="hash_nonheading",
+                         help="[--fix-numbering] 打印非标题行内容指纹")
 
     # info
     p_info = subparsers.add_parser("info", help="Show environment & toolchain readiness status")
@@ -1164,14 +828,6 @@ def main():
     p_ca.add_argument("--base-dir", default=None, help=BASE_DIR_HELP)
     p_ca.add_argument("--force", action="store_true", help="Force re-integrating modular textbooks (default: reuse existing textbooks/)")
     p_ca.add_argument("--sessdata", help="Optional SESSDATA cookie", default=None)
-
-    # dedup
-    p_dd = subparsers.add_parser("dedup", help="Scan and synchronize duplicate audio assets to save LLM tokens")
-    p_dd.add_argument("url", help="Bilibili URL, BV ID, or local media path")
-    p_dd.add_argument("--task", default=None, help="Custom task workspace folder name")
-    p_dd.add_argument("--base-dir", default=None, help=BASE_DIR_HELP)
-    p_dd.add_argument("--dry-run", action="store_true", help="Only check for duplicates without copying files")
-    p_dd.add_argument("--sessdata", help="Optional SESSDATA cookie", default=None)
 
     # cleanup：任务书回收（成品已产出的 *_TASK.md 清场，每类保留 N 份范本）
     p_cl2 = subparsers.add_parser("cleanup", help="Reclaim completed dispatch task-files (*_TASK.md), keeping N samples per category")
@@ -1229,14 +885,11 @@ def main():
         args.base_dir = _resolve_base_dir(args.base_dir)
 
     dispatch = {
-        "parse": cmd_parse,
-        "audio": cmd_audio,
         "pipeline": cmd_pipeline,
         "merge-audio": cmd_merge_audio,
-        "split-transcript": cmd_split_transcript,
         "cluster-notes": cmd_cluster_notes,
         "cluster-articles": cmd_cluster_articles,
-        "dedup": cmd_dedup,
+        "check": cmd_check,
         "cleanup": cmd_cleanup,
         "sync": cmd_sync,
         "login": cmd_login,
