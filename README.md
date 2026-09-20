@@ -346,7 +346,7 @@ python src/cli.py check --deliver --strict                 # 交付前体检（�
 ### 外部依赖
 
 - **FFmpeg** — 音频抽取与切片，16kHz 单声道（系统程序，需在 `PATH`）
-- **`yt-dlp` / `requests`** — 声明依赖，见 `pyproject.toml`；YouTube 与抖音链路按需导入（`yt_dlp` 在 `ytaudio`/`youtube`，`requests` 在 `dyaudio`），这两条链路不装就跑不通
+- **`yt-dlp` / `requests`** — 声明依赖，见 `pyproject.toml`；YouTube 与抖音链路按需导入（`yt_dlp` 在 `youtube.py`，`requests` 在 `dyaudio`），这两条链路不装就跑不通
 
 ### 摄取与听音
 

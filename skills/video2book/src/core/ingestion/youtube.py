@@ -226,12 +226,10 @@ class YouTubeProvider(BaseMediaProvider):
         return output_file
 
     def check_readiness(self) -> Tuple[bool, str]:
+        import importlib.util
+
         has_ffmpeg = shutil.which("ffmpeg") is not None
-        try:
-            import yt_dlp
-            has_ytdlp = True
-        except ImportError:
-            has_ytdlp = False
+        has_ytdlp = importlib.util.find_spec("yt_dlp") is not None
 
         if has_ffmpeg and has_ytdlp:
             return True, "就绪 (ffmpeg + yt-dlp)"

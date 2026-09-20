@@ -345,7 +345,7 @@ python src/cli.py check --deliver --strict                 # pre-delivery check 
 ### External dependencies
 
 - **FFmpeg** — audio extraction and slicing, 16 kHz mono (system program, must be on `PATH`)
-- **`yt-dlp` / `requests`** — declared in `pyproject.toml`; imported on demand by the YouTube chain (`yt_dlp` in `ytaudio`/`youtube`) and the Douyin chain (`requests` in `dyaudio`). Those two chains cannot run without them.
+- **`yt-dlp` / `requests`** — declared in `pyproject.toml`; imported on demand by the YouTube chain (`yt_dlp` in `youtube.py`) and the Douyin chain (`requests` in `dyaudio`). Those two chains cannot run without them.
 
 ### Ingestion and listening
 

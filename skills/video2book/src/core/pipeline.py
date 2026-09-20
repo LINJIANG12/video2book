@@ -16,7 +16,6 @@
 """
 
 import json
-import re
 import sys
 import time
 from pathlib import Path
@@ -24,7 +23,6 @@ from typing import Any, Dict, List, Optional, Set
 
 from src.core.fetcher import AudioFetcher
 from src.core.workspace import TaskWorkspace, sanitize_filename
-from src.core import fsutil
 from src.core import paths as _paths
 from src.generator.block_synthesizer import BlockSynthesizer
 from src.generator.prompt_templates import ArticlePromptTypeError
@@ -135,11 +133,18 @@ from src.core.taskbook import (
     export_block_transcribe_task,
     resolve_article_type,
 )
-from src.core.workspace import (
-    offline_candidate_dirs as _offline_candidate_dirs,
-    parts_from_audio as _parts_from_audio,
-    workspace_title as _workspace_title,
-)
+
+__all__ = [
+    "TRANSCRIBE_INSTRUCTION",
+    "TRANSCRIBE_TIMESTAMP_INSTRUCTION",
+    "export_block_article_task",
+    "export_block_transcribe_task",
+    "resolve_article_type",
+    "PipelineCoordinator",
+    "part_kind",
+    "KIND_VIDEO",
+    "KIND_IMAGE_ALBUM",
+]
 
 
 def resolve_target_info(

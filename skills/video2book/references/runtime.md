@@ -120,13 +120,18 @@ python scripts/selfcheck.py   # 全量契约自检（含 Python 3.10+ 语法兼�
 
 ### 2.2 通道 B（只有 `read_media` 时）
 
-1. **代读**：对任务书清单中的块音频调用 `omni-media-ext:read_media`：
+1. **代读**：对任务书清单中的块音频调用 `omni-media-ext:read_media`（优先传入 `output_file` 直写落盘，零上下文开销）：
 
    ```json
-   {"file_path": "<task_dir>/audio/_blocks/BLK01_xxx.m4a", "mode": "transcribe"}
+   {
+     "file_path": "<task_dir>/audio/_blocks/BLK01_xxx.m4a",
+     "mode": "transcribe",
+     "output_file": "<task_dir>/subtitles/BLK01_xxx_逐字稿.md"
+   }
    ```
 
-   返回的是**文本**：`transcribe` 给逐字稿，`summarize` 给教材级总结，`qa` 给带时间范围佐证的问答。
+   - **传入 `output_file`（推荐）**：服务在底层原子直写目标文件，会话仅返回轻量收据（含字符数、耗时与 `OMNI_STATUS`），**全文 0 Token 进上下文**，彻底消除长文转录导致的上下文爆炸与模型二次总结；
+   - **未传 `output_file`**：返回纯文本正文（`transcribe` 给逐字稿，`summarize` 给教材级总结，`qa` 给带时间范围佐证的问答），由 Agent 写入落盘路径。
    外部模型端点由 `omni-media/mcp-ext/config.json` 决定，可用 `endpoint` 参数按名切换。
    **切片沿用任务书切好的粒度**，不要自己另填切片长度；只有 `OMNI_STATUS` 显示 `is_finished=false` 时才续读。
 2. **续读同构**：返回文本首行的 `OMNI_STATUS` 与通道 A **同名同义**

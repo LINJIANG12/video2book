@@ -135,7 +135,8 @@ articles/模块XX_<块标题>_精读长文.md
 | 文件 | 行数 | 内容 / 关键符号 | 关联 | 作用 |
 |---|---:|---|---|---|
 | `src/cli.py` | ~840 | `main()`、10 个 `cmd_*` 处理函数、`_resolve_base_dir`、`_confirm_article_prompt_style`、`_autoclose_workspace` | 调 pipeline / core / generator / scripts 能力 | **唯一命令入口**；退出码在这里产生 |
-| `src/core/pipeline.py` | 1019 | `PipelineCoordinator`、`export_block_article_task`、`export_block_transcribe_task`、`TRANSCRIBE_INSTRUCTION`、`resolve_target_info`、`resolve_scope_parts`、`is_412`/`record_412_status`/`format_412`、`classify_audio_error` | 依赖 parser、fetcher、audio_merger、workspace、budget、prompt_templates | 领域调度：把「来源 + 参数」变成「工作区 + 音频 + 任务书」 |
+| `src/core/pipeline.py` | 775 | `PipelineCoordinator`、`resolve_target_info`、`resolve_scope_parts`、`is_412`/`record_412_status`/`format_412`、`classify_audio_error` | 依赖 parser、fetcher、audio_merger、workspace、budget、taskbook | 领域调度：把「来源 + 参数」变成「工作区 + 音频 + 任务书派发」 |
+| `src/core/taskbook.py` | 185 | `export_block_transcribe_task`、`export_block_article_task`、`TRANSCRIBE_INSTRUCTION` | 被 pipeline、selfcheck 引用 | **任务书与提示词导出解耦**（直写落盘指引 + 单任务直达规范） |
 | `src/core/paths.py` | 340 | `code_root`、`home_root`、`is_container_layout`、`resolve_base_dir`、`mcp_candidate_bases` | 被几乎全部模块引用 | **三域路径唯一真相** |
 | `src/core/workspace.py` | 594 | `TaskWorkspace`（root/audio/notes/articles/subtitles + parts_cache/manifest 路径）、`find_module_article`、`sanitize_filename` | 被 pipeline、队列、全部生成器引用 | 工作区与命名契约 |
 | `src/core/parser.py` | 554 | `BilibiliParser`：`extract_bvid`、`extract_season_ref`、`_fetch_public_json`、`resolve_season_seed_bvid`、`fetch_video_view` | `wbi.py`、`bili_web.py` | B 站拓扑解析（含独立 BV 合集归一） |
@@ -164,9 +165,8 @@ articles/模块XX_<块标题>_精读长文.md
 | `coordinator.py` | 201 | `IngestionCoordinator`、`get_coordinator` | 按 `match()` 选 Provider；工作区名与缓存 parts 回填 |
 | `bilibili.py` | 87 | `BilibiliProvider` | 薄适配层：转发 `parser.py` + `fetcher.py`（**不是第二套实现**） |
 | `local.py` | 49 | `LocalMediaProvider` | 本地目录 / 单文件 |
-| `youtube.py` | 229 | `YouTubeProvider`（单视频与频道两分支，`bvid` 标识符口径） | 转发 `ytaudio/*` |
+| `youtube.py` | 240 | `YouTubeProvider`（单视频与频道两分支，单文件收敛，直接基于 yt-dlp + ffmpeg） | YouTube 自有引擎（按需导入 `yt_dlp`） |
 | `douyin.py` | 285 | `DouyinProvider`、`expand_share_link` | 转发 `dyaudio/*`；图文与图集走 `media_kind` |
-| `ytaudio/*.py`（7 个） | 63–220 | `Engine`（yt-dlp 封装）、`Config`、`channel`、`single`、`filters`、`downloader`、`utils` | YouTube 自有引擎（惰性导入 `yt_dlp`） |
 | `dyaudio/*.py`（9 个） | 81–411 | `DouyinClient`（签名 / 重试 / 限速）、`abogus`、`sm3`、`share_parser`、`user_crawler`、`mix_crawler`、`downloader`、`config`、`utils` | 抖音自有引擎（`requests`） |
 
 ### 2.5 `src/generator/` 生成层
@@ -182,7 +182,7 @@ articles/模块XX_<块标题>_精读长文.md
 
 模块总数随本轮新增的两个内核（`quality_gate.py` / `heading_cleanup.py`）而变化；从 4 个入口
 （`src/cli.py` + `scripts/{queue_tracker,run,selfcheck}.py`）可达的模块集没有死代码——未命中的只有
-`src.generator`、`ingestion.ytaudio`、`ingestion.dyaudio` 等包的 `__init__.py`，它们被
+`src.generator`、`ingestion.dyaudio` 等包的 `__init__.py`，它们被
 `from <pkg>.<mod> import …` 的形式实际加载，**不是死代码**。结论：`src/` 下当前没有可安全删除的模块。
 
 ---
@@ -193,12 +193,12 @@ articles/模块XX_<块标题>_精读长文.md
 
 ### 3.1 来源解析与工作区建立（`pipeline --dry-run`）
 
-- **参与文件**：`cli.py:cmd_pipeline`（`mode="dry-run"`）→ `pipeline.PipelineCoordinator.run` → `ingestion/coordinator.py` → 4 个 Provider（`bilibili.py`/`local.py`/`youtube.py`/`douyin.py`）→ `parser.py`（B 站）、`local_media.py`（本地）、`ytaudio/channel.py`+`single.py`（YouTube）、`dyaudio/share_parser.py`+`user_crawler.py`（抖音）；落盘走 `workspace.py` 的 `save_parts`。
+- **参与文件**：`cli.py:cmd_pipeline`（`mode="dry-run"`）→ `pipeline.PipelineCoordinator.run` → `ingestion/coordinator.py` → 4 个 Provider（`bilibili.py`/`local.py`/`youtube.py`/`douyin.py`）→ `parser.py`（B 站）、`local_media.py`（本地）、`youtube.py`（YouTube）、`dyaudio/share_parser.py`+`user_crawler.py`（抖音）；落盘走 `workspace.py` 的 `save_parts`。
 - **前置条件**：B 站建议 `SESSDATA`（高并发稳定性）；抖音需要 Cookie（否则只抓到约 20 条，**不终止**）；YouTube 需要 `yt-dlp`；抖音需要 `requests`。
 - **底层逻辑**：`coordinator` 遍历 Provider 调 `match()` 选路 → `probe()` 返回统一结构的字典（`bvid`/`title`/`parts[]`/`video_type` 等）→ 工作区名 = 清洗后的课程标题 + `_<bvid>`（`workspace.py`）→ `parts.json` 落盘（**集号基准**）。
 - **受影响配置**：`BVB_OUTPUT_DIR`、`BVB_HOME`、`--base-dir`、`--task`、`--limit`。
 - **产物**：`<产物根>/<task>/parts.json`、`manifest.json`。
-- **验证**：`cli.py pipeline "<链接>" --dry-run`；离线场景靠 `parts.json` 自愈（`pipeline._offline_candidate_dirs`）。
+- **验证**：`cli.py pipeline "<链接>" --dry-run`；离线场景靠 `parts.json` 自愈（`workspace.offline_candidate_dirs`）。
 
 ### 3.2 音频摄取与装箱成块（`pipeline` / `pipeline --audio-only` / `merge-audio`）
 
@@ -336,7 +336,7 @@ articles/模块XX_<块标题>_精读长文.md
 
 ### 4.3 模块依赖关系（要点）
 
-- **自底向上**：`paths` → `wsutil/console/proc` → 平台引擎（`wbi`/`bili_web`/`parser`/`fetcher`/`dyaudio`/`ytaudio`）→ `ingestion` → `workspace`/`audio_merger`/`transcript_splitter` → `pipeline` → `cli`；`generator` 依赖 `workspace` 与 `prompt_templates`，不被 `core` 反向依赖。
+- **自底向上**：`paths` → `wsutil/console/proc` → 平台引擎（`wbi`/`bili_web`/`parser`/`fetcher`/`dyaudio`/`youtube`）→ `ingestion` → `workspace`/`audio_merger`/`transcript_splitter` → `pipeline` → `cli`；`generator` 依赖 `workspace` 与 `prompt_templates`，不被 `core` 反向依赖。
 - **高被依赖（改一处影响面大）**：`workspace.py`（14 个模块引用）、`task_cleanup.py`（10）、`paths.py`、`prompt_templates.py`、`budget.py`。
 - **无环**：`ingestion` 不 import `pipeline`；`generator` 不 import `core.pipeline`（避免入口反向依赖）。
 - **单一真源一览**：路径 → `paths.py`；工作区与命名 → `workspace.py`；提示词 → `prompt_templates.py`；B 站请求头 → `bili_web.py`；预算阈值 → `budget.py`；CLI 细节 → `references/cli-cookbook.md`；交付格式 → `references/delivery_matrix.md`；质检规则 → `deliverable_lint.py`。
@@ -356,7 +356,7 @@ articles/模块XX_<块标题>_精读长文.md
 | 凭证 | B 站 `SESSDATA`（建议）、抖音 Cookie（抖音目标不可跳过询问） | B 站匿名可跑但易触发 412；抖音匿名只能抓到约 20 条且**照常继续** |
 | 可选 | `git`（仅自检用） | 自检里两条「产物/凭证未入库」的校验降级为提示 |
 
-**惰性导入分布**（影响你怎么测试）：`yt_dlp` 在 `youtube.py`/`ytaudio/engine.py` 的函数体内导入，`requests` 在 `dyaudio/*` 与 `douyin.py` 的函数体内导入；B 站与本地的 HTTP 走标准库 `urllib`。因此"能 import 模块"不等于"这条链路能跑"。
+**惰性导入分布**（影响你怎么测试）：`yt_dlp` 在 `youtube.py` 的函数体内导入，`requests` 在 `dyaudio/*` 与 `douyin.py` 的函数体内导入；B 站与本地的 HTTP 走标准库 `urllib`。因此"能 import 模块"不等于"这条链路能跑"。
 
 ---
 
