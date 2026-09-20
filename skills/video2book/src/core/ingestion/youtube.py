@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""YouTube media provider using in-process ytaudio engine."""
+"""YouTube media provider using lightweight direct yt-dlp integration."""
 
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from src.core.proc import run_quiet
 from .base import BaseMediaProvider, IngestionError
 
 
@@ -23,52 +25,72 @@ class YouTubeProvider(BaseMediaProvider):
         low = target.lower().strip()
         return any(domain in low for domain in self._YT_DOMAINS)
 
-    def _get_engine_and_cfg(self, **kwargs: Any) -> Tuple[Any, Any]:
-        from .ytaudio.config import load_config
-        from .ytaudio.engine import Engine
+    def _get_ydl_opts(self, **kwargs: Any) -> Dict[str, Any]:
+        opts: Dict[str, Any] = {
+            "quiet": True,
+            "no_warnings": True,
+            "noprogress": True,
+            "ignoreerrors": True,
+            "retries": 3,
+            "socket_timeout": 30,
+        }
+        if kwargs.get("proxy"):
+            opts["proxy"] = str(kwargs["proxy"])
+        if kwargs.get("cookiefile"):
+            opts["cookiefile"] = str(kwargs["cookiefile"])
+        if kwargs.get("cookies_from_browser"):
+            opts["cookiesfrombrowser"] = (str(kwargs["cookies_from_browser"]),)
+        return opts
 
-        cfg_path = kwargs.get("config_path")
-        cfg = load_config(cfg_path)
-        if "output_dir" in kwargs and kwargs["output_dir"]:
-            cfg.output_dir = str(kwargs["output_dir"])
-        if "proxy" in kwargs and kwargs["proxy"]:
-            cfg.proxy = str(kwargs["proxy"])
-        if "cookiefile" in kwargs and kwargs["cookiefile"]:
-            cfg.cookiefile = str(kwargs["cookiefile"])
-        if "cookies_from_browser" in kwargs and kwargs["cookies_from_browser"]:
-            cfg.cookies_from_browser = str(kwargs["cookies_from_browser"])
-        return Engine(cfg), cfg
+    @staticmethod
+    def _is_single_video(url: str) -> bool:
+        low = url.lower().strip()
+        if "youtu.be/" in low:
+            return True
+        if "/watch" in low and ("list=" not in low or "index=" not in low):
+            return True
+        return False
+
+    @staticmethod
+    def _sanitize(name: str, max_len: int = 60) -> str:
+        s = re.sub(r'[\\/:*?"<>|]', "_", name).strip()
+        return s[:max_len] if len(s) > max_len else s
 
     def probe(self, target: str, **kwargs: Any) -> Dict[str, Any]:
-        from .ytaudio.channel import canonical_url, collect_channel
-        from .ytaudio.single import resolve_video
-        from .ytaudio.utils import is_video_url, normalize_channel_base, sanitize_filename, slugify
+        try:
+            import yt_dlp
+        except ImportError as e:
+            raise IngestionError("缺少 yt-dlp 依赖，请先安装：pip install yt-dlp") from e
 
-        engine, cfg = self._get_engine_and_cfg(**kwargs)
         clean_target = target.strip()
+        opts = self._get_ydl_opts(**kwargs)
+        opts["extract_flat"] = True
 
-        # 1. 单视频探测
-        if is_video_url(clean_target) and "/shorts/" not in clean_target:
-            info = resolve_video(engine, cfg, clean_target)
-            if not info:
-                raise IngestionError(f"YouTube 视频解析失败或已被过滤: {clean_target}")
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(clean_target, download=False)
+        except Exception as err:
+            raise IngestionError(f"YouTube 目标解析失败: {err}") from err
 
-            video_id = str(info.get("id") or "")
-            title = str(info.get("title") or video_id)
+        if not info:
+            raise IngestionError(f"YouTube 无法提取元数据: {clean_target}")
+
+        entries = info.get("entries")
+        if not entries:
+            # 单视频
+            vid = str(info.get("id") or "")
+            title = str(info.get("title") or vid)
             duration = int(info.get("duration") or 0)
             uploader = str(info.get("uploader") or info.get("channel") or "YouTube")
             desc = str(info.get("description") or "")[:500]
-
-            # 标识符口径与其它来源一致：有原生 id 用 id，缺 id 则退回清洗后的标题
-            # （yt-dlp 正常都带 id；缺 id 时旧写法退化成 "yt_"，工作区名会与别门课撞车）
-            ident = video_id or sanitize_filename(title, max_len=60)[:20]
+            ident = vid or self._sanitize(title, 20)
 
             parts = [{
                 "page": 1,
                 "title": title,
                 "cid": f"yt_{ident}",
                 "duration": duration,
-                "url": canonical_url(video_id),
+                "url": f"https://www.youtube.com/watch?v={vid}" if vid else clean_target,
                 "filepath": "",
             }]
 
@@ -90,58 +112,44 @@ class YouTubeProvider(BaseMediaProvider):
                 "source_path": clean_target,
             }
 
-        # 2. 频道 / 播放列表（合集）探测
-        base = normalize_channel_base(clean_target)
-        if not base:
-            # 尝试直接作为播放列表或者合集
-            base = clean_target
-
-        limit = kwargs.get("limit") or cfg.limit
-        try:
-            channel_name, groups = collect_channel(engine, base, cfg, limit=limit)
-        except Exception as err:
-            raise IngestionError(f"YouTube 频道/播放列表抓取失败: {err}") from err
+        # 播放列表 / 频道
+        playlist_title = str(info.get("title") or info.get("id") or "YouTube合集")
+        channel = str(info.get("channel") or info.get("uploader") or "YouTube")
+        pid = str(info.get("id") or self._sanitize(playlist_title, 20))
+        limit = kwargs.get("limit") or 200
 
         parts: List[Dict[str, Any]] = []
-        page_idx = 1
-        total_duration = 0
-
-        for group_name, items in groups.items():
-            for item in items:
-                v_id = str(item.get("id") or "")
-                if not v_id:
-                    continue
-                v_title = str(item.get("title") or v_id)
-                dur = int(item.get("duration") or 0)
-                total_duration += dur
-
-                display_title = f"[{group_name}] {v_title}" if group_name != "未分类" and len(groups) > 1 else v_title
-                parts.append({
-                    "page": page_idx,
-                    "title": display_title,
-                    "cid": f"yt_{v_id}",
-                    "duration": dur,
-                    "url": canonical_url(v_id),
-                    "filepath": "",
-                })
-                page_idx += 1
+        for idx, entry in enumerate(entries, 1):
+            if not entry or not isinstance(entry, dict):
+                continue
+            if len(parts) >= limit:
+                break
+            v_id = str(entry.get("id") or "")
+            v_title = str(entry.get("title") or f"P{idx:02d}")
+            v_dur = int(entry.get("duration") or 0)
+            v_url = f"https://www.youtube.com/watch?v={v_id}" if v_id else ""
+            parts.append({
+                "page": len(parts) + 1,
+                "title": v_title,
+                "cid": f"yt_{v_id or idx}",
+                "duration": v_dur,
+                "url": v_url,
+                "filepath": "",
+            })
 
         if not parts:
-            raise IngestionError(f"未从 YouTube 目标中提取到有效普通视频: {clean_target}")
-
-        slug = slugify(channel_name)
-        bvid = f"yt_{slug[:20]}" if slug else f"yt_ch_{page_idx}"
+            raise IngestionError(f"YouTube 播放列表中未发现有效视频分集: {clean_target}")
 
         return {
-            "bvid": bvid,
-            "title": channel_name,
-            "desc": f"YouTube 频道/合集: {channel_name}",
-            "duration": total_duration,
-            "owner": {"name": channel_name, "mid": 0},
-            "video_type": "multi_page" if len(parts) > 1 else "single",
-            "type_desc": f"YouTube 课程合集 (共 {len(parts)} P)",
-            "cid": parts[0]["cid"],
-            "has_multi_pages": len(parts) > 1,
+            "bvid": f"yt_{pid}",
+            "title": playlist_title,
+            "desc": f"共 {len(parts)} 集",
+            "duration": sum(p["duration"] for p in parts),
+            "owner": {"name": channel, "mid": 0},
+            "video_type": "multi_page",
+            "type_desc": "YouTube 播放列表/频道",
+            "cid": f"yt_{pid}",
+            "has_multi_pages": True,
             "has_ugc_season": False,
             "season_episodes": [],
             "parts": parts,
@@ -159,71 +167,77 @@ class YouTubeProvider(BaseMediaProvider):
         progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
         **kwargs: Any,
     ) -> Path:
+        if output_file.exists() and output_file.stat().st_size > 10 * 1024 and not force:
+            return output_file
+
         url = episode.get("url")
         if not url:
-            cid = str(episode.get("cid") or "")
-            if cid.startswith("yt_"):
-                v_id = cid[3:]
-                from .ytaudio.channel import canonical_url
-                url = canonical_url(v_id)
-            else:
-                raise IngestionError(f"缺少 YouTube 视频链接: {episode.get('title')}")
+            raise IngestionError(f"缺少音频下载 URL: {episode.get('title')}")
 
-        output_file = Path(output_file).resolve()
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-
-        if output_file.exists() and output_file.stat().st_size >= 10240 and not force:
-            if progress_cb:
-                progress_cb({"status": "cached", "file": str(output_file)})
-            return output_file
-
-        engine, cfg = self._get_engine_and_cfg(**kwargs)
-
-        # yt-dlp outtmpl: 去掉后缀，后置 %(ext)s
-        base_tmpl = str(output_file.with_suffix(""))
-        outtmpl = base_tmpl + ".%(ext)s"
-
-        import yt_dlp
-        opts = engine.download_opts(outtmpl=outtmpl)
-        opts["quiet"] = True
-        opts["noprogress"] = True
-
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([url])
-        except Exception as err:
-            raise IngestionError(f"YouTube 音频下载失败 ({url}): {err}") from err
-
-        # 检查生成的文件
-        if output_file.exists() and output_file.stat().st_size > 0:
-            if progress_cb:
-                progress_cb({"status": "downloaded", "file": str(output_file)})
-            return output_file
-
-        # 若生成了其他扩展名（如 .webm, .opus），转为目标 .m4a
-        candidates = list(output_file.parent.glob(output_file.stem + ".*"))
-        for cand in candidates:
-            if cand.suffix.lower() == ".part":
-                continue
-            if cand.exists() and cand.stat().st_size > 1024:
-                # 转封装或重命名为 output_file
-                if cand != output_file:
-                    shutil.move(str(cand), str(output_file))
-                if progress_cb:
-                    progress_cb({"status": "downloaded", "file": str(output_file)})
-                return output_file
-
-        raise IngestionError(f"YouTube 音频提取未产生有效文件: {output_file}")
-
-    def check_readiness(self) -> Tuple[bool, str]:
         try:
             import yt_dlp
-            yt_ver = getattr(getattr(yt_dlp, "version", None), "__version__", "已安装")
-        except ImportError:
-            return False, "缺少 yt-dlp 依赖 (pip install yt-dlp)"
+        except ImportError as e:
+            raise IngestionError("缺少 yt-dlp 依赖") from e
 
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp_target = output_file.with_suffix(".tmp.m4a")
+
+        opts = self._get_ydl_opts(**kwargs)
+        opts.update({
+            "format": "bestaudio/best",
+            "outtmpl": str(output_file.parent / f"raw_{episode.get('page', 1)}.%(ext)s"),
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "m4a",
+            }],
+        })
+
+        # Download directly or via ffmpeg transcode to 16kHz mono
         ffmpeg_bin = shutil.which("ffmpeg")
-        if not ffmpeg_bin:
-            return False, "缺少 ffmpeg，无法进行音频提取与转码"
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            res = ydl.extract_info(url, download=True)
+            downloaded = Path(ydl.prepare_filename(res)).with_suffix(".m4a")
 
-        return True, f"就绪 (yt-dlp {yt_ver}, ffmpeg {ffmpeg_bin})"
+        if not downloaded.exists():
+            # Try finding any downloaded file
+            matches = list(output_file.parent.glob(f"raw_{episode.get('page', 1)}.*"))
+            if matches:
+                downloaded = matches[0]
+
+        if not downloaded.exists():
+            raise IngestionError(f"yt-dlp 音频提取失败: {url}")
+
+        if ffmpeg_bin:
+            cmd = [
+                ffmpeg_bin, "-y", "-i", str(downloaded),
+                "-vn", "-acodec", "aac", "-ar", "16000", "-ac", "1", "-b:a", "32k",
+                str(tmp_target)
+            ]
+            r = run_quiet(cmd, timeout=300)
+            if r.returncode == 0 and tmp_target.exists():
+                try:
+                    downloaded.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                tmp_target.replace(output_file)
+                return output_file
+
+        downloaded.replace(output_file)
+        return output_file
+
+    def check_readiness(self) -> Tuple[bool, str]:
+        has_ffmpeg = shutil.which("ffmpeg") is not None
+        try:
+            import yt_dlp
+            has_ytdlp = True
+        except ImportError:
+            has_ytdlp = False
+
+        if has_ffmpeg and has_ytdlp:
+            return True, "就绪 (ffmpeg + yt-dlp)"
+        missing = []
+        if not has_ffmpeg:
+            missing.append("ffmpeg")
+        if not has_ytdlp:
+            missing.append("yt-dlp")
+        return False, f"缺少依赖: {', '.join(missing)}"

@@ -17,6 +17,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from . import fsutil
 from . import paths as _paths
 
 
@@ -591,4 +592,83 @@ def find_module_article(
 def sanitize_filename(name: str, max_len: int = 80) -> str:
     """清理用于文件名的分集或稿件标题（模块级快捷函数）。"""
     return TaskWorkspace.sanitize_title(name)[:max_len]
+
+
+_EPISODE_AUDIO_RE = re.compile(r"^P(\d+)[_.](.+)\.(?:m4a|mp3|wav|aac|flac)$", re.IGNORECASE)
+
+
+def parts_from_audio(dir_path: Path) -> List[Dict[str, Any]]:
+    """从 audio/ 的分集文件名反推集号与标题（离线自愈的最后一档）。"""
+    audio_dir = Path(dir_path) / "audio"
+    if not audio_dir.exists():
+        return []
+    parts: Dict[int, Dict[str, Any]] = {}
+    for entry in sorted(audio_dir.glob("P*")):
+        if not entry.is_file():
+            continue
+        matched = _EPISODE_AUDIO_RE.match(entry.name)
+        if not matched:
+            continue
+        page = int(matched.group(1))
+        parts.setdefault(page, {"page": page, "title": matched.group(2).strip()})
+    return [parts[k] for k in sorted(parts)]
+
+
+def offline_candidate_dirs(
+    out_base: Path,
+    bvid: str,
+    custom_task: Optional[str] = None,
+    season_id: Optional[Any] = None,
+) -> List[Path]:
+    """接口受阻时按 BV 号找回本地工作区目录（离线自愈的定位入口）。"""
+    def _has_content(path: Path) -> bool:
+        return (path / "parts.json").exists() or bool(parts_from_audio(path))
+
+    cands: List[Path] = []
+    out_base = Path(out_base)
+    if custom_task:
+        cands.append(out_base / TaskWorkspace.sanitize_name(custom_task))
+    if out_base.exists():
+        found = [p for p in out_base.glob(f"*{bvid}*") if fsutil.is_dir(p)]
+        if not found and len(bvid) > 6:
+            found = [p for p in out_base.glob(f"*{bvid[:6]}*") if fsutil.is_dir(p) and _has_content(p)]
+        cands.extend(found)
+        if bvid or season_id:
+            known = {str(p.resolve()).lower() for p in cands}
+            for candidate in fsutil.iter_child_dirs(out_base):
+                if str(candidate.resolve()).lower() in known or not _has_content(candidate):
+                    continue
+                parts_file = candidate / "parts.json"
+                if not parts_file.exists():
+                    continue
+                try:
+                    cached = json.loads(parts_file.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if not isinstance(cached, list):
+                    continue
+                for item in cached:
+                    if not isinstance(item, dict):
+                        continue
+                    item_bvid = str(item.get("bvid") or "")
+                    item_season = str(item.get("season_id") or "")
+                    if ((bvid and item_bvid.lower() == bvid.lower())
+                            or (season_id and item_season == str(season_id))):
+                        cands.append(candidate)
+                        break
+    return cands
+
+
+def workspace_title(dir_path: Path, manifest: Optional[Dict[str, Any]] = None) -> str:
+    """离线自愈时的课程标题：目录名优先，manifest 的 title 只作兜底。"""
+    dir_path = Path(dir_path)
+    derived = dir_path.name.split("_")[0].strip()
+    if derived:
+        return derived
+    return str((manifest or {}).get("title") or "").strip() or dir_path.name
+
+
+_offline_candidate_dirs = offline_candidate_dirs
+_workspace_title = workspace_title
+_parts_from_audio = parts_from_audio
 

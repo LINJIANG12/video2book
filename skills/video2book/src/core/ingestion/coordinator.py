@@ -84,7 +84,7 @@ class IngestionCoordinator:
                 probe_err = err
 
         # 离线自愈与本地工作区缓存重试（支持 B 站等历史任务）
-        from src.core.pipeline import _offline_candidate_dirs, _parts_from_audio, _workspace_title
+        from src.core.workspace import _offline_candidate_dirs, _parts_from_audio, _workspace_title
         from src.core.parser import BilibiliParser
 
         bvid = BilibiliParser.extract_bvid(target) or ""
