@@ -219,6 +219,7 @@ class BlockSynthesizer:
         )
         header = (
             f"# 笔记 {block_meta['block_id']:02d} {block_meta.get('block_title', '')} 笔记任务书（NOTE_TASK）\n\n"
+            f"> 📌 **执行指引（直接执行，无需探索）**：本任务输入与输出路径均已完全指定。直接读取指定输入文件，完成撰写并保存到目标路径；无需也不要检索、扫描项目其他文件或仓库代码。\n"
             f"> 状态：need-agent-note | 语料：本篇涵盖各块的模块长文（articles/） | 由宿主 Agent / 子智能体原生撰写\n"
             f"> 涵盖块：{cls._blocks_str(block_meta)} | 涵盖分集：{p_str}\n"
             f"> 语料体积：{corpus_bytes:,} 字节\n"

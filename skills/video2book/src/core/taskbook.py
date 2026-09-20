@@ -18,10 +18,11 @@ from src.generator.prompt_templates import resolve_article_prompt
 
 TRANSCRIBE_INSTRUCTION = (
     "请忠实转录音频全文为纯文本逐字稿：\n"
-    "1. 忠实完整：完整转录讲师的原声讲解、口述推导与对话，严禁大意摘要、节选跳过或提前截断；\n"
+    "1. 忠实完整：完整转录讲师的原声讲解、口述推导与对话，严禁大意摘要、节选跳过、二次总结或提前截断；\n"
     "2. 术语准确：准确识别领域专业术语、英文标识符、指令名、API、变量与缩写；\n"
     "3. 代码公式：讲师口述推导的数学公式、代码逻辑与配置参数如实记录；\n"
-    "4. 纯净正文：不需要也不得标注时间戳（严禁臆测添加 [HH:MM:SS]），按自然语意与话题分段成通顺的段落正文。"
+    "4. 纯净正文：严禁输出「总结」、「概览」、「大纲」等任何模型元语言，严禁自作主张提炼概括；\n"
+    "5. 格式规整：不需要也不得标注时间戳（严禁臆测添加 [HH:MM:SS]），按自然语意与话题分段成通顺的段落正文。"
 )
 
 TRANSCRIBE_TIMESTAMP_INSTRUCTION = TRANSCRIBE_INSTRUCTION
@@ -70,6 +71,7 @@ def export_block_transcribe_task(
 
     content = (
         f"# BLK{block_id:02d} {span} 块级转录任务书（TRANSCRIBE_TASK）\n\n"
+        f"> 📌 **执行指引（直接执行，无需探索）**：本任务输入与输出路径均已在第 1 节完全指定。直接读取指定输入文件，完成转录并保存到目标路径；无需也不要检索、扫描项目其他文件或仓库代码。\n"
         f"> 状态：need-agent-transcript | **只做转录这一件事**，不要写长文\n"
         f"> 执行者：由**专职转录子智能体**承担（建议 2 个角色各领一半块队列、连续消费）\n"
         f"> 完成后只回报一行 `BLK{block_id:02d} | 逐字稿路径 | 字节数 | 执行者`，**不回传正文**\n"
@@ -84,13 +86,14 @@ def export_block_transcribe_task(
         f"{table}\n\n"
         f"---\n\n"
         f"## 2. 执行指引\n\n"
-        f"1. **转录整块**：调用 `omni-media-ext:read_media` 或 `omni-media:read_audio`：\n"
+        f"1. **转录整块**：优先调用 `omni-media-ext:read_media`（传入 `output_file`=`{block_transcript}` 直写落盘，零上下文开销）或 `omni-media:read_audio`：\n"
         f"   - `file_path` = 第 1 节的块音频绝对路径；\n"
         f"   - `mode` = `\"transcribe\"`；\n"
         f"   - `duration_minutes` = {max(1.0, round(duration_min, 1))}；\n"
         f"   - `instruction` = 第 2.1 节纯文本转录要求（**必须原样传入**）；\n"
-        f"2. **落盘原始逐字稿**：把完整转录正文写入第 1 节的「原始逐字稿落盘路径」；\n"
-        f"3. **核对完整性后回报**：确认正文完整覆盖整块音频，然后按抬头格式回报一行即可。\n\n"
+        f"   - `output_file` = 第 1 节的「原始逐字稿落盘路径」（传入此参数时 MCP 会原子直写磁盘，无需在上下文中回传或手动落盘）；\n"
+        f"2. **落盘原始逐字稿**：若未传入 `output_file` 或工具不支持，把完整转录正文写入第 1 节的「原始逐字稿落盘路径」；\n"
+        f"3. **核对完整性后回报**：确认逐字稿已成功落盘且非空，然后按抬头格式回报单行即可。\n\n"
         f"### 2.1 纯文本转录要求（原样传给 `instruction`）\n\n"
         f"```text\n{TRANSCRIBE_INSTRUCTION}\n```\n\n"
         f"---\n\n"
@@ -144,6 +147,7 @@ def export_block_article_task(
     )
     content = (
         f"# {stem} {block_title} 模块长文任务书（MODULE_ARTICLE_TASK）\n\n"
+        f"> 📌 **执行指引（直接执行，无需探索）**：本任务输入与输出路径均已在第 1 节完全指定。直接读取指定输入文件，完成撰写并保存到目标路径；无需也不要检索、扫描项目其他文件或仓库代码。\n"
         f"> 状态：need-agent-article | **一个块一篇模块长文**：读本块逐字稿写成一篇文章\n"
         f"> 　　　　前置条件：第 1 节那份逐字稿必须已存在且非空；缺失说明该块还没转录\n"
         f"> 长文风格：{resolved['label']}（{resolved['key']}）\n"

@@ -382,10 +382,11 @@ def _transcribe_payload(tstatus: Dict, n: int) -> List[Dict]:
         block_transcript = block["block_transcript"]
         block_id = int(block["block_id"])
         dispatch_prompt = (
+            f"【执行规范（单任务直达）】：本任务输入与输出路径均已完全指定。直接读取指定输入文件，完成转录并保存到目标路径；无需也不要检索、扫描项目其他文件或仓库代码。\n\n"
             f"请阅读转录任务书文件：\n"
             f"`{task_file}`\n"
             f"调用宿主当前可用的听音工具（有 read_audio 则使用 output_mode=\"file\" 获取切片并聆听，"
-            f"只有 read_media 则以 mode=\"transcribe\" 外部代读），严格按照任务书 2.1 节的要求进行纯文本忠实转录（无需时间戳），"
+            f"只有 read_media 则以 mode=\"transcribe\" 外部代读，优先传入 output_file 直接落盘），严格按照任务书 2.1 节的要求进行纯文本忠实转录（无需时间戳），"
             f"将完整逐字稿直接写入目标文件：\n"
             f"`{block_transcript}`\n"
             f"落盘后仅在最后汇报单行：\n"
@@ -474,6 +475,7 @@ def _module_payload(ws: Path, n: int) -> List[Dict]:
         target = _module_article_path(articles_dir, block)
         task_file = articles_dir / f"{target.name[:-len('_精读长文.md')]}_TASK.md"
         dispatch_prompt = (
+            f"【执行规范（单任务直达）】：本任务输入与输出路径均已完全指定。直接读取指定输入文件，完成撰写并保存到目标路径；无需也不要检索、扫描项目其他文件或仓库代码。\n\n"
             f"请阅读模块长文任务书文件：\n"
             f"`{task_file}`\n"
             f"以任务书指定的块级逐字稿（`{transcript}`）为唯一事实来源，严格遵循任务书内嵌的撰写规范与 Typora 渲染硬要求"
@@ -559,6 +561,7 @@ def _note_payload(ws: Path, n: int) -> List[Dict]:
             pass
 
         dispatch_prompt = (
+            f"【执行规范（单任务直达）】：本任务输入与输出路径均已完全指定。直接读取指定输入文件，完成撰写并保存到目标路径；无需也不要检索、扫描项目其他文件或仓库代码。\n\n"
             f"请阅读复习笔记任务书文件：\n"
             f"`{task_file}`\n"
             f"逐篇通读任务书指定涵盖的全部模块长文，严格遵循任务书内嵌的专属笔记提示词与排版规范"
