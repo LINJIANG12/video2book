@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from src.core.workspace import TaskWorkspace, module_article_path, module_article_stem, module_task_path
-from src.generator.prompt_templates import resolve_article_prompt
+from src.prompts import resolve_article_prompt
 
 TRANSCRIBE_INSTRUCTION = (
     "请忠实转录音频全文为纯文本逐字稿：\n"
@@ -90,11 +90,11 @@ def export_block_transcribe_task(
         f"   - `file_path` = 第 1 节的块音频绝对路径；\n"
         f"   - `mode` = `\"transcribe\"`；\n"
         f"   - `duration_minutes` = {max(1.0, round(duration_min, 1))}；\n"
-        f"   - `instruction` = 第 2.1 节纯文本转录要求（**必须原样传入**）；\n"
+        f"   - `prompt` = 第 2.1 节纯文本转录要求（**必须原样传入**）；\n"
         f"   - `output_file` = 第 1 节的「原始逐字稿落盘路径」（传入此参数时 MCP 会原子直写磁盘，无需在上下文中回传或手动落盘）；\n"
         f"2. **落盘原始逐字稿**：若未传入 `output_file` 或工具不支持，把完整转录正文写入第 1 节的「原始逐字稿落盘路径」；\n"
         f"3. **核对完整性后回报**：确认逐字稿已成功落盘且非空，然后按抬头格式回报单行即可。\n\n"
-        f"### 2.1 纯文本转录要求（原样传给 `instruction`）\n\n"
+        f"### 2.1 纯文本转录要求（原样传给 `prompt`）\n\n"
         f"```text\n{TRANSCRIBE_INSTRUCTION}\n```\n\n"
         f"---\n\n"
         f"## 3. 纪律\n\n"

@@ -16,12 +16,13 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
-from src.generator.prompt_templates import (
+from src.core import fsutil
+from src.prompts import (
     MODULE_NOTE_PROMPT,
 )
 
-# 成品体积门槛：低于该值视为空壳，需重新派发
-MIN_NOTE_BYTES = 1000
+# 成品体积门槛：低于该值视为空壳，需重新派发（唯一定义处见 fsutil）
+MIN_NOTE_BYTES = fsutil.PRODUCT_MIN_BYTES
 
 # 笔记文件名前缀：`笔记XX_…`
 NOTE_PREFIX = "笔记"

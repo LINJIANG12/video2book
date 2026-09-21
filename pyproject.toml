@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "video2book"
-version = "2.9.0"
+version = "3.0.0"
 description = "Batch-transform Bilibili, YouTube, Douyin videos & local media into publication-grade deep-dive textbooks and structured review books."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -28,8 +28,22 @@ classifiers = [
 [project.scripts]
 video2book = "src.cli:main"
 
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
 # 技能自包含于 skills/video2book/：包发现与入口都指向该目录，
 # 因此 `pip install -e .` 装到的是技能本体（核心 skill + 工具链），不带仓库级杂物。
 [tool.setuptools.packages.find]
 where = ["skills/video2book"]
 include = ["src*"]
+
+# 行为测试住在技能目录里（安装单元边界内），与扁平门禁 scripts/selfcheck.py 分工：
+# pytest 管行为，selfcheck 管便宜的入口级门禁。
+[tool.pytest.ini_options]
+testpaths = ["skills/video2book/tests"]
+pythonpath = ["skills/video2book"]
+addopts = "-ra"
+markers = [
+    "ffmpeg: 需要系统 ffmpeg/ffprobe 的用例（缺外部命令时可用 -m 'not ffmpeg' 跳过）",
+]
+

@@ -4,7 +4,7 @@ description: 把 B 站、YouTube、抖音长视频/系列网课或本地音视�
 license: MIT
 metadata:
   author: LINJIANG12
-  version: 2.9.0
+  version: 3.0.0
   category: learning-and-education
   compatibility: Python 3.10+；系统 ffmpeg 在 PATH；宿主需具备 read_audio 或 read_media 听音通道之一。
 ---
@@ -37,8 +37,10 @@ metadata:
 ## 2. 唯一执行路径（SOP）
 
 ```text
-【第 0 步：凭证】目标是抖音？→ 必须先向用户索取 Cookie（话术见 references/runtime.md）
-                 B 站建议 login --sessdata；本地 / YouTube 跳过
+【第 0 步：依赖与凭证】环境体检：python src/cli.py info
+                      若走外部听音（read_media）：确认 omni-media/config.json 就绪（默认30m切片/5并发）
+                      目标是抖音？→ 必须先向用户索取 Cookie（话术见 references/runtime.md）
+                      B 站建议 login --sessdata；本地 / YouTube 跳过
 【第 1 步：风格】向用户确认 --article-type（learning / legacy）
 【第 2 步：准备】python src/cli.py pipeline "<链接或路径>" --all --article-type learning
                  → 收音频 → 装箱成块 → 自动去重 → 导出转录/长文任务书 → 自动回收 + 对账
@@ -97,6 +99,7 @@ metadata:
 
 三层依赖：Python 3.10+、系统 `ffmpeg`、宿主听音通道之一（`read_audio` 或 `read_media`）。
 一条命令自检环境：`python src/cli.py info`。
+若使用外部模型代读（`read_media`），首次运行前必须在 `omni-media/config.json` 配好端点与密钥，默认采用 30 分钟切片与 5 并发。
 **硬依赖缺失即停下并给出下一步命令，绝不静默跳过**；可降级项（`ffprobe` → `ffmpeg -i`、
 在线解析 → 工作区离线基准）静默降级并打印说明。
 完整的依赖清单、两条听音通道的调用与分页契约、六类缺失情形的处置见
@@ -113,6 +116,7 @@ metadata:
 
 | 需要了解 | 读 |
 | :--- | :--- |
+| 这一层文件的分工与维护规矩（"哪件事该写进哪个文件"） | [`references/README.md`](references/README.md) |
 | 阶段一/二逐步详解、派发与回报协议、验收与返修、断点续跑 | [`references/workflow.md`](references/workflow.md) |
 | 三条运行依赖、两条听音通道、六类缺失处置、凭证获取与安全 | [`references/runtime.md`](references/runtime.md) |
 | CLI 全表、参数、退出码 | [`references/cli-cookbook.md`](references/cli-cookbook.md) |

@@ -25,7 +25,7 @@ from src.core.fetcher import AudioFetcher
 from src.core.workspace import TaskWorkspace, sanitize_filename
 from src.core import paths as _paths
 from src.generator.block_synthesizer import BlockSynthesizer
-from src.generator.prompt_templates import ArticlePromptTypeError
+from src.prompts import ArticlePromptTypeError
 
 # 代码根（skill/）——仅用于断点续跑提示等展示；产物路径一律走 paths.products_root()
 PROJECT_ROOT = _paths.code_root()
@@ -754,7 +754,7 @@ class PipelineCoordinator:
 
         # ===== 任务书回收：成品已落盘的模块长文/笔记任务书即时清场（每类保留 1 份范本） =====
         try:
-            from .task_cleanup import cleanup_completed_tasks as _cleanup_tasks
+            from src.core.task_cleanup import cleanup_completed_tasks as _cleanup_tasks
             _reclaim = _cleanup_tasks(ws, keep_per_category=1)
             if _reclaim["deleted"]:
                 print(f"[*] 已回收 {len(_reclaim['deleted'])} 份已完成任务书（每类保留 1 份范本供查阅提示词）")
@@ -763,7 +763,7 @@ class PipelineCoordinator:
 
         # ===== 账本对账：以磁盘产成为唯一真相回填 manifest（消除账本与产物脱节） =====
         try:
-            from .state_sync import reconcile_workspace_manifest as _reconcile
+            from src.core.state_sync import reconcile_workspace_manifest as _reconcile
             _sync = _reconcile(ws)
             print(f"[*] 账本对账：分集 {_sync['success']}/{_sync['total']} 集达标 | "
                   f"待办 {_sync['pending']} | 模块笔记 {_sync['notes']} 份 | "

@@ -80,14 +80,11 @@ class SemanticTopicPlanner:
     def load_blocks(cls, ws: Any) -> List[Dict[str, Any]]:
         """读块清单（`audio/_blocks/blocks.json`）——**模块的唯一来源**。
 
-        没有块清单就没有模块：工作区还没装箱（`merge-audio` 未跑）时返回空表，
-        调用方据此提示「先装箱」，而不是退回按集号硬切（那正是被废除的老路）。
+        归一化逻辑只在 `AudioMerger.load_blocks` 一处（本方法只是它在本类上的名字）。
         """
         from src.core.audio_merger import AudioMerger
 
-        manifest = AudioMerger.load_manifest(ws) or {}
-        blocks = manifest.get("blocks") if isinstance(manifest, dict) else None
-        return [b for b in blocks if isinstance(b, dict)] if isinstance(blocks, list) else []
+        return AudioMerger.load_blocks(ws)
 
     @classmethod
     def expected_pages(cls, expected: Sequence[Any]) -> set:

@@ -229,6 +229,26 @@ class TranscriptSplitter:
         return path.with_name(path.name + TranscriptSplitter.SUSPECT_SUFFIX).is_file()
 
     @classmethod
+    def is_reusable_transcript(cls, path: Path) -> bool:
+        """`subtitles/` 下的这个文件算不算**可复用语料**。
+
+        这是唯一真源：`TaskWorkspace._populated`（这个工作区要不要复用）与
+        `existing_episode_transcript`（这份稿能不能拿来当语料）必须给出同一个答案。
+        历史 `PXX_*_clean.txt` 是旧链路的放行口——任何一段来路不明的文本顶着这个名字
+        就能被喂进流水线（2026-09 伪逐字稿事故），所以**不算**。以前 `_populated` 却认它，
+        于是工作区被反复复用却永远推不动（第二阶段 A7）。
+        """
+        try:
+            return (
+                path.name.endswith(cls.SUFFIX)
+                and path.is_file()
+                and path.stat().st_size > 0
+                and not cls._is_suspect(path)
+            )
+        except OSError:
+            return False
+
+    @classmethod
     def existing_episode_transcript(
         cls, ws: Any, page: int, clean_title: str
     ) -> Optional[Path]:
@@ -239,12 +259,7 @@ class TranscriptSplitter:
         顶着这个名字就能被当成语料喂下去（2026-09 的伪逐字稿事故正是从这里进入流水线的）。
         """
         candidate = cls.episode_path(ws, page, clean_title)
-        try:
-            if candidate.exists() and candidate.stat().st_size > 0 and not cls._is_suspect(candidate):
-                return candidate
-        except OSError:
-            pass
-        return None
+        return candidate if cls.is_reusable_transcript(candidate) else None
 
     @classmethod
     def block_path(cls, ws: Any, block: Dict[str, Any]) -> Path:

@@ -27,6 +27,22 @@ SUPPORTED_MEDIA_EXTS = SUPPORTED_VIDEO_EXTS | SUPPORTED_AUDIO_EXTS
 PROBE_TIMEOUT_SEC = 15
 TRANSCODE_TIMEOUT_SEC = 600
 
+# ---------------------------------------------------------------------------
+# 人声编码档（**唯一定义处**）
+# ---------------------------------------------------------------------------
+# 全链路只处理人声口播，因此统一为 16kHz 单声道 AAC。此前同一组参数在
+# `fetcher.py`（两处）、`audio_merger.py` 各写了一遍，三份一旦分叉，
+# 「块内各集编码不一致」就会在拼接时才暴露。
+VOICE_AAC_ARGS = ["-vn", "-acodec", "aac", "-ar", "16000", "-ac", "1", "-b:a", "32k"]
+
+# 本地视频取音用**更高**一档（64k），这是有意的、不是漏改：
+# 本地文件没有带宽约束，多留一点细节对 ASR 更有利；块拼接若发现它与在线源（32k）混用，
+# 会自动整体转码回上面的 `VOICE_AAC_ARGS`（见 `audio_merger` 的统一转码分支）。
+# `-map 0:a:0?` 取第一条音频轨，避免多轨视频挑错轨（`?` 表示无音频轨时不报错）。
+LOCAL_EXTRACT_AAC_ARGS = [
+    "-vn", "-map", "0:a:0?", "-c:a", "aac", "-b:a", "64k", "-ar", "16000", "-ac", "1",
+]
+
 
 def natural_sort_key(s: str) -> list:
     """Sort strings with embedded numbers naturally (e.g. 'P2' before 'P10')."""
@@ -108,9 +124,10 @@ class LocalMediaParser:
         video_path: Union[str, Path],
         output_audio_path: Union[str, Path],
     ) -> Path:
-        """Universal audio extractor: extracts 64kbps 16kHz mono AAC audio from any video format.
-        
+        """Universal audio extractor: extracts 16kHz mono AAC audio from any video format.
+
         Guarantees compatibility with all video containers and multi-channel audio tracks.
+        编码档见 `LOCAL_EXTRACT_AAC_ARGS`（本地源用 64k，理由写在那里）。
         """
         src = Path(video_path).resolve()
         if not src.exists():
@@ -133,12 +150,7 @@ class LocalMediaParser:
             ffmpeg_bin,
             "-y",
             "-i", str(src),
-            "-vn",
-            "-map", "0:a:0?",
-            "-c:a", "aac",
-            "-b:a", "64k",
-            "-ar", "16000",
-            "-ac", "1",
+            *LOCAL_EXTRACT_AAC_ARGS,
             str(target),
         ]
         try:

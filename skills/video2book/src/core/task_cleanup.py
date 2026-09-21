@@ -35,8 +35,8 @@ CATEGORY_LABELS = {
     CATEGORY_TRANSCRIPTS: "块级转录任务书",
 }
 
-# 成品体积门槛：与阶段一门禁一致，避免把空壳文件误判为成品
-MIN_PRODUCT_BYTES = 1000
+# 成品体积门槛：与阶段一门禁一致，避免把空壳文件误判为成品（唯一定义处见 fsutil）
+MIN_PRODUCT_BYTES = fsutil.PRODUCT_MIN_BYTES
 
 # 模块长文任务书/成品统一为 `模块XX_…`（一个块一篇）：逐集命名 `PXX_…` 已不再存在
 _MODULE_ARTICLE_RE = re.compile(r"^模块(\d+)_")

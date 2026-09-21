@@ -46,10 +46,10 @@ HOLLOW_HEADINGS = (
 
 # ── 分集平铺标题：任何级别的标题都不得以分集编号 / 分集序号开口 ─────────────────────
 EPISODE_HEADING_PATTERNS = (
-    re.compile(r"^#{2,6}\s*P\d{1,3}\b"),
-    re.compile(r"^#{2,6}\s*第\s*\d{1,3}\s*[讲集课节]\b"),
-    re.compile(r"^#{2,6}\s*Part\s*\d+", re.IGNORECASE),
-    re.compile(r"^#{2,6}\s*\d+\.\d+\s*第\s*\d{1,3}\s*[讲集]"),
+    re.compile(r"^#{1,6}\s*P\d{1,3}\b"),
+    re.compile(r"^#{1,6}\s*第\s*\d{1,3}\s*[讲集课节]\b"),
+    re.compile(r"^#{1,6}\s*Part\s*\d+", re.IGNORECASE),
+    re.compile(r"^#{1,6}\s*\d+\.\d+\s*第\s*\d{1,3}\s*[讲集]"),
 )
 
 # ── 分集口吻：正文里以「本集 / 上一讲 / 视频中提到」叙述 ───────────────────────────
@@ -126,7 +126,7 @@ def _looks_truncated(body: str) -> bool:
         return True
     if DANGLING_TAIL_RE.search(text):
         return True
-    if len(text) >= 20 and text.count("**") % 2 == 1:
+    if text.count("**") % 2 == 1:
         return True
     return False
 
@@ -195,10 +195,15 @@ def check_note_structure(text: str) -> Dict[str, Any]:
     不写知识拓扑树、不写节级主旨句**（这些是因与标题/内容重复而被刻意删掉的，所以
     不再是结构项）；标题层级最多到 `####`，且**不得手写序号**——阅读器会自动编号，
     手写序号会与它叠成 `1.1.` 那种乱码。外加原有的「末尾没有多余收尾小节」。
-    """
-    heading_texts = re.findall(r"^#{1,6}\s+(.*)$", text, re.M)
 
-    # 逐行扫、跳过代码围栏——代码块里以 # 开头的注释不是标题。
+    所有判定共用**一次跳过代码围栏**的扫描：以前 `has_h1` / `has_sections` /
+    `no_redundant_tail` 直接对全文 `re.findall`，于是围栏里的 `## 速查卡` 会误报，
+    而围栏里的 `##` 又能把 `has_sections` 凑够数、让 `--require-structure` 误通过
+    （第二阶段 A4）。
+    """
+    heading_texts: List[str] = []
+    h1 = 0
+    h2 = 0
     deep_headings = 0        # `#####` / `######`：超出「最多到 `####`」的上限
     numbered = 0             # 手写序号（判定规则与去号共用 src/core/heading_numbers）
     for _line_no, line, in_fence in _heading_lines(text):
@@ -208,10 +213,22 @@ def check_note_structure(text: str) -> Dict[str, Any]:
             deep_headings += 1
         if is_numbered_heading(line):
             numbered += 1
+        matched = HEADING_RE.match(line)
+        if not matched:
+            continue
+        body = matched.group(2).strip()
+        if not body:
+            continue
+        level = len(matched.group(1))
+        if level == 1:
+            h1 += 1
+        elif level == 2:
+            h2 += 1
+        heading_texts.append(body)
 
     return {
-        "has_h1": bool(re.search(r"^#\s+\S", text, re.M)),
-        "has_sections": len(re.findall(r"^##\s+\S", text, re.M)) >= 2,
+        "has_h1": h1 >= 1,
+        "has_sections": h2 >= 2,
         "no_h5plus_headings": deep_headings == 0,
         "no_numbered_headings": numbered == 0,
         "no_redundant_tail": not any(

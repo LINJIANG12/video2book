@@ -268,7 +268,7 @@ def collect_notes(ws: Any) -> List[Path]:
         if path.name.endswith("_TASK.md"):
             continue
         try:
-            if path.stat().st_size < 1000:
+            if path.stat().st_size < fsutil.PRODUCT_MIN_BYTES:
                 continue
         except OSError:
             continue

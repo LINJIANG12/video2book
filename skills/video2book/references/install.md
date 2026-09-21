@@ -20,14 +20,16 @@ skills/video2book/             ← 装这一个目录即可（核心 skill + 它
 
 ## 二、前置依赖（装之前先确认）
 
-| 依赖 | 必需性 | 说明 |
-| :--- | :--- | :--- |
-| Python 3.10+ | 必需 | 运行环境（依赖 yt-dlp, requests） |
-| 系统 `ffmpeg`（在 `PATH`） | 必需 | 取音频/切片的硬前置 |
-| 听音通道之一 | 必需 | MCP 工具 `read_audio`（宿主有原生音频模态）或 `read_media`（外部模型代读）；两者由配套仓库 [LINJIANG12/omni-media](https://github.com/LINJIANG12/omni-media) 提供，当前契约版本为 1。**服务装在哪都可以**——技能在用时按宿主自己的工具列表判定通道，不需要配置路径 |
+三条硬依赖：**Python 3.10+**、**系统 `ffmpeg`**（在 `PATH`）、**听音通道之一**
+（MCP 工具 `read_audio` 或 `read_media`，由配套仓库 [LINJIANG12/omni-media](https://github.com/LINJIANG12/omni-media)
+提供，当前契约版本为 1）。**服务装在哪都可以**——技能在用时按宿主自己的工具列表判定通道，不需要配置路径。
 
-确认：执行 `python "<技能目录>/src/cli.py" info`（会打印两条听音通道的就位状态、解析到的 MCP 仓库默认位置与产物根）。
-未知 MCP 宿主可用两个 MCP 各自的 `print-config` 命令获取标准 stdio JSON。
+> 完整的依赖清单（含 `ffprobe`、Python 3.12、`git` 这些可选降级项）与「缺了会怎样、该怎么办」
+> 见 [`runtime.md` §1](runtime.md)——本节只列装之前必须齐备的三项，不重复那张表。
+
+确认：执行 `python "<技能目录>/src/cli.py" info`（会打印听音服务代码的就位状态、解析到的听音仓库默认位置与产物根）。
+未知 MCP 宿主可用 `omni-media` / `omni-media-ext` 各自的 `print-config` 命令获取标准 stdio JSON
+（两者同属一个包，差别只在注册名与随之固定的 `--mode`）。
 
 > **容器根是可选的，产物不需要配置。** 不设任何环境变量时，产物落在**你执行命令时的工作目录**下的 `output/`；
 > 只有容器标记存在（祖先目录里的 `.bvb-home`，或设了 `BVB_HOME`）**且你就在该容器内工作**时才改用 `<容器根>/output`。

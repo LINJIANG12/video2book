@@ -20,6 +20,7 @@ from typing import Any, Dict, Optional
 
 from .bili_web import BROWSER_HEADERS as 浏览器请求头
 from .bili_web import is_retryable_status
+from .local_media import VOICE_AAC_ARGS
 from .wbi import WbiSigner
 from .proc import run_quiet
 
@@ -337,7 +338,7 @@ class AudioFetcher:
 
         转码器 = shutil.which("ffmpeg")
 
-        # 1. 优先通道：ffmpeg 携带防盗链 Header 与重连机制，一步直出 16kHz 单声道 32k AAC
+        # 1. 优先通道：ffmpeg 携带防盗链 Header 与重连机制，一步直出统一人声编码档
         if 转码器 and repackage_m4a and not max_bytes:
             headers = dict(cls.DEFAULT_HEADERS)
             if sessdata:
@@ -352,11 +353,7 @@ class AudioFetcher:
                 "-reconnect_delay_max", "5",
                 "-headers", header_str,
                 "-i", stream_url,
-                "-vn",
-                "-acodec", "aac",
-                "-ar", "16000",
-                "-ac", "1",
-                "-b:a", "32k",
+                *VOICE_AAC_ARGS,
                 str(临时),
             ]
             try:
@@ -402,17 +399,13 @@ class AudioFetcher:
                     pass
             raise RuntimeError(f"[网络]音频下载失败：{错误}。建议动作：检查网络后重试。") from 错误
 
-        # 本地转码为 16kHz 单声道
+        # 本地转码为统一人声编码档
         if 转码器 and repackage_m4a:
             命令 = [
                 转码器,
                 "-y",
                 "-i", str(临时_m4s),
-                "-vn",
-                "-acodec", "aac",
-                "-ar", "16000",
-                "-ac", "1",
-                "-b:a", "32k",
+                *VOICE_AAC_ARGS,
                 str(临时),
             ]
             try:

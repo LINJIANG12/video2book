@@ -40,7 +40,7 @@ from src.core.credentials import (
     resolve_sessdata,
     store_path,
 )
-from src.core.pipeline import (
+from src.pipeline import (
     KIND_VIDEO,
     PipelineCoordinator,
     PipelineGateError,
@@ -97,7 +97,7 @@ def _confirm_article_prompt_style(args) -> str:
     用户明确指定就照用；未指定时打印风格菜单，交互终端下请用户当场选择；
     仍然拿不到选择则终止任务（工具层不猜、不兜底）。
     """
-    from src.generator.prompt_templates import render_article_prompt_menu
+    from src.prompts import render_article_prompt_menu
 
     chosen = (getattr(args, "article_type", "") or "").strip()
     if chosen:
@@ -298,7 +298,7 @@ def cmd_cluster_notes(args):
 def cmd_cluster_articles(args):
     """把各块的**模块长文**按块序整编成册（textbooks/）：册=书、章=块。"""
     from src.core.audio_merger import AudioMerger
-    from src.generator.integrator import ArticleIntegrator
+    from src.generator.integrator import ArticleIntegrator, PlanError
 
     info = resolve_target_info(
         args.url,
@@ -328,7 +328,15 @@ def cmd_cluster_articles(args):
 
     integrator = ArticleIntegrator(ws.root_dir)
     force = bool(getattr(args, "force", False))
-    results = integrator.run(course_title=course_title, force=force, blocks=blocks)
+    try:
+        results = integrator.run(course_title=course_title, force=force, blocks=blocks)
+    except PlanError as exc:
+        # 规划文件坏了就别硬编：坏文件以前会被静默当成「没有规划」，用户看不出自己的规划没生效。
+        print(f"[!] 分册规划不可用：{exc}")
+        print(f"[*] 请修正 {ws.root_dir / ArticleIntegrator.PLAN_NAME} 后重跑；"
+              f"或直接删掉该文件，工具会按块标题里的章节标记兜底分册。")
+        print("=" * 65)
+        sys.exit(2)
 
     # Update manifest（textbooks 属列表型路径字段，save_manifest 会自动反向相对化）
     manifest = ws.load_manifest(absolute=True)
@@ -592,19 +600,23 @@ def cmd_info(args):
         print(f"• {name:<18}: {icon} {msg}")
     print("=" * 65)
     print("【阶段一听音通道（按宿主自己的工具列表选择，不要猜）】")
-    # 两个 MCP 的位置由 paths.py 统一解析（新布局 <容器根>/omni-media/{mcp,mcp-ext}，
-    # 兼容迁移前的旧布局与 $OMNI_MEDIA_MCP_DIR 覆盖）
-    _mcp_dir = _paths.mcp_repo()
-    _mcp_ext_dir = _paths.mcp_ext_repo()
-    # 覆盖标记只挂在**真正受该变量影响的路径**上（下方「MCP 仓库」行是固定布局，不受它影响）
-    _mcp_src = "  [来自 ${}]".format(_paths.ENV_MCP_DIR) \
-        if os.environ.get(_paths.ENV_MCP_DIR, "").strip() else ""
-    print("• read_audio（宿主原生听音）: " + (
-        f"已就位 {_mcp_dir}{_mcp_src}" if fsutil.is_dir(_mcp_dir)
-        else f"未发现 {_mcp_dir}（纯文本宿主请改用 read_media）{_mcp_src}"))
-    print("• read_media（外部模型代读）: " + (
-        f"已就位 {_mcp_ext_dir}" if fsutil.is_dir(_mcp_ext_dir)
-        else f"未发现 {_mcp_ext_dir}（需 config.json 里的外部模型端点与 api_key）"))
+    # 听音服务的位置由 paths.py 统一解析（新布局 <容器根>/omni-media，兼容迁移前的旧布局与
+    # $OMNI_MEDIA_DIR / 旧名 $OMNI_MEDIA_MCP_DIR 覆盖）。
+    #
+    # 一个仓库、一个包、两条通道：**通道是否可用取决于宿主挂载了哪个注册名**
+    # （`omni-media` → read_audio；`omni-media-ext` → read_media），不是取决于某个子目录是否存在。
+    # 因此这里只报「服务代码是否就位」，把通道选择留给 Agent 按自己的工具列表判定。
+    _omni_dir = _paths.omni_media_repo()
+    _omni_src = "  [来自 ${}]".format(_paths.ENV_OMNI_MEDIA_DIR) \
+        if os.environ.get(_paths.ENV_OMNI_MEDIA_DIR, "").strip() else (
+            "  [来自 ${}]".format(_paths.LEGACY_ENV_OMNI_MEDIA_DIR)
+            if os.environ.get(_paths.LEGACY_ENV_OMNI_MEDIA_DIR, "").strip() else "")
+    _omni_ready = fsutil.is_dir(_omni_dir)
+    print("• 听音服务代码 : " + (
+        f"已就位 {_omni_dir}{_omni_src}" if _omni_ready
+        else f"未发现 {_omni_dir}{_omni_src}"))
+    print("    read_audio（宿主原生听音）  ← 宿主挂载注册名 omni-media（--mode native，零凭证）")
+    print("    read_media（外部模型代读）  ← 宿主挂载注册名 omni-media-ext（--mode ext，需 api_key）")
     print("  两者都不可用时：阶段一必须停下并提示先挂载其一，不得跳过音频保真直接编造正文。")
     print("=" * 65)
     print("【三域路径（代码 / MCP / 产物 互相隔离）】")
@@ -626,16 +638,12 @@ def cmd_info(args):
         else ("容器根下的 output/" if _生效 else "当前工作目录下的 output/（默认）")
     )
     print(f"• 产物根       : {_products}  [{_products_state}]  [来自 {_产物来源}]")
-    # MCP 仓库位置：显示**实际探查到**的那个，而不是拿 home_root() 拼一个可能不存在的路径。
+    # 听音服务仓库位置：显示**实际探查到**的那个，而不是拿 home_root() 拼一个可能不存在的路径。
     # 找不到时退回预期位置并明确标注「未找到」，避免把提示值伪装成事实。
-    _mcp_base = (
-        _mcp_dir.parent if fsutil.is_dir(_mcp_dir)
-        else (_mcp_ext_dir.parent if fsutil.is_dir(_mcp_ext_dir) else None)
-    )
-    _mcp_expected = _paths.home_root() / _paths.DEFAULT_MCP_REPO_DIRNAME
-    print(f"• MCP 仓库     : {_mcp_base or _mcp_expected}"
-          + ("" if _mcp_base else "  [未找到，此为预期位置]")
-          + "  （仅为位置提示；听音通道按你工具列表里的 read_audio / read_media 判定）")
+    _omni_expected = _paths.home_root() / _paths.DEFAULT_OMNI_REPO_DIRNAME
+    print(f"• 听音仓库     : {_omni_dir if _omni_ready else _omni_expected}"
+          + ("" if _omni_ready else "  [未找到，此为预期位置]")
+          + "  （仅为位置提示；通道按你工具列表里的 read_audio / read_media 判定）")
     print(f"  工作区清单   : {store_path().parent}")
     print(f"  覆盖方式     : export {_paths.ENV_OUTPUT_DIR}=<产物根> / export {_paths.ENV_HOME}=<容器根>，或用 --base-dir")
     print("=" * 65)

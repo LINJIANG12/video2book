@@ -226,22 +226,27 @@ class TaskWorkspace:
 
     @classmethod
     def _populated(cls, path: Path) -> bool:
-        """该目录是否已有实质语料（长文、逐字稿或拓扑缓存），而不是刚建出来的空壳。"""
+        """该目录是否已有实质语料（长文、**可复用的**逐字稿或课程结构缓存），而不是刚建出来的空壳。"""
+        from .transcript_splitter import TranscriptSplitter
+
         try:
             if (path / "parts.json").exists():
                 return True
-            for sub, pattern in (
-                ("articles", "P*_*.md"),
-                ("subtitles", "P*_clean.txt"),
-                # 块级转录链路产出的分集逐字稿（`PXX_<标题>_逐字稿.md`）同样是实质语料：
-                # 只有逐字稿、还没写长文的工作区不该被当成空壳而重新建目录。
-                ("subtitles", "P*_逐字稿.md"),
+            articles = path / "articles"
+            if articles.is_dir() and any(
+                f for f in articles.glob("P*_*.md") if not f.name.endswith("_TASK.md")
             ):
-                folder = path / sub
-                if not folder.is_dir():
-                    continue
-                if any(f for f in folder.glob(pattern) if not f.name.endswith("_TASK.md")):
-                    return True
+                return True
+            # 「什么算可复用语料」由 `TranscriptSplitter` 说了算——两处判定必须同源，
+            # 否则又会出现「工作区被反复复用、却永远推不动」的僵尸工作区（第二阶段 A7）。
+            # 通配用 `*_逐字稿.md` 而不只是 `P*`：块级稿 `BLKxx_*_逐字稿.md` 同样是真语料，
+            # 只有块级稿的工作区不该被当成空壳而重建目录、把稿子丢在外面。
+            subtitles = path / "subtitles"
+            if subtitles.is_dir() and any(
+                TranscriptSplitter.is_reusable_transcript(f)
+                for f in subtitles.glob("*" + TranscriptSplitter.SUFFIX)
+            ):
+                return True
         except OSError:
             return False
         return False
@@ -571,7 +576,7 @@ def module_task_path(articles_dir: Union[str, Path], block: Dict[str, Any]) -> P
 
 
 def find_module_article(
-    articles_dir: Union[str, Path], block: Dict[str, Any], min_bytes: int = 1000
+    articles_dir: Union[str, Path], block: Dict[str, Any], min_bytes: int = fsutil.PRODUCT_MIN_BYTES
 ) -> Optional[Path]:
     """磁盘上已就绪的模块长文（按 `模块XX_` 前缀宽容定位，容忍标题微调与后缀差异）。"""
     root = Path(articles_dir)

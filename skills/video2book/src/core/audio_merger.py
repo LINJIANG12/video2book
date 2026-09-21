@@ -28,9 +28,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .audio_chunker import AudioChunker
-from .local_media import PROBE_TIMEOUT_SEC, TRANSCODE_TIMEOUT_SEC
+from .local_media import PROBE_TIMEOUT_SEC, TRANSCODE_TIMEOUT_SEC, VOICE_AAC_ARGS
 from .proc import run_quiet
 from .workspace import sanitize_filename
+from . import paths
 
 # 块时长目标（分钟）。默认 50，落进 [下限, 上限] 区间的中段；`--block-minutes` 改的就是它。
 ENV_BLOCK_MINUTES = "BVB_AUDIO_BLOCK_MINUTES"
@@ -51,8 +52,8 @@ DEFAULT_BLOCK_MAX_MINUTES = 60.0
 # 比"整块 76 分钟、取音侧分两卷"更贴区间）；低于这个容差就不劈（61 分钟 → 30.5+30.5 不劈）。
 SPLIT_MIN_TOLERANCE = 0.9
 
-# 统一转码口径：与 fetcher.py 在线源一致（16kHz 单声道 32k AAC）。
-UNIFIED_AUDIO_ARGS = ["-vn", "-acodec", "aac", "-ar", "16000", "-ac", "1", "-b:a", "32k"]
+# 统一转码口径：与 fetcher.py 在线源共用同一个编码档（定义处见 local_media）。
+UNIFIED_AUDIO_ARGS = VOICE_AAC_ARGS
 
 
 class AudioMerger:
@@ -70,14 +71,7 @@ class AudioMerger:
     @staticmethod
     def _env_float(name: str, default: float) -> float:
         """读环境变量覆盖值；非法或非正数时回退默认（工具层不因配置笔误而中断）。"""
-        raw = os.environ.get(name)
-        if raw is None or not str(raw).strip():
-            return float(default)
-        try:
-            value = float(str(raw).strip())
-        except (TypeError, ValueError):
-            return float(default)
-        return value if value > 0 else float(default)
+        return paths.env_float(name, default)
 
     @classmethod
     def block_minutes(cls) -> float:
@@ -450,6 +444,20 @@ class AudioMerger:
             if not isinstance(block.get("episodes"), list) or not block["episodes"]:
                 return None
         return data
+
+    @classmethod
+    def load_blocks(cls, ws: Any) -> List[Dict[str, Any]]:
+        """读块清单里的**块列表**——模块与教材边界的唯一来源。
+
+        没有块清单就没有模块：工作区还没装箱（`merge-audio` 未跑）时返回空表，
+        调用方据此提示「先装箱」，而不是退回按集号硬切（那正是被废除的老路）。
+
+        这里是唯一的实现：归并（`topic_planner`）与整编（`integrator`）过去各抄了一份
+        同样的三行归一化逻辑，两份一旦分叉就会出现「一边认得这个清单、另一边不认」。
+        """
+        manifest = cls.load_manifest(ws) or {}
+        blocks = manifest.get("blocks") if isinstance(manifest, dict) else None
+        return [b for b in blocks if isinstance(b, dict)] if isinstance(blocks, list) else []
 
     @classmethod
     def save_manifest(cls, ws: Any, manifest: Dict[str, Any]) -> Path:

@@ -27,8 +27,10 @@
 
 **两条通道是 MCP 工具名，跨平台一致**（前提是宿主挂了对应 MCP）：
 
-- `read_audio` —— 宿主有原生音频模态时用（零凭证；服务本体在配套仓库 `omni-media/mcp/`，默认位置 `<容器根>/omni-media/mcp/`）
-- `read_media` —— 宿主只有文本能力时用（外部模型代读；服务本体在 `omni-media/mcp-ext/`）
+- `read_audio` —— 宿主有原生音频模态时用（零凭证；服务本体在配套仓库 `omni-media/` 的**单一包**里，
+  挂载注册名 `omni-media`、`--mode native`；默认位置 `<容器根>/omni-media/`）
+- `read_media` —— 宿主只有文本能力时用（外部模型代读；**同一个包**，挂载注册名 `omni-media-ext`、
+  `--mode ext`，外部端点写在 `config.json` 里）
 
 判断依据永远是**你自己工具列表里出现了哪一个**，不要猜。
 

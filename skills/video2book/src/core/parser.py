@@ -456,10 +456,20 @@ class BilibiliParser:
         # 另建工作区，而是按 P01..PN 处理整门课。
         # 只把「每个稿件都是单 P」的独立 BV 合集提升为统一课程；复合型稿件仍保留原有
         # 分 P 语义，避免改变已经在使用 hybrid 结构的旧工作流。
-        collection_mode = (
-            len(season_episodes) > 1
-            and all(int(ep.get("pages_count") or 0) <= 1 for ep in season_episodes)
-        )
+        multi_page_eps = [ep for ep in season_episodes if int(ep.get("pages_count") or 0) > 1]
+        collection_mode = len(season_episodes) > 1 and not multi_page_eps
+        if len(season_episodes) > 1 and multi_page_eps:
+            # 退回旧语义时**必须说清原因**：以前这里是静默的，一门课里只要有一集是多 P，
+            # 整门课就从「P01..PN 统一课程」悄悄退回「逐 BV 各建工作区」——用户只会看到
+            # 产物结构突然变了，却不知道是哪一集触发的（第二阶段 A10）。
+            shown = "、".join(
+                f"《{ep.get('title') or ep.get('bvid') or '?'}》({int(ep.get('pages_count') or 0)}P)"
+                for ep in multi_page_eps[:5]
+            )
+            more = f" 等 {len(multi_page_eps)} 集" if len(multi_page_eps) > 5 else ""
+            print(f"[!] 本合集含多 P 稿件（{shown}{more}），不提升为统一课程。")
+            print("[*] 多 P 稿件保留原有分 P 语义，因此本合集按逐 BV 处理"
+                  "（不会归一到 P01-PN 的单一工作区）。")
         if collection_mode:
             aggregate_parts = []
             for idx, ep in enumerate(season_episodes, 1):

@@ -63,7 +63,7 @@ Video2Book 是一个面向 AI 编程助手的技能，用来把一门课写成�
 
 产出分三轨，各自落在独立目录，可以单独取用：模块精读长文、模块合辑教材、跨块复习笔记。每个产物在交付前都要过一遍机器门禁——套话填充、空壳标题、分集平铺标题这类问题会被脚本拦下，而不是留给你在阅读时发现。
 
-你需要准备的只有一个听音通道，它由配套仓库 [omni-media][link-omni-media] 提供：宿主自带音频模态时用它的 `mcp/`（`read_audio`，零凭证），只有文本能力时用它的 `mcp-ext/`（`read_media`，由外部模型代读）。这个通道是工作流的必需环节，缺了它阶段一取不到音频事实，流水线会停下提示你挂载。装好之后，一条命令就能跑完一门课。
+你需要准备的只有一个听音通道，它由配套仓库 [omni-media][link-omni-media] 提供：宿主自带音频模态时用它的 `read_audio`（零凭证），只有文本能力时用它的 `read_media`（由外部模型代读）——两者是同一个包的两条通道。这个通道是工作流的必需环节，缺了它阶段一取不到音频事实，流水线会停下提示你挂载。装好之后，一条命令就能跑完一门课。
 
 <div align="right">
 
@@ -119,7 +119,7 @@ ffmpeg -version    # 已加入 PATH
 ### 安装
 
 > [!IMPORTANT]
-> 第三步的听音通道不可跳过。两个服务都来自配套仓库 [omni-media][link-omni-media]，二选一即可；没有它，阶段一取不到音频事实，流水线会停下提示你挂载。
+> 第三步的听音通道不可跳过。两条通道（`read_audio` / `read_media`）都由配套仓库 [omni-media][link-omni-media] 的**同一个包**提供，二选一即可；没有它，阶段一取不到音频事实，流水线会停下提示你挂载。
 
 ```bash
 # 1) 技能本体：复制这一个目录即可
@@ -130,17 +130,18 @@ cp -r skills/video2book ~/.config/opencode/skills/   # OpenCode
 # 2) 可选：安装 CLI（装完可用 video2book 命令替代 python src/cli.py）
 pip install -e .
 
-# 3) 听音通道（必需）：两个服务同属配套仓库 omni-media
+# 3) 听音通道（必需）：来自配套仓库 omni-media（单一包，两条通道二选一）
 cd .. && git clone https://github.com/LINJIANG12/omni-media.git
+cd omni-media && pip install -e .
 
 #    通道 A：宿主有原生音频模态（工具列表里有 read_audio），零凭证
-cd omni-media/mcp && pip install -e .
 omni-media status                    # 诊断系统依赖、各宿主挂载状态与实际配置路径
 omni-media apply --target codex      # 挂到宿主；可用取值以 status 的实际输出为准
+#    这个入口固定 --mode native，只暴露 read_audio
 
-#    通道 B：宿主只有文本能力（只有 read_media）时改用它
-cd ../mcp-ext && pip install -e .
-omni-media-ext config --init         # 生成 config.json，填入端点与 api_key
+#    通道 B：宿主只有文本能力（只有 read_media）时改用另一个入口
+#    同一个包、无需重装，差别只在注册名与随之固定的 --mode ext
+omni-media config init               # 生成 config.json，填入端点与 api_key
 omni-media-ext status
 omni-media-ext apply --target codex
 ```
@@ -248,11 +249,11 @@ python src/cli.py pipeline "D:\courses\software_engineering" --all --article-typ
 
 | 变量 | 说明 | 默认 | 必需 |
 |---|---|---|---|
-| `BVB_OUTPUT_DIR` | 产物根 | **默认 `<工作目录>/output`**；在当前容器内工作时为 `<容器根>/output` | 否 |
+| `BVB_OUTPUT_DIR` | 产物根；**相对值按当前工作目录解析**（要钉死位置就用绝对路径） | **默认 `<工作目录>/output`**；在当前容器内工作时为 `<容器根>/output` | 否 |
 | `BVB_HOME` | 容器根，`skill/`、`omni-media/`、`output/` 的共同父目录 | 由 `.bvb-home` 标记定位；**没有标记时不存在，也不影响可用性** | 否 |
 | `BVB_AUDIO_TOKENS_PER_SEC` | 音频 token 系数；OpenAI input_audio 口径约设 `100` | `32` | 否 |
 | `BVB_CONTEXT_WINDOW_TOKENS` | 上下文窗口预算 | `1000000` | 否 |
-| `OMNI_MEDIA_MCP_DIR` | 原生听音服务目录的覆盖 | `<容器根>/omni-media/mcp` | 否 |
+| `OMNI_MEDIA_DIR` | 听音服务仓库目录的覆盖（旧名 `OMNI_MEDIA_MCP_DIR` 仍被接受） | `<容器根>/omni-media` | 否 |
 | `BVB_DEBUG` | 设为 `1` 时原样抛出栈回溯 | 未设置 | 否 |
 
 环境变量需在进程启动前设置。单次执行也可用 `--base-dir <路径>` 换产物根，命令行参数优先于环境变量。
@@ -363,15 +364,15 @@ python src/cli.py check --deliver --strict                 # 交付前体检（�
 
 ### 不装 omni-media 能用吗
 
-不能。两个听音通道 `read_audio` 与 `read_media` 都由 [omni-media][link-omni-media] 提供，工作流把它列为必需项：阶段一取不到音频事实时，流水线会停下提示你挂载其一。
+不能。两条听音通道 `read_audio` 与 `read_media` 都由 [omni-media][link-omni-media] 提供，工作流把它列为必需项：阶段一取不到音频事实时，流水线会停下提示你挂载其一。
 
-### 该装 mcp 还是 mcp-ext
+### 该挂哪个入口
 
-看宿主的模态。工具列表里有 `read_audio`，说明宿主有原生音频模态，装 `mcp/`，延迟最低且零凭证；只有 `read_media`，说明宿主仅有文本能力，装 `mcp-ext/`，由 `config.json` 指定外部模型端点。两条通道分页契约同构，切换只需换工具名。
+看宿主的模态。工具列表里有 `read_audio`，说明宿主有原生音频模态，挂 `omni-media` 入口（固定 `--mode native`），延迟最低且零凭证；只有 `read_media`，说明宿主仅有文本能力，挂 `omni-media-ext` 入口（固定 `--mode ext`），由 `config.json` 指定外部模型端点。**两者是同一个包的两条通道**，装一次即可，切换只需换注册名。两条通道分页契约同构。
 
 ### 听音通道装好了却取不到逐字稿
 
-先看报错落在哪一层。若提示「这条错误来自端点的**上游**」，说明 MCP 服务与网关进程都正常，失败发生在网关的上游（拿不到上游凭证，或上游不可达）——`omni-media-ext status --probe` **测不出**这种情形，因为它只发 `GET /models`。此时按提示检查本机代理/加速器是否在运行、能否连上上游，**不要**去改 `/audio/transcriptions`、`model` 一类端点配置；重跑也不会变好。
+先看报错落在哪一层。若提示「这条错误来自端点的**上游**」，说明 MCP 服务与网关进程都正常，失败发生在网关的上游（拿不到上游凭证，或上游不可达）——`omni-media status` **测不出**这种情形，因为它只发 `GET /models`。此时按提示检查本机代理/加速器是否在运行、能否连上上游，**不要**去改 `/audio/transcriptions`、`model` 一类端点配置；重跑也不会变好。
 
 若提示「转录端点连续 N 次返回模型自述的提纲/计划」，那是外部模型偶发把提纲当结果返回，工具已按 `max_retries` 自动重读；仍失败就重试本片，或把 `duration_minutes` 调小后重读本片。
 
@@ -381,15 +382,15 @@ python src/cli.py check --deliver --strict                 # 交付前体检（�
 
 ### 阶段二规划写得不完美会卡住吗
 
-不会。归并不停机：引用了不存在块的认领丢掉、重复认领先到先得、没人认领的块各补成一篇兜底笔记，命令始终正常退出，且盘上的 `note_plan.json` 不会被兜底结果覆盖，补齐后重跑即自动替换。
+不会。归并不停机：引用了不存在块的认领丢掉、重复认领先到先得（并逐条打印「哪一块、被第几册重复认领、保留的是第几册」）、没人认领的块各补成一篇兜底笔记，命令始终正常退出，且盘上的 `note_plan.json` 不会被兜底结果覆盖，补齐后重跑即自动替换。
 
 ### 怎么确认挂载与产物状态
 
-`python src/cli.py info` 会打印 Python / ffmpeg / ffprobe / 两条听音通道的就绪状态与三域路径；`omni-media status` 诊断系统依赖、各宿主挂载状态与实际配置路径。`python scripts/queue_tracker.py --summary` 给出阶段一完成度与派发建议。
+`python src/cli.py info` 会打印 Python / ffmpeg / ffprobe / 听音服务代码的就绪状态与三域路径；`omni-media status` 诊断系统依赖、各宿主挂载状态与实际配置路径。`python scripts/queue_tracker.py --summary` 给出阶段一完成度与派发建议。
 
 ### 凭证会进版本库吗
 
-不会。本仓库把 B 站 `SESSDATA` 排除在外，omni-media 也把 `mcp-ext` 的 `config.json` 排除在外，只提交模板。通道 A 本身零凭证，不需要配置任何密钥。
+不会。本仓库把 B 站 `SESSDATA` 排除在外，omni-media 也把 `config.json`（含 `api_key`）排除在外，只提交模板。通道 A 本身零凭证，不需要配置任何密钥。
 
 <div align="right">
 

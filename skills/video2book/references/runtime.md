@@ -34,7 +34,7 @@ python scripts/selfcheck.py   # 全量契约自检（含 Python 3.10+ 语法兼�
 ① 容器布局（存在 $BVB_HOME 或祖先目录里的 .bvb-home 标记时沿用）
 <容器根>/
 ├── skill/skills/video2book/   ← 本技能：SKILL.md + references/ + src/ + scripts/（安装单元）
-├── omni-media/                ← 可选：两个听音 MCP 服务的仓库（mcp/ 原生听音、mcp-ext/ 外部模型代读）
+├── omni-media/                ← 可选：听音服务仓库（单一包，两条通道由 --mode 区分）
 └── output/                    ← 产物根：各课程工作区 + .sessdata.json / .wbi_keys.json / .cli_status.json
 
 ② 默认（没有任何容器标记时）
@@ -44,6 +44,8 @@ python scripts/selfcheck.py   # 全量契约自检（含 Python 3.10+ 语法兼�
 - **产物根默认取「你的工作目录」下的 `output/`**；只有当容器标记存在**且你就在该容器内工作**时才改用
   `<容器根>/output`——标记是从技能所在位置向上找的，所以把技能软链进平台技能目录后，从别的项目调用仍按你的
   工作目录解析。要钉死位置就用 `--base-dir <路径>` 或 `BVB_OUTPUT_DIR`。
+- `BVB_OUTPUT_DIR` 给**相对值**时也按**当前工作目录**解析（不会因为容器标记而改落到容器里）；
+  要把位置钉死，就用绝对路径。
 - **请在「你要放产物的那个工作目录」下执行命令**：用绝对路径调用 CLI（`python "<技能目录>/src/cli.py" …`）即可；
   相对形式 `python src/cli.py` 要求 cwd 是技能目录，那样产物会跟着落到技能目录下——除非显式传 `--base-dir`。
 - 三个硬约束：**产物永不落进代码域**；**容器根 `.git` 必须保持为空标记**（它是工作区边界标记，不是版本库）；
@@ -65,8 +67,8 @@ python scripts/selfcheck.py   # 全量契约自检（含 Python 3.10+ 语法兼�
 因此请以 `info` 的 FFmpeg 检查结果为准，而不要以命令是否报错来判断。
 
 **③ 两条听音通道都没挂（既无 `read_audio` 也无 `read_media`）**
-阶段一**必须停下**并提示用户先挂载其一（配套仓库 `omni-media` 的 `mcp/` 或 `mcp-ext/`，装在哪都行；
-`info` 给出的目录只是默认位置的提示），**不得**跳过「真正处理过本块音频」这一步直接编造正文。
+阶段一**必须停下**并提示用户先挂载其一（配套仓库 `omni-media` 的 `read_audio` 或 `read_media` 任一入口，
+装在哪都行；`info` 给出的目录只是默认位置的提示），**不得**跳过「真正处理过本块音频」这一步直接编造正文。
 判断依据永远是**宿主自己的工具列表**，不要猜，也不需要为它配置任何路径。
 
 **④ 没有外网 / B 站接口不可达**
@@ -132,14 +134,17 @@ python scripts/selfcheck.py   # 全量契约自检（含 Python 3.10+ 语法兼�
 
    - **传入 `output_file`（推荐）**：服务在底层原子直写目标文件，会话仅返回轻量收据（含字符数、耗时与 `OMNI_STATUS`），**全文 0 Token 进上下文**，彻底消除长文转录导致的上下文爆炸与模型二次总结；
    - **未传 `output_file`**：返回纯文本正文（`transcribe` 给逐字稿，`summarize` 给教材级总结，`qa` 给带时间范围佐证的问答），由 Agent 写入落盘路径。
-   外部模型端点由 `omni-media/mcp-ext/config.json` 决定，可用 `endpoint` 参数按名切换。
+   - **首次使用配置（关键）**：外部模型通道依赖 `omni-media/config.json`。首次使用前必须先运行 `omni-media config init` 初始化配置文件，填入具备多模态听音能力的模型端点（`base_url`、`api_key` 和 `model`，如 `gemini-2.5-flash`）。默认切片时长 `slice_minutes` 设为 **30** 分钟，单片媒体体积 `max_payload_mb` 为 **35** MB，推荐调用并发 `max_concurrency` 设为 **5**（可在 1 分钟左右完成 150 分钟长音频转录，且不触发 API 429 限流）。
+   外部模型端点由 `omni-media/config.json` 决定，可用 `endpoint` 参数按名切换。
    **切片沿用任务书切好的粒度**，不要自己另填切片长度；只有 `OMNI_STATUS` 显示 `is_finished=false` 时才续读。
 2. **续读同构**：返回文本首行的 `OMNI_STATUS` 与通道 A **同名同义**
-   （`contract_version: 1` / `is_finished` / `next_start_time` / `next_duration_minutes` / `mode`），
-   因此**同一段续读循环在两条通道之间可以无感切换**，只需换工具名；若返回里带 `clamped: true`，
-   说明请求的时长被载荷上限收窄，按 `OMNI_STATUS` 的续读参数接着读。
+   （`contract_version: 1` / `is_finished` / `current_start` / `current_duration` /
+   `next_start_time` / `next_duration_minutes`），
+   因此**同一段续读循环在两条通道之间可以无感切换**，只需换工具名。
+   若请求的切片超出端点载荷上限，工具会**直接报错并提示改用更小的 `duration_minutes`**——
+   它不会静默截断，因为「静默截断」会让你以为这一段听完了，实际并没有。
 3. **事实依据**：以代读回来的逐字稿为音频事实来源；**不得**把它当成摘要就跳过细节——需要完整讲授内容时逐片读全，
-   需要板书/例题细节时用 `instruction` 追加要求。
+   需要板书/例题细节时用 `prompt` 追加要求。
 
 ### 2.3 通道无关的收尾
 

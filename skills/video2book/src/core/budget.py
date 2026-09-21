@@ -17,9 +17,10 @@ Gemini 原生音频 ≈ 32 token/秒、OpenAI input_audio ≈ 100 token/秒。1M
     BVB_CONTEXT_WINDOW_TOKENS=1000000  # 默认 1M
 """
 
-import os
 import statistics
 from typing import Any, Dict, Iterable, Optional
+
+from . import paths
 
 ENV_AUDIO_TOKENS_PER_SEC = "BVB_AUDIO_TOKENS_PER_SEC"
 ENV_CONTEXT_WINDOW_TOKENS = "BVB_CONTEXT_WINDOW_TOKENS"
@@ -48,14 +49,8 @@ MAX_WORKERS = 6
 
 
 def _env_float(name: str, default: float) -> float:
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        value = float(raw)
-    except ValueError:
-        return default
-    return value if value > 0 else default
+    """环境变量数值口径与工具层其余部分共用（见 `paths.env_float`）。"""
+    return paths.env_float(name, default)
 
 
 def audio_tokens_per_sec() -> float:

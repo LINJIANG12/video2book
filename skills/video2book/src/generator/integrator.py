@@ -24,6 +24,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from src.core import fsutil
 from src.core.heading_numbers import strip_heading_number
 from src.core.workspace import find_module_article, sanitize_filename
 
@@ -31,6 +32,15 @@ from src.core.workspace import find_module_article, sanitize_filename
 _Item = Tuple[int, Dict[str, Any], Path, int]
 # 分组：(册名, 该册的块序列)
 _Group = Tuple[str, List[Dict[str, Any]]]
+
+
+class PlanError(Exception):
+    """盘上的 `textbook_plan.json` 存在但不可用（不是合法 JSON / 不是数组 / 元素全不合法）。
+
+    与「没有规划文件」区分开：没文件是正常情况（走内容结构兜底），**坏文件不是**——
+    以前坏文件被静默当成「没有规划」，Agent 写坏一个字符就悄悄退回兜底分册，
+    用户完全不知道自己的规划没生效（第二阶段 A1）。
+    """
 
 
 class ArticleIntegrator:
@@ -59,12 +69,13 @@ class ArticleIntegrator:
         self.textbooks_dir.mkdir(parents=True, exist_ok=True)
 
     def load_blocks(self) -> List[Dict[str, Any]]:
-        """读块清单——模块的唯一来源（没有块清单就没有教材可整编）。"""
+        """读块清单——模块的唯一来源（没有块清单就没有教材可整编）。
+
+        归一化逻辑只在 `AudioMerger.load_blocks` 一处（本方法只是它在本类上的名字）。
+        """
         from src.core.audio_merger import AudioMerger
 
-        manifest = AudioMerger.load_manifest(self.task_dir) or {}
-        blocks = manifest.get("blocks") if isinstance(manifest, dict) else None
-        return [b for b in blocks if isinstance(b, dict)] if isinstance(blocks, list) else []
+        return AudioMerger.load_blocks(self.task_dir)
 
     def plan_path(self) -> Path:
         return self.task_dir / self.PLAN_NAME
@@ -79,31 +90,55 @@ class ArticleIntegrator:
     # 分册一：Agent 规划（首选）
     # ------------------------------------------------------------------
     def load_plan(self) -> List[Dict[str, Any]]:
-        """读 `textbook_plan.json`；缺失或损坏时返回空表（调用方走兜底分册）。"""
+        """读 `textbook_plan.json`。
+
+        文件**不存在**时返回空表（调用方走内容结构兜底）；文件存在却读不出任何一册时抛
+        `PlanError`——坏文件必须报出来，不能静默降级成「没有规划」。
+        """
         path = self.plan_path()
         if not path.exists():
             return []
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return []
-        return [v for v in raw if isinstance(v, dict)] if isinstance(raw, list) else []
+        except (OSError, json.JSONDecodeError) as exc:
+            raise PlanError(f"{path.name} 不是合法 JSON：{exc}") from exc
+        if not isinstance(raw, list):
+            raise PlanError(
+                f"{path.name} 必须是 JSON Array（每册一个对象），实际是 {type(raw).__name__}"
+            )
+        volumes = [v for v in raw if isinstance(v, dict)]
+        if raw and not volumes:
+            raise PlanError(
+                f"{path.name} 里没有一个是合法分册对象"
+                f"（每个元素都要是 {{\"volume_id\": 1, \"volume_title\": \"…\", \"blocks\": [1, 2]}}）"
+            )
+        return volumes
 
     @classmethod
     def validate_plan(
         cls, plan: Sequence[Dict[str, Any]], blocks: Sequence[Dict[str, Any]]
     ) -> Tuple[bool, str]:
-        """校验分册规划：块**恰好被认领一次**、册名非空且能看出内容。"""
+        """校验分册规划：块**恰好被认领一次**、册名非空且能看出内容、`volume_id` 合法且唯一。"""
         if not plan:
             return False, "分册规划为空"
         known = [int(b.get("block_id") or 0) for b in blocks]
         claimed: List[int] = []
+        ids: List[int] = []
         for index, volume in enumerate(plan, 1):
             title = str(volume.get("volume_title") or "").strip()
             if not title:
                 return False, f"第 {index} 册缺少 volume_title（册名要能看出内容）"
             if title in cls._VAGUE_TITLES:
                 return False, f"第 {index} 册用了空泛册名「{title}」，请写成能看出内容的主题名"
+            raw_id = volume.get("volume_id")
+            if raw_id is not None:
+                try:
+                    vid = int(raw_id)
+                except (TypeError, ValueError):
+                    return False, f"第 {index} 册的 volume_id 非法：{raw_id!r}（应为从 1 开始的整数）"
+                if vid < 1:
+                    return False, f"第 {index} 册的 volume_id 必须 >= 1，收到 {vid}"
+                ids.append(vid)
             raw = volume.get("blocks")
             if not isinstance(raw, list) or not raw:
                 return False, f"第 {index} 册未认领任何块"
@@ -112,6 +147,9 @@ class ArticleIntegrator:
                     claimed.append(int(item))
                 except (TypeError, ValueError):
                     return False, f"第 {index} 册的块编号非法：{item!r}"
+        dup_ids = sorted({v for v in ids if ids.count(v) > 1})
+        if dup_ids:
+            return False, f"volume_id 重复：{dup_ids}（每册的 volume_id 必须唯一）"
         unknown = sorted({b for b in claimed if b not in known})
         if unknown:
             return False, f"分册规划引用了不存在的块编号: {unknown}"
@@ -135,8 +173,9 @@ class ArticleIntegrator:
         groups: List[_Group] = []
         diag: List[str] = []
         claimed: set = set()
+        owner: Dict[int, int] = {}  # 块号 -> 先认领它的册序号（用于把「谁吞了谁」说清楚）
         unknown: List[Any] = []
-        for volume in plan:
+        for vol_index, volume in enumerate(plan, 1):
             if not isinstance(volume, dict):
                 continue
             picked: List[Dict[str, Any]] = []
@@ -150,8 +189,19 @@ class ArticleIntegrator:
                     unknown.append(bid)
                     continue
                 if bid in claimed:
+                    # 静默丢弃会让用户完全无从知道哪一块被吞了（第二阶段 A2）。
+                    if owner[bid] == vol_index:
+                        diag.append(
+                            f"块 {bid:02d} 在同一册（第 {vol_index} 册）里出现多次，已去重"
+                        )
+                    else:
+                        diag.append(
+                            f"块 {bid:02d} 被第 {vol_index} 册重复认领，已丢弃"
+                            f"（保留先到者：第 {owner[bid]} 册）"
+                        )
                     continue
                 claimed.add(bid)
+                owner[bid] = vol_index
                 picked.append(by_id[bid])
             if not picked:
                 continue
@@ -367,6 +417,10 @@ class ArticleIntegrator:
                 size = 0
             ready.append((module_idx, block, article, size))
         if not ready:
+            # 没有可纳入的块时**也要清理**陈旧分册：否则删掉最后一篇长文后，上一轮产出的
+            # `模块01_…_精读全书.md` 会作为陈旧产物永远留在盘上（第二阶段 A8）。
+            # expected 传空集 = 本轮一册都不产出，盘上所有旧册都是陈旧的。
+            self._remove_stale_volumes(set())
             return []
 
         # ---- 分册：Agent 规划优先 ----
@@ -375,13 +429,12 @@ class ArticleIntegrator:
         if planned:
             ok, reason = self.validate_plan(planned, blocks)
             if ok:
-                selection = {
-                    int(volume.get("volume_id") or index): [int(x) for x in volume.get("blocks") or []]
-                    for index, volume in enumerate(planned, 1)
-                }
+                # 册的顺序**只认数组位置**。以前这里用 `volume_id` 建字典、又用位置下标去读
+                # （`selection[index]`），于是 volume_id 写成 10/20 就 `KeyError`、
+                # 写成乱序就静默错配到别的册（第二阶段 A1）。二者只留一种：位置。
                 groups = []
-                for index, volume in enumerate(planned, 1):
-                    wanted = set(selection[index])
+                for volume in planned:
+                    wanted = {int(x) for x in volume.get("blocks") or []}
                     members = sorted(
                         (b for b in blocks if int(b.get("block_id") or 0) in wanted),
                         key=lambda b: int(b.get("block_id") or 0),
@@ -435,7 +488,7 @@ class ArticleIntegrator:
         course_title: str,
         cap: int,
         force: bool = False,
-        min_product_bytes: int = 200,
+        min_product_bytes: int = fsutil.RENDER_MIN_BYTES,
     ) -> Path:
         """写出一册：册名 → 导读与全景目录 → 逐章正文 → 册尾小结。"""
         volume_count = len(volume_titles)

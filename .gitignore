@@ -62,4 +62,7 @@ config.json
 .aide/
 temp_bilinote/
 
+# 内部实现说明：写给维护者看（含内部结构推导与取舍记录），不随发布分发
+sikll实现文档.md
+
 

@@ -29,8 +29,14 @@ jobs:
 
       - name: Install source package
         shell: pwsh
-        run: python -m pip install -e .
+        run: python -m pip install -e ".[dev]"
 
       - name: Skill selfcheck
         shell: pwsh
         run: python skills\video2book\scripts\selfcheck.py
+
+      # 行为测试住在 skills/video2book/tests/（`testpaths` 已在 pyproject 里声明）。
+      # 少了这一步，那套用例在 CI 上等于不存在：本地全绿也挡不住回归进主干。
+      - name: Skill behaviour tests
+        shell: pwsh
+        run: python -m pytest -q

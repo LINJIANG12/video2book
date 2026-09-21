@@ -21,7 +21,7 @@ from . import fsutil
 from .audio_merger import AudioMerger
 from .workspace import find_module_article, module_article_path
 
-MIN_ARTICLE_BYTES = 1000
+MIN_ARTICLE_BYTES = fsutil.PRODUCT_MIN_BYTES
 
 
 def _list_products(directory: Path, suffix: str = ".md") -> List[Path]:
@@ -33,7 +33,7 @@ def _list_products(directory: Path, suffix: str = ".md") -> List[Path]:
         return []
     return sorted(
         p for p in directory.glob(f"*{suffix}")
-        if not p.name.endswith("_TASK.md") and fsutil.file_size(p) >= 200
+        if not p.name.endswith("_TASK.md") and fsutil.file_size(p) >= fsutil.RENDER_MIN_BYTES
     )
 
 

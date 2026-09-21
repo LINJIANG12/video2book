@@ -28,6 +28,29 @@ PathLike = Union[str, "os.PathLike[str]"]
 # Windows 文件属性位：FILE_ATTRIBUTE_REPARSE_POINT（junction / 符号链接 / 其它重解析点）
 _REPARSE_POINT_ATTR = 0x400
 
+# ---------------------------------------------------------------------------
+# 体积门槛（**全仓唯一定义处**）
+# ---------------------------------------------------------------------------
+# 为什么必须只有一处：这两个数决定「这个文件算不算已产出」，而它们被阶段一门禁、
+# 笔记归并、任务书回收、模块长文定位、教材整编同时消费。散落成多个字面量时会出现
+# 「这边算完成、那边算空壳」的对账裂缝——而且不会报错，只会静默地把同一份文件
+# 一会儿当成品、一会儿当待办。
+#
+# PRODUCT_MIN_BYTES：成品是否成立。低于它视为空壳/占位（任务书、写了一半的文件），
+# 需要重新派发。1000 字节是「一段真实正文」与「一个标题加几行占位」的经验分界。
+PRODUCT_MIN_BYTES = 1000
+# RENDER_MIN_BYTES：渲染门禁的扫描下限。比 PRODUCT_MIN_BYTES 低得多，因为它的目的
+# 只是「别去 lint 一个空文件」，不是判断成品是否成立。
+RENDER_MIN_BYTES = 200
+
+
+def is_product(path: PathLike, min_bytes: int = PRODUCT_MIN_BYTES) -> bool:
+    """该路径是否已是一份**成立**的成品（存在、是文件、且体积达到门槛）。"""
+    try:
+        return Path(path).is_file() and file_size(path) >= min_bytes
+    except OSError:
+        return False
+
 
 def is_dir(path: PathLike) -> bool:
     """`Path.is_dir()` 的安全版：不可访问（含 WinError 448）一律当作「不是目录」。

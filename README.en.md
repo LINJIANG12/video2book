@@ -63,7 +63,7 @@ The hard part of a long course is that you cannot finish listening to it, let al
 
 Output comes in three tracks, each in its own directory and usable on its own: per-episode articles, compiled modular textbooks, and cross-module review notes. Every deliverable passes a machine gate before delivery — filler prose, hollow headings and per-episode flat headings get caught by scripts rather than by you while reading.
 
-The only thing you must provide is a listening channel, delivered by the companion repository [omni-media][link-omni-media]: use its `mcp/` (`read_audio`, zero credentials) when the host has a native audio modality, or its `mcp-ext/` (`read_media`, delegated to an external model) when the host is text-only. This channel is a required part of the workflow; without it Stage 1 cannot obtain audio facts and the pipeline stops to ask you to mount one. Once installed, one command runs an entire course.
+The only thing you must provide is a listening channel, delivered by the companion repository [omni-media][link-omni-media]: use its `read_audio` (zero credentials) when the host has a native audio modality, or its `read_media` (delegated to an external model) when the host is text-only — both are channels of the same package. This channel is a required part of the workflow; without it Stage 1 cannot obtain audio facts and the pipeline stops to ask you to mount one. Once installed, one command runs an entire course.
 
 <div align="right">
 
@@ -134,13 +134,14 @@ pip install -e .
 cd .. && git clone https://github.com/LINJIANG12/omni-media.git
 
 #    Channel A: host has a native audio modality (read_audio in its tool list), zero credentials
-cd omni-media/mcp && pip install -e .
+cd omni-media && pip install -e .
 omni-media status                    # diagnose system deps, host mounts and real config paths
 omni-media apply --target codex      # mount to the host; valid values come from live `status` output
+#    this entry pins --mode native and exposes read_audio only
 
-#    Channel B: host is text-only (only read_media) — use this instead
-cd ../mcp-ext && pip install -e .
-omni-media-ext config --init         # generate config.json, fill in endpoint and api_key
+#    Channel B: host is text-only (only read_media) — use the other entry instead
+#    same package, no reinstall; only the registration name and its pinned --mode ext differ
+omni-media config init               # generate config.json, fill in endpoint and api_key
 omni-media-ext status
 omni-media-ext apply --target codex
 ```
@@ -248,11 +249,11 @@ Five note-quality checks are fatal and fail the delivery outright: **boilerplate
 
 | Variable | Description | Default | Required |
 |---|---|---|---|
-| `BVB_OUTPUT_DIR` | Products root | **`<working_dir>/output` by default**; `<container_root>/output` when working inside that container | No |
+| `BVB_OUTPUT_DIR` | Products root; a **relative value resolves against the working directory** (use an absolute path to pin it) | **`<working_dir>/output` by default**; `<container_root>/output` when working inside that container | No |
 | `BVB_HOME` | Container root, the common parent of `skill/`, `omni-media/` and `output/` | Located via the `.bvb-home` marker; **absent when there is no marker — and that does not affect usability** | No |
 | `BVB_AUDIO_TOKENS_PER_SEC` | Audio token factor; set around `100` for the OpenAI input_audio scale | `32` | No |
 | `BVB_CONTEXT_WINDOW_TOKENS` | Context window budget | `1000000` | No |
-| `OMNI_MEDIA_MCP_DIR` | Override for the native listening service directory | `<container_root>/omni-media/mcp` | No |
+| `OMNI_MEDIA_DIR` | Override for the listening service repository directory (legacy `OMNI_MEDIA_MCP_DIR` still accepted) | `<container_root>/omni-media` | No |
 | `BVB_DEBUG` | Set to `1` to re-raise stack traces verbatim | unset | No |
 
 Environment variables must be set before the process starts. A single run can also switch the products root with `--base-dir <path>`; command-line arguments take precedence over environment variables.
@@ -364,9 +365,9 @@ python src/cli.py check --deliver --strict                 # pre-delivery check 
 
 No. Both listening channels, `read_audio` and `read_media`, come from [omni-media][link-omni-media], and the workflow treats one as mandatory: when Stage 1 cannot obtain audio facts, the pipeline stops to ask you to mount one.
 
-### Should I install mcp or mcp-ext?
+### Which entry should I mount?
 
-It depends on the host's modality. If `read_audio` is in your tool list, the host has a native audio modality — install `mcp/`, lowest latency and zero credentials. If only `read_media` is present, the host is text-only — install `mcp-ext/`, which names an external model endpoint in `config.json`. Both channels share the same pagination contract, so switching is a matter of changing the tool name.
+It depends on the host's modality. If `read_audio` is in your tool list, the host has a native audio modality — mount the `omni-media` entry (pinned `--mode native`), lowest latency and zero credentials. If only `read_media` is present, the host is text-only — mount the `omni-media-ext` entry (pinned `--mode ext`), which names an external model endpoint in `config.json`. **Both are channels of the same package**, so you install once and switch by registration name. They share the same pagination contract.
 
 ### The listening channel is installed but no transcript comes back
 
@@ -388,7 +389,7 @@ No. Merging never stalls: claims referencing unknown blocks are dropped, duplica
 
 ### Do credentials end up in version control?
 
-No. This repository excludes the Bilibili `SESSDATA`, and omni-media excludes the `mcp-ext` `config.json`, committing only the template. Channel A needs no credentials at all.
+No. This repository excludes the Bilibili `SESSDATA`, and omni-media excludes its `config.json` (which holds `api_key`), committing only the template. Channel A needs no credentials at all.
 
 <div align="right">
 
