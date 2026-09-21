@@ -288,7 +288,7 @@ def check_copied_skill_is_self_contained():
         shutil.copytree(
             SKILL_ROOT,
             copied,
-            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.egg-info"),
         )
         work = root / "work"
         work.mkdir()
@@ -440,9 +440,20 @@ def check_dead_modules_removed():
     ):
         assert not (SKILL_ROOT / rel).exists(), f"{rel} 应已删除"
 
-    # 物理构建残留防呆断言
+    # 物理构建与安装元数据防呆断言：
+    # build/ 为物理编译构建目录，不得滞留；
+    # video2book.egg-info/ 可由 `pip install -e .` 本地/CI生成，但绝不得纳入 git 仓库追踪。
     assert not (REPO_ROOT / "build").exists(), "仓库根不得滞留 build/ 构建产物目录"
-    assert not (SKILL_ROOT / "video2book.egg-info").exists(), "技能根不得滞留 video2book.egg-info/ 目录"
+    if _HAS_GIT:
+        tracked_egg = run_quiet(
+            ["git", "ls-files", "--", "skills/video2book/video2book.egg-info", "video2book.egg-info"],
+            cwd=str(REPO_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+        )
+        assert not (tracked_egg.stdout or "").strip(), "video2book.egg-info/ 不得纳入 git 仓库追踪"
 
     if not _require_plugin_layout("仓库根的死代码清单"):
         return
