@@ -39,7 +39,7 @@
 
 ### 1.3 转录角色（取音唯一发生处）
 
-1. 取载荷：`python scripts/queue_tracker.py --next-transcribe 2 --json`（载荷含块音频、块内时间表、逐字稿目标路径）。
+1. 取载荷：`python scripts/queue_tracker.py --next-transcribe --json`（默认并发 3 个任务；载荷含块音频、块内时间表、逐字稿目标路径）。
 2. 读块级转录任务书，按其 2.1 节要求**原样**把「纯文本忠实转录」要求传进听音调用；通道选择与调用见
    [`runtime.md`](runtime.md) 第 2 节（有原生音频模态走通道 A，否则走通道 B）。
 3. 把整块正文写入 `subtitles/BLK01_P01-P07_逐字稿.md`。逐字稿**无需标注任何时间戳**，专注保证讲授内容
@@ -77,7 +77,7 @@
 ### 1.6 阶段验收
 
 ```bash
-python scripts/queue_tracker.py --next-transcribe 2 --json        # 转录侧：待转录的块
+python scripts/queue_tracker.py --next-transcribe --json          # 转录侧：待转录的块（默认并发 3 个任务）
 python scripts/queue_tracker.py --next-module 5 --json --log-dispatch  # 写作侧：待写长文的块
 python scripts/queue_tracker.py --summary                        # 单行状态：STAGE1_DONE + 块级进度
 python scripts/queue_tracker.py --pattern "<目录名关键字>"        # 多课程并存时指定工作区

@@ -5,7 +5,7 @@
 Tracks completed vs pending episodes in real time, supporting sliding-window
 continuous dispatch ("完成一个，立即派生一个") without manual offsets.
 
-`--next-module N` / `--next-transcribe N` / `--next-note N`（配合 `--json`）输出的是**可直接转交子智能体的派发载荷**（内含开箱即用的预制派发提示词 `dispatch_prompt`、任务书路径、音频切片清单、
+`--next-module N` / `--next-transcribe [N]`（默认并发 3 任务） / `--next-note N`（配合 `--json`）输出的是**可直接转交子智能体的派发载荷**（内含开箱即用的预制派发提示词 `dispatch_prompt`、任务书路径、音频切片清单、
 目标文件路径、本集 token 预算），并附带派发建议（并发数 / 打包粒度 / 是否必须派发）。
 `--log-dispatch` 可选地把本次建议写入 `<task>/.dispatch_log.jsonl` 作为派发台账。
 """
@@ -618,8 +618,10 @@ def main():
     parser.add_argument("--pattern", "--task", default=None, help="Workspace directory name keyword filter")
     parser.add_argument("--next-module", type=int, default=0, dest="next_module_n",
                         help="写作侧取载荷（块级链路）：只返回「块逐字稿已就绪且模块长文缺失」的块")
-    parser.add_argument("--next-transcribe", type=int, default=0, dest="next_transcribe_n",
-                        help="转录侧取载荷：返回尚未转录的块（含块音频、块内时间表与逐字稿目标路径）")
+    parser.add_argument(
+        "--next-transcribe", type=int, nargs="?", const=3, default=0, dest="next_transcribe_n",
+        help="转录侧取载荷：返回尚未转录的块（默认并发 3 个任务；含块音频、块内时间表与逐字稿目标路径）",
+    )
     parser.add_argument("--next-note", type=int, default=0, dest="next_note_n",
                         help="笔记侧取载荷：返回尚未撰写或不达标的复习笔记（含任务书、目标笔记路径与预制派发提示词）")
     parser.add_argument("--log-dispatch", action="store_true", dest="log_dispatch",

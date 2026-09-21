@@ -29,8 +29,8 @@ metadata:
    与 `legacy`（旧版）；`consulting`/`interview`/`review`/`livestream` 只登记、未提供提示词。
    未指定、拼写不中、命中未提供形态 → **以退出码 4 终止**，不猜、不降级、不硬套。
 5. **阶段一派发纪律**：课程总时长 **≤ 60 分钟** 由主 Agent 串行亲做；**> 60 分钟必须派发**。两类角色分工：
-   **转录角色**（专职，建议 2 个，只做音频转录、**不回传正文**、只回报一行）与 **写作角色**
-   （一个块一篇模块长文，读该块逐字稿成文）。载荷中的 `dispatch_prompt` **必须原样透传**，严禁自编提示词。
+   **转录角色**（专职，通过 `python scripts/queue_tracker.py --next-transcribe` 默认设置并发转录 3 个任务，只做音频转录、**不回传正文**、只回报一行）与 **写作角色**
+   （一个块一篇模块长文，并发 5~6，读该块逐字稿成文）。载荷中的 `dispatch_prompt` **必须原样透传**，严禁自编提示词。
    窗口兜底只对转录角色成立：实算音频 token（时长 × `BVB_AUDIO_TOKENS_PER_SEC`，默认 32）超过窗口 60% 时，
    按返回里的 `next_start_time` / `next_duration_minutes` 续读下一卷。
 
@@ -44,7 +44,7 @@ metadata:
 【第 1 步：风格】向用户确认 --article-type（learning / legacy）
 【第 2 步：准备】python src/cli.py pipeline "<链接或路径>" --all --article-type learning
                  → 收音频 → 装箱成块 → 自动去重 → 导出转录/长文任务书 → 自动回收 + 对账
-【第 3 步：转录】转录角色取载荷：python scripts/queue_tracker.py --next-transcribe 2 --json
+【第 3 步：转录】转录角色取载荷：python scripts/queue_tracker.py --next-transcribe --json（默认并发 3 个任务）
                  按块听音 → 写 subtitles/BLKxx_*_逐字稿.md → 回报一行（不回传正文）
 【第 4 步：写作】主 Agent 取载荷：python scripts/queue_tracker.py --next-module 5 --json
                  一个块一个子智能体（并发 5~6），原样透传 dispatch_prompt
