@@ -292,9 +292,19 @@ def check_copied_skill_is_self_contained():
         )
         work = root / "work"
         work.mkdir()
+        # 剥掉产物根/容器根覆盖：本检查断言的是「无关 cwd 下的**默认**产物语义」。
+        # 带着 `BVB_OUTPUT_DIR` 跑自检（在临时产物根下跑自检的常规做法）时，子进程会**正确地**
+        # 采用那个覆盖值，而 `work/output` 只在默认语义下才成立——不剥就会把一次正常的
+        # 覆盖判成「复制后不自包含」，一条看环境变色的断言。
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in (_paths.ENV_OUTPUT_DIR, _paths.ENV_HOME)
+        }
         result = run_quiet(
             [sys.executable, str(copied / "src" / "cli.py"), "info"],
             cwd=str(work),
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
