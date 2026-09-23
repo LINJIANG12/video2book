@@ -535,8 +535,7 @@ class ArticleIntegrator:
         if volume_count > 1:
             lines.append(f"> **分册说明**：全书按内容分 {volume_count} 册；本册为第 {volume_index} 册  ")
         lines += [
-            "> **整编说明**：正文逐字保留各块模块长文，仅补导读、目录与章间过渡；"
-            "原长文同步保留于 `articles/` 供定向查阅。",
+            "> **整编说明**：正文逐字保留各块模块长文，仅补导读、目录与章间过渡。",
             "",
             "---",
             "",
@@ -572,8 +571,7 @@ class ArticleIntegrator:
             "",
             f"本册主题为「{book_title}」，整编了 {len(volume)} 个模块（{first_span} ~ {last_span}，"
             f"共 {pages} 讲 / {minutes:.0f} 分钟音频）。",
-            "建议配合 `notes/` 目录下的复习笔记复盘；模块长文原文保留在 `articles/`，"
-            "需要查证细节时可直接回到原文。",
+            "建议配合 `notes/` 目录下的复习笔记复盘，需要查证细节时可直接回到本册正文。",
             "",
         ]
         out_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
