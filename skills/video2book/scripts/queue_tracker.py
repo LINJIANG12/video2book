@@ -24,9 +24,16 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.core.console import enable_utf8_console  # noqa: E402
+from src.core.constants import DEFAULT_TRANSCRIBE_WORKERS  # noqa: E402
+from src.prompts import (  # noqa: E402
+    build_article_dispatch_prompt,
+    build_note_dispatch_prompt,
+    build_transcribe_dispatch_prompt,
+)
 
 # 控制台硬化：输出含 `•`/中文，管道捕获时若按 locale(cp936) 编码会崩。
 enable_utf8_console()
+
 
 
 def get_task_workspace(
@@ -359,20 +366,10 @@ def _transcribe_payload(tstatus: Dict, n: int) -> List[Dict]:
         task_file = subtitles_dir / f"BLK{block['block_id']:02d}_{block['span']}_转录任务书.md"
         block_transcript = block["block_transcript"]
         block_id = int(block["block_id"])
-        dispatch_prompt = (
-            f"【执行规范（单任务直达）】：本任务输入与输出路径均已完全指定。直接读取指定输入文件，完成转录并保存到目标路径；无需也不要检索、扫描项目其他文件或仓库代码。\n\n"
-            f"请阅读转录任务书文件：\n"
-            f"`{task_file}`\n"
-            f"调用听音工具转录（**优先 read_media**：它能 output_file 直写落盘、全文 0 Token 进上下文；"
-            f"工具列表里没有 read_media 时才用 read_audio 的 output_mode=\"file\" 取切片自行聆听），"
-            f"严格按照任务书 2.1 节的要求进行纯文本忠实转录（无需时间戳），"
-            f"将完整逐字稿直接写入目标文件：\n"
-            f"`{block_transcript}`\n"
-            f"落盘后仅在最后汇报单行：\n"
-            f"BLK{block_id:02d} | {block_transcript} | 字节数 | 执行者\n"
-            f"（严禁在对话中回传逐字稿正文）"
-        )
+        dispatch_prompt = build_transcribe_dispatch_prompt(str(task_file), block_transcript, block_id)
+
         items.append({
+
             "block_id": block["block_id"],
             "span": block["span"],
             "episodes": block["episodes"],
@@ -452,18 +449,9 @@ def _module_payload(ws: Path, n: int) -> List[Dict]:
             continue
         target = _module_article_path(articles_dir, block)
         task_file = articles_dir / f"{target.name[:-len('_精读长文.md')]}_TASK.md"
-        dispatch_prompt = (
-            f"【执行规范（单任务直达）】：本任务输入与输出路径均已完全指定。直接读取指定输入文件，完成撰写并保存到目标路径；无需也不要检索、扫描项目其他文件或仓库代码。\n\n"
-            f"请阅读模块长文任务书文件：\n"
-            f"`{task_file}`\n"
-            f"以任务书指定的块级逐字稿（`{transcript}`）为唯一事实来源，严格遵循任务书内嵌的撰写规范与 Typora 渲染硬要求"
-            f"（标题严禁手写数字序号，字符画必须进围栏），撰写深度模块精读长文，直接写入目标路径：\n"
-            f"`{target}`\n"
-            f"落盘后仅在最后汇报单行：\n"
-            f"BLK{block_id:02d} | {target} | 字节数 | 执行者\n"
-            f"（严禁在对话中回传长文正文）"
-        )
+        dispatch_prompt = build_article_dispatch_prompt(str(task_file), str(transcript), str(target), block_id)
         items.append({
+
             "block_id": block_id,
             "span": span,
             "title": str(block.get("title") or ""),
@@ -538,19 +526,9 @@ def _note_payload(ws: Path, n: int) -> List[Dict]:
         except Exception:
             pass
 
-        dispatch_prompt = (
-            f"【执行规范（单任务直达）】：本任务输入与输出路径均已完全指定。直接读取指定输入文件，完成撰写并保存到目标路径；无需也不要检索、扫描项目其他文件或仓库代码。\n\n"
-            f"请阅读复习笔记任务书文件：\n"
-            f"`{task_file}`\n"
-            f"逐篇通读任务书指定涵盖的全部模块长文，严格遵循任务书内嵌的专属笔记提示词与排版规范"
-            f"（高密度速查、无序号标题、条目骨架与 Typora 渲染兼容），撰写复习笔记，直接写入目标路径：\n"
-            f"`{target_note}`\n"
-            f"落盘后仅在最后汇报单行：\n"
-            f"笔记{note_id:02d} | {target_note} | 字节数 | 覆盖块: {blocks_str}\n"
-            f"（严禁在对话中回传笔记正文）"
-        )
-
+        dispatch_prompt = build_note_dispatch_prompt(str(task_file), str(target_note), note_id, blocks_str)
         items.append({
+
             "note_id": note_id,
             "title": title,
             "blocks_str": blocks_str,
@@ -595,9 +573,10 @@ def main():
     parser.add_argument("--next-module", type=int, default=0, dest="next_module_n",
                         help="写作侧取载荷（块级链路）：只返回「块逐字稿已就绪且模块长文缺失」的块")
     parser.add_argument(
-        "--next-transcribe", type=int, nargs="?", const=3, default=0, dest="next_transcribe_n",
-        help="转录侧取载荷：返回尚未转录的块（默认并发 3 个任务；含块音频、块内时间表与逐字稿目标路径）",
+        "--next-transcribe", type=int, nargs="?", const=DEFAULT_TRANSCRIBE_WORKERS, default=0, dest="next_transcribe_n",
+        help=f"转录侧取载荷：返回尚未转录的块（默认并发 {DEFAULT_TRANSCRIBE_WORKERS} 个任务；含块音频、块内时间表与逐字稿目标路径）",
     )
+
     parser.add_argument("--next-note", type=int, default=0, dest="next_note_n",
                         help="笔记侧取载荷：返回尚未撰写或不达标的复习笔记（含任务书、目标笔记路径与预制派发提示词）")
     parser.add_argument("--log-dispatch", action="store_true", dest="log_dispatch",

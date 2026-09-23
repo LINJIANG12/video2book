@@ -47,3 +47,5 @@
 - 硬约束：Python 3.10+；子进程统一走 `src/core/proc.py::run_quiet` 且必须带 `timeout=`；脚本入口调用 `src/core/console.py::enable_utf8_console()`
 - 技能正文只描述**行动语义**（"读文件""写盘""让宿主的子智能体去做"），
   **不得写死某个平台的私有工具名**；平台差异统一放在 `references/host-tools/` 下
+- 跨多文件修改纪律：涉及多个文件时，直接在系统临时目录（`%TEMP%`）编写一次性 Python 脚本批量替换，验证通过后立即删除临时脚本，严禁逐文件逐处微调
+

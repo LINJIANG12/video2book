@@ -13,8 +13,8 @@
 | 检索文件内容 / 按名找文件 | `Grep`、`Glob` |
 | 取网页 | `WebFetch` |
 | 待办清单 | `TodoWrite` |
-| 派发子智能体 | `Task`（子智能体为独立上下文） |
-| 听音转录 | 优先用 MCP 工具 `read_media`（外部代读，支持 `output_file` 直写落盘）；无 ext 时用 `read_audio` 取切片 → 用 `Read` 打开切片路径聆听 |
+| 听音转录 | 通道与参数基线见 [`README.md`](README.md#两条通道是-mcp-工具名跨平台一致)（优先 `read_media` 直写；无 ext 时用 `read_audio` 取切片 → 用 `Read` 聆听） |
+
 
 ## 安装
 

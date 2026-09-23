@@ -84,6 +84,7 @@ def check_imports():
     for mod in (
         "src.cli",
         "src.prompts",
+        "src.core.constants",
         "src.core.console",
         "src.core.fsutil",
         "src.core.paths",
@@ -1038,8 +1039,87 @@ def check_layering():
         "\n      ".join(rel_hits)
 
 
+def fix_all(target_version=None):
+    """自动修复常见一致性问题：版本号跨 5 处同步、确保产物根健全等。"""
+    import json
+    import re as _re
+
+    # 1. 确定基准版本号
+    skill_path = SKILL_ROOT / "SKILL.md"
+    skill_text = skill_path.read_text(encoding="utf-8")
+    if not target_version:
+        m = _re.search(r"^\s*version:\s*([^\s]+)\s*$", skill_text, _re.M)
+        if not m:
+            print("[FAIL] 无法从 SKILL.md 提取基准版本号", file=sys.stderr)
+            return False
+        target_version = m.group(1).strip()
+
+    print(f"[*] 执行 --fix 自动修复，目标版本号: {target_version}")
+
+    # 2. 同步 SKILL.md
+    new_skill = _re.sub(r"(^\s*version:\s*)([^\s]+)(\s*$)", rf"\g<1>{target_version}\g<3>", skill_text, flags=_re.M)
+    if new_skill != skill_text:
+        skill_path.write_text(new_skill, encoding="utf-8")
+        print(f"    - [FIX] 已同步 SKILL.md -> {target_version}")
+
+    # 3. 同步 src/__init__.py
+    init_path = SKILL_ROOT / "src" / "__init__.py"
+    if init_path.is_file():
+        init_text = init_path.read_text(encoding="utf-8")
+        new_init = _re.sub(r'__version__\s*=\s*"[^"]+"', f'__version__ = "{target_version}"', init_text)
+        if new_init != init_text:
+            init_path.write_text(new_init, encoding="utf-8")
+            print(f"    - [FIX] 已同步 src/__init__.py -> {target_version}")
+
+    # 4. 同步 pyproject.toml（若在插件/仓库布局下）
+    if PLUGIN_LAYOUT:
+        pyproject_path = REPO_ROOT / "pyproject.toml"
+        if pyproject_path.is_file():
+            proj_text = pyproject_path.read_text(encoding="utf-8")
+            new_proj = _re.sub(r'(^version\s*=\s*")[^"]+(")', rf'\g<1>{target_version}\g<2>', proj_text, flags=_re.M)
+            if new_proj != proj_text:
+                pyproject_path.write_text(new_proj, encoding="utf-8")
+                print(f"    - [FIX] 已同步 pyproject.toml -> {target_version}")
+
+        # 5. 同步 .codex-plugin/plugin.json & .claude-plugin/plugin.json
+        for rel in (".codex-plugin/plugin.json", ".claude-plugin/plugin.json"):
+            p = REPO_ROOT / rel
+            if p.is_file():
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                    if str(data.get("version", "")) != target_version:
+                        data["version"] = target_version
+                        p.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                        print(f"    - [FIX] 已同步 {rel} -> {target_version}")
+                except Exception as err:
+                    print(f"    [!] 同步 {rel} 失败: {err}")
+
+    # 6. 确保产物根存在
+    if not PRODUCTS_ROOT.is_dir():
+        try:
+            PRODUCTS_ROOT.mkdir(parents=True, exist_ok=True)
+            print(f"    - [FIX] 已自动创建产物根: {PRODUCTS_ROOT}")
+        except OSError as err:
+            print(f"    [!] 创建产物根失败: {err}")
+
+    print("[*] 自动修复完成，继续运行检查...\n")
+    return True
+
+
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="video2book 技能结构门禁自检与自动修复")
+    parser.add_argument(
+        "--fix", nargs="?", const="", default=None,
+        help="自动修复可修复项（版本号跨 5 处同步；可指定目标版本号，缺省以 SKILL.md 为基准）",
+    )
+    args, _ = parser.parse_known_args()
+    if args.fix is not None:
+        target_ver = args.fix.strip() or None
+        fix_all(target_ver)
+
     print("=" * 62)
+
     print("video2book 技能自检（技能自包含 + 多宿主声明 + 三域分离）")
     print(f"  技能根  : {SKILL_ROOT}   ← 安装单元（SKILL.md + references/ + src/ + scripts/）")
     if PLUGIN_LAYOUT:

@@ -14,7 +14,8 @@
 | 待办清单 | `todowrite` |
 | 派发子智能体 | `task` 工具，`subagent_type: "general"`（代码库探索可用 `"explore"`） |
 | 调用技能 | OpenCode 原生 `skill` 工具 |
-| 听音转录 | 优先用 MCP 工具 `read_media`（外部代读，支持 `output_file` 直写落盘）；<br>无 ext 时用 `read_audio` 取切片，再用上表的 `read` 打开切片路径聆听 |
+| 听音转录 | 通道与参数基线见 [`README.md`](README.md#两条通道是-mcp-工具名跨平台一致)（优先 `read_media` 直写；无 ext 时用 `read_audio` 取切片，再用上表的 `read` 聆听） |
+
 
 ## 安装
 

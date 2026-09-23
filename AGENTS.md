@@ -14,3 +14,5 @@
 - 运行前置：Python 3.10+、系统 `ffmpeg`、以及配套仓库 [`omni-media`](https://github.com/LINJIANG12/omni-media) 提供的 `read_audio` 或 `read_media` 听音通道之一（B 站课程有中文字幕时可由字幕链路替代）
 - 自检：`cd skills/video2book && python scripts/selfcheck.py`
 - 容器根 `.git` 是 Codex 工作区标记，只允许保持为空；技能自检会拒绝含提交或 tracked 文件的根仓库。
+- 跨多文件修改纪律：涉及多个文件时，直接在系统临时目录（`%TEMP%`）编写一次性脚本批量替换，验证通过后立即删除临时脚本，严禁逐文件逐处微调。
+

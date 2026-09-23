@@ -392,3 +392,71 @@ def resolve_article_prompt(type_key: str) -> Dict[str, str]:
             key,
         )
     return {"key": key, "label": str(meta["label"]), "prompt": str(meta["prompt"])}
+
+
+# ==============================================================================
+# 阶段一与阶段二子智能体派发提示词生成器（统一单一事实源 SSOT）
+# ==============================================================================
+
+def build_transcribe_dispatch_prompt(
+    task_file: str,
+    block_transcript: str,
+    block_id: int,
+) -> str:
+    """阶段一转录子智能体派发提示词（SSOT）。"""
+    return (
+        f"【执行规范（单任务直达）】：本任务输入与输出路径均已完全指定。直接读取指定输入文件，完成转录并保存到目标路径；无需也不要检索、扫描项目其他文件或仓库代码。\n\n"
+        f"请阅读转录任务书文件：\n"
+        f"`{task_file}`\n"
+        f"调用听音工具转录（**优先 read_media**：它能 output_file 直写落盘、全文 0 Token 进上下文；"
+        f"工具列表里没有 read_media 时才用 read_audio 的 output_mode=\"file\" 取切片自行聆听），"
+        f"严格按照任务书 2.1 节的要求进行纯文本忠实转录（无需时间戳），"
+        f"将完整逐字稿直接写入目标文件：\n"
+        f"`{block_transcript}`\n"
+        f"落盘后仅在最后汇报单行：\n"
+        f"BLK{block_id:02d} | {block_transcript} | 字节数 | 执行者\n"
+        f"（严禁在对话中回传逐字稿正文）"
+    )
+
+
+def build_article_dispatch_prompt(
+    task_file: str,
+    transcript: str,
+    target_article: str,
+    block_id: int,
+) -> str:
+    """阶段一模块长文写作子智能体派发提示词（SSOT）。"""
+    return (
+        f"【执行规范（单任务直达）】：本任务输入与输出路径均已完全指定。直接读取指定输入文件，完成撰写并保存到目标路径；无需也不要检索、扫描项目其他文件或仓库代码。\n\n"
+        f"请阅读模块长文任务书文件：\n"
+        f"`{task_file}`\n"
+        f"以任务书指定的块级逐字稿（`{transcript}`）为唯一事实来源，严格遵循任务书内嵌的撰写规范与 Typora 渲染硬要求"
+        f"（标题严禁手写数字序号，字符画必须进围栏），撰写深度模块精读长文，直接写入目标路径：\n"
+        f"`{target_article}`\n"
+        f"落盘后仅在最后汇报单行：\n"
+        f"BLK{block_id:02d} | {target_article} | 字节数 | 执行者\n"
+        f"（严禁在对话中回传长文正文）"
+    )
+
+
+def build_note_dispatch_prompt(
+    task_file: str,
+    target_note: str,
+    note_id: int,
+    blocks_str: str = "",
+) -> str:
+    """阶段二复习笔记子智能体派发提示词（SSOT）。"""
+    report_suffix = f"覆盖块: {blocks_str}" if blocks_str else "执行者"
+    return (
+        f"【执行规范（单任务直达）】：本任务输入与输出路径均已完全指定。直接读取指定输入文件，完成撰写并保存到目标路径；无需也不要检索、扫描项目其他文件或仓库代码。\n\n"
+        f"请阅读复习笔记任务书文件：\n"
+        f"`{task_file}`\n"
+        f"逐篇通读任务书指定涵盖的全部模块长文，严格遵循任务书内嵌的专属笔记提示词与排版规范"
+        f"（高密度速查、无序号标题、条目骨架与 Typora 渲染兼容），撰写复习笔记，直接写入目标路径：\n"
+        f"`{target_note}`\n"
+        f"落盘后仅在最后汇报单行：\n"
+        f"笔记{note_id:02d} | {target_note} | 字节数 | {report_suffix}\n"
+        f"（严禁在对话中回传笔记正文）"
+    )
+
+

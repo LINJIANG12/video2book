@@ -37,8 +37,8 @@ multi_agent = true
 | 执行 shell / CLI 命令 | shell 执行工具 |
 | 检索文件内容 / 按名找文件 | 搜索工具 |
 | 派发子智能体 | `spawn_agent`（开启 `multi_agent` 后）+ `wait_agent` 等待 |
-| 等待 / 回收子智能体 | `wait_agent`（事件订阅式，不是轮询；`timeout_ms` 建议 300000–600000） |
-| 听音转录 | 优先用 MCP 工具 `read_media`（外部代读，支持 `output_file` 直写落盘）；无 ext 时用 `read_audio` 取切片 → 用"读文件"能力聆听 |
+| 听音转录 | 通道与参数基线见 [`README.md`](README.md#两条通道是-mcp-工具名跨平台一致)（优先 `read_media` 直写；无 ext 时用 `read_audio` 取切片 → 用文件查看工具聆听） |
+
 
 ## 安装
 

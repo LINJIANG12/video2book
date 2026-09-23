@@ -13,8 +13,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from src.core.constants import DEFAULT_TRANSCRIBE_WORKERS
 from src.core.workspace import TaskWorkspace, module_article_path, module_article_stem, module_task_path
 from src.prompts import resolve_article_prompt
+
 
 TRANSCRIBE_INSTRUCTION = (
     "请忠实转录音频全文为纯文本逐字稿：\n"
@@ -72,8 +74,9 @@ def export_block_transcribe_task(
         f"# BLK{block_id:02d} {span} 块级转录任务书（TRANSCRIBE_TASK）\n\n"
         f"> 📌 **执行指引（直接执行，无需探索）**：本任务输入与输出路径均已在第 1 节完全指定。直接读取指定输入文件，完成转录并保存到目标路径；无需也不要检索、扫描项目其他文件或仓库代码。\n"
         f"> 状态：need-agent-transcript | **只做转录这一件事**，不要写长文\n"
-        f"> 执行者：由**专职转录子智能体**承担（建议 3 个角色各领一部分块队列、连续消费）\n"
+        f"> 执行者：由**专职转录子智能体**承担（建议 {DEFAULT_TRANSCRIBE_WORKERS} 个角色各领一部分块队列、连续消费）\n"
         f"> 完成后只回报一行 `BLK{block_id:02d} | 逐字稿路径 | 字节数 | 执行者`，**不回传正文**\n"
+
         + (f"> 块标题（语义组合）：{block_title}\n" if block_title else "")
         + f"> 块时长 {duration_min:.1f} 分钟 / 覆盖 {len(pages)} 集；块内时间表见第 1 节\n\n"
         f"## 1. 任务输入\n\n"
