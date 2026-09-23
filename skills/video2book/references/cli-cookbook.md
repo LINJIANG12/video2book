@@ -48,7 +48,7 @@ video2book pipeline "https://www.bilibili.com/video/BV14VqVBrEhc" --page 1 --art
 video2book pipeline "https://www.bilibili.com/video/BV14VqVBrEhc" --range 2-5 --article-type learning
 ```
 
-## 场景三：只解析拓扑 / 只收音频（轻量入口）
+## 场景三：只解析拓扑 / 只收音频 / 字幕转逐字稿（轻量入口）
 
 ```bash
 # 只解析拓扑并列出将处理的分集，不下载音频、不写任务书（原 `parse` 子命令）
@@ -56,10 +56,19 @@ video2book pipeline "https://www.bilibili.com/video/BV14VqVBrEhc" --all --dry-ru
 
 # 只收齐音频并装箱、导出块级转录任务书后返回（原 `audio` 子命令）
 video2book pipeline "https://www.bilibili.com/video/BV14VqVBrEhc" --all --audio-only
+
+# 可选：用 B 站中文字幕直接生成块级逐字稿，替代听音转录（需先 login --sessdata）
+video2book fetch-subtitles "<产物根>/<课程工作区>"
+video2book fetch-subtitles "<产物根>/<课程工作区>" --force   # 覆盖已有逐字稿
 ```
 
 > 去重由 `pipeline` 在音频收齐后**自动执行**（相同分集按 SHA-256 指纹复用既有语料与长文，0 Token），
 > 不再有独立的 `dedup` 命令。
+
+> **字幕转逐字稿（可选）**：只取**中文字幕**——人工上传的 CC 字幕优先，AI 自动字幕兜底；
+> 一个块里只要有任一集没有中文字幕，该块**整块跳过**（不产出半份逐字稿），留给听音转录兜底。
+> 产出的逐字稿抬头会注明「来源为 B 站字幕、非听音转录，质量可能有差距」。
+> 需登录态（`login --sessdata`）；字幕为平台生成/上传，识别与断句质量不一，据此成文时对存疑处保持谨慎。
 
 ## 场景四：重新装箱 / 改动块标题
 
@@ -159,6 +168,7 @@ python src/cli.py sync                 # 以磁盘产物为唯一真相回填 ma
 | :--- | :--- |
 | `pipeline` | 阶段一唯一入口：`--dry-run` 只解析 / `--audio-only` 只取音装箱 / 默认跑完整链路并自动收尾 |
 | `merge-audio` | 单独重跑装箱合并（幂等，可改块标题） |
+| `fetch-subtitles` | 可选：用 B 站中文字幕直接生成块级逐字稿（人工字幕优先；缺中文字幕的块整块跳过） |
 | `cluster-notes` | 块 → 笔记归并，导出笔记任务书（收尾自动 cleanup + sync） |
 | `cluster-articles` | 按块序把模块长文整编成册（册=书、章=块；收尾自动 cleanup + sync） |
 | `check` | 质量门禁：`--stage1` 依据级校验 / `--deliver` 交付前体检 / `--fix-numbering` 存量标题去号 |
@@ -174,6 +184,7 @@ python src/cli.py sync                 # 以磁盘产物为唯一真相回填 ma
 | :--- | :--- | :--- |
 | `pipeline` | `--all` `--range X-Y` `--page N` `--quality <档>` `--prefetch-workers N` `--skip-failed` `--block-minutes N` `--force` `--article-type <风格>` `--dry-run` `--audio-only` `--task NAME` `--base-dir DIR` | 阶段一主入口；`--skip-failed` 把音频失败集记入跳过名单继续跑；`--block-minutes` 是**块时长目标**（默认取 `BVB_AUDIO_BLOCK_MINUTES`，再默认 50，落进 40–60 带；硬上限看 `BVB_AUDIO_ONESHOT_LIMIT_MINUTES`）；`--force` 重派已完成块 |
 | `merge-audio` | `<工作区目录>` `--block-minutes N` `--force` | 单独重跑音频装箱合并并重出块级转录任务书（幂等；改完 `block_titles.json` 后重跑即按新标题改名） |
+| `fetch-subtitles` | `<工作区目录>` `--force` `--sessdata` | 可选：字幕转块级逐字稿（替代听音转录）；只取中文字幕、人工优先，缺中文字幕的块整块跳过；`--force` 覆盖已有逐字稿 |
 | `cluster-notes` | `--force` `--block-id N` `--start-block N` `--end-block N` | 块 → 笔记归并派发；后三个按**笔记序号**只处理指定区间（参数名是历史遗留）；`--force` 强制重导笔记任务书 |
 | `cluster-articles` | `--force` | 默认复用已有教材，`--force` 按最新章节重编 |
 | `check` | `--stage1` `--deliver` `--fix-numbering` `--strict` `--dir` `--task` `--base-dir` `--json` `--min-freq N`(2) `--min-coverage F`(0.5) `--max-truncated N`(4) `--require-structure` `--require-lang` `--require-no-numbering` `--only {textbooks,articles,both}` `--dry-run` `--max-samples N`(5) `--hash-nonheading` | `--stage1` 依据级校验（块级逐字稿技术实体在模块长文里的覆盖率）；`--deliver`（默认）笔记成色 + 渲染合规；`--fix-numbering` 存量标题去号；默认提示级，`--strict` 才纳入门禁 |

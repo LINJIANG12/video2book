@@ -100,7 +100,7 @@ def check_imports():
 # 收敛后的 CLI 唯一入口面（`check_cli_help` / `check_cli_surface_consolidated` / 文档全表共用）。
 # `parse` / `audio` / `dedup` / `split-transcript` 已分别并入 pipeline 与 check，不许回加。
 CLI_SUBCOMMANDS = (
-    "pipeline", "merge-audio", "cluster-notes", "cluster-articles",
+    "pipeline", "merge-audio", "fetch-subtitles", "cluster-notes", "cluster-articles",
     "check", "cleanup", "sync", "login", "logout", "info",
 )
 

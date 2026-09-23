@@ -65,7 +65,7 @@ metadata:
 > （想换标题：改 `audio/_blocks/block_titles.json` 后重跑 `merge-audio`，幂等改名）。
 > 长文按块写、教材按块序整编、笔记按块归并——整条链路的下游都以块为粒度。
 
-## 3. 命令入口（10 个子命令）
+## 3. 命令入口（11 个子命令）
 
 所有任务经标准入口调用（`python src/cli.py <子命令>` / `python scripts/run.py <子命令>` /
 `pip install -e .` 后的 `video2book <子命令>`，三者等价）：
@@ -74,6 +74,7 @@ metadata:
 | :--- | :--- |
 | `pipeline` | **阶段一唯一入口**：`--dry-run` 只解析拓扑；`--audio-only` 只收音频并装箱；不加则跑完整链路 |
 | `merge-audio` | 单独重跑装箱合并（幂等；改 `block_titles.json` 后重跑即按新标题改名） |
+| `fetch-subtitles` | 可选：用 B 站中文字幕直接生成块级逐字稿（人工字幕优先；缺中文字幕的块跳过） |
 | `cluster-notes` | 块 → 笔记归并，导出笔记任务书（收尾自动 cleanup + sync） |
 | `cluster-articles` | 按块序把模块长文整编成册（收尾自动 cleanup + sync） |
 | `check` | 质量门禁：`--stage1` 依据级校验 / `--deliver` 交付前体检 / `--fix-numbering` 存量标题去号 |

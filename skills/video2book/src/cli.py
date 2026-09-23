@@ -231,6 +231,100 @@ def cmd_merge_audio(args):
     print("[i] 下一步：转录角色照任务书用 read_media 出块级逐字稿；写作角色读它写模块长文（一个块一篇）")
 
 
+def cmd_fetch_subtitles(args):
+    """可选链路：用 B 站中文字幕直接生成块级逐字稿（替代听音转录）。
+
+    只取中文字幕、人工字幕优先于 AI；任一成员分集缺中文字幕的块**整块跳过**，留给听音转录
+    兜底（绝不静默漏内容）。已有逐字稿的块默认跳过，`--force` 覆盖。
+    """
+    from src.core import subtitles as subtitle_core
+    from src.core.audio_merger import AudioMerger
+    from src.core.transcript_splitter import TranscriptSplitter
+
+    ws = _workspace_from_path(args.workspace)
+    blocks = AudioMerger.load_blocks(ws)
+    if not blocks:
+        print("[✗] 没有块清单（先跑 pipeline --audio-only 或 merge-audio 装箱）", file=sys.stderr)
+        sys.exit(2)
+    if not args.sessdata:
+        print("[✗] B 站字幕清单需要登录态：先 `python src/cli.py login --sessdata \"<SESSDATA>\"`",
+              file=sys.stderr)
+        sys.exit(2)
+
+    parts_by_page = {}
+    for part in ws.load_parts() or []:
+        page = part.get("page")
+        if page is not None:
+            parts_by_page[int(page)] = part
+    课程bvid = subtitle_core.resolve_course_bvid(list(parts_by_page.values()))
+    if not 课程bvid:
+        print("[✗] 这批分集没有 B 站稿件号（本地课程？）——字幕链路只适用于 B 站课程", file=sys.stderr)
+        sys.exit(2)
+
+    print("=" * 65)
+    print(f"[*] B 站字幕 → 块级逐字稿：{ws.root_dir.name}")
+    print("=" * 65)
+
+    缓存: dict = {}
+
+    def _取字幕(page: int):
+        if page in 缓存:
+            return 缓存[page]
+        条目 = parts_by_page.get(page) or {}
+        bvid = str(条目.get("bvid") or "").strip() or 课程bvid
+        cid = 条目.get("cid")
+        字幕 = None
+        if bvid and cid is not None:
+            字幕 = subtitle_core.fetch_episode_subtitle(
+                bvid, int(cid), sessdata=args.sessdata
+            )
+        if 字幕 is not None:
+            try:
+                时长 = float(条目.get("duration") or 0.0)
+            except (TypeError, ValueError):
+                时长 = 0.0
+            覆盖 = subtitle_core.subtitle_coverage(字幕.get("cues"), 时长)
+            if 覆盖 < subtitle_core.SUBTITLE_COVERAGE_MIN:
+                print(f"    [!] P{page:02d} 字幕覆盖不足（末条 {覆盖 * 时长:.0f}s / "
+                      f"时长 {时长:.0f}s = {覆盖:.0%}）→ 视为不可用")
+                字幕 = None
+        缓存[page] = 字幕
+        return 缓存[page]
+
+    已写: list = []
+    已跳过: list = []
+    缺字幕: list = []
+    for block in blocks:
+        block_id = int(block.get("block_id") or 0)
+        目标 = TranscriptSplitter.block_path(ws, block)
+        if 目标.exists() and 目标.stat().st_size > 0 and not args.force:
+            已跳过.append(block_id)
+            print(f"    [=] BLK{block_id:02d} 已有逐字稿，跳过（--force 覆盖）")
+            continue
+        字幕表 = {
+            int(段.get("page") or 0): _取字幕(int(段.get("page") or 0))
+            for 段 in (block.get("segments") or [])
+        }
+        结果 = subtitle_core.assemble_block_transcript(block, 字幕表)
+        if not 结果["ok"]:
+            缺字幕.append((block_id, 结果["missing_pages"]))
+            print(f"    [!] BLK{block_id:02d} 缺中文字幕的分集 {结果['missing_pages']} → 整块留给听音转录")
+            continue
+        路径 = TranscriptSplitter.write_block_transcript(ws, block, 结果["text"])
+        已写.append(block_id)
+        print(f"    [✓] BLK{block_id:02d} {AudioMerger.block_span(block)}：{结果['kind_label']}"
+              f"，{路径.name}（{len(结果['text'].encode('utf-8'))} 字节）")
+
+    print("-" * 65)
+    print(f"[✓] 字幕逐字稿 {len(已写)} 块；跳过（已有）{len(已跳过)} 块；缺中文字幕 {len(缺字幕)} 块")
+    for block_id, pages in 缺字幕:
+        print(f"    BLK{block_id:02d}：缺 {'、'.join(f'P{p:02d}' for p in pages)}")
+    if 缺字幕:
+        print("[i] 上述块请照 subtitles/BLK*_转录任务书.md 用听音通道补转录")
+    if 已写:
+        print("[i] 逐字稿抬头已注明来源为 B 站字幕（非听音转录），写作角色可直接据其成文")
+
+
 def cmd_cluster_notes(args):
     info = resolve_target_info(
         args.url,
@@ -763,6 +857,15 @@ def main():
     )
     p_merge.add_argument("--force", action="store_true", help="Rebuild blocks even if the manifest signature matches")
 
+    # fetch-subtitles：可选链路，用 B 站中文字幕直接生成块级逐字稿（替代听音转录）
+    p_sub = subparsers.add_parser(
+        "fetch-subtitles",
+        help="Optional: build block transcripts from Bilibili Chinese subtitles (instead of audio transcription)",
+    )
+    p_sub.add_argument("workspace", help="Path to an existing course workspace (contains parts.json and audio/_blocks/blocks.json)")
+    p_sub.add_argument("--force", action="store_true", help="Overwrite existing block transcripts")
+    p_sub.add_argument("--sessdata", help="Optional SESSDATA cookie (Bilibili subtitle list requires login)", default=None)
+
     # check：交付质量门禁统一入口（阶段一放行 / 交付前体检 / 存量标题去号）
     p_check = subparsers.add_parser(
         "check",
@@ -895,6 +998,7 @@ def main():
     dispatch = {
         "pipeline": cmd_pipeline,
         "merge-audio": cmd_merge_audio,
+        "fetch-subtitles": cmd_fetch_subtitles,
         "cluster-notes": cmd_cluster_notes,
         "cluster-articles": cmd_cluster_articles,
         "check": cmd_check,

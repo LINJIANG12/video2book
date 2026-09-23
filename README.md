@@ -287,7 +287,7 @@ skill/
 ├── skills/video2book/          # 技能本体，安装时只需这一个目录
 │   ├── SKILL.md                # 技能契约，Agent 的唯一事实源
 │   ├── src/                    # 工具链
-│   │   ├── cli.py              # 入口：10 个子命令
+│   │   ├── cli.py              # 入口：11 个子命令
 │   │   ├── core/               # 路径、音频预算、流水线、抓取、交付物质检
 │   │   │   └── ingestion/      # 多平台统一媒体内核（B 站 / 本地 / YouTube / 抖音）
 │   │   └── generator/          # 任务书、提示词模板与语义聚合
@@ -328,7 +328,7 @@ python src/cli.py cluster-notes "<链接或本地路径>"          # 块 → 笔
 python src/cli.py check --deliver --strict                 # 交付前体检（笔记成色 + 渲染合规）
 ```
 
-**10 个子命令的完整清单、每个开关的用途、全部参数、逐场景示例与退出码（0–4）** 集中在
+**11 个子命令的完整清单、每个开关的用途、全部参数、逐场景示例与退出码（0–4）** 集中在
 [CLI 场景手册](skills/video2book/references/cli-cookbook.md)——那是 CLI 细节的单一真源，本文不再重复维护。
 
 <div align="right">
