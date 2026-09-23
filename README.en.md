@@ -63,7 +63,7 @@ The hard part of a long course is that you cannot finish listening to it, let al
 
 Output comes in three tracks, each in its own directory and usable on its own: per-episode articles, compiled modular textbooks, and cross-module review notes. Every deliverable passes a machine gate before delivery — filler prose, hollow headings and per-episode flat headings get caught by scripts rather than by you while reading.
 
-The only thing you must provide is a listening channel, delivered by the companion repository [omni-media][link-omni-media]: use its `read_audio` (zero credentials) when the host has a native audio modality, or its `read_media` (delegated to an external model) when the host is text-only — both are channels of the same package. This channel is a required part of the workflow; without it Stage 1 cannot obtain audio facts and the pipeline stops to ask you to mount one. Once installed, one command runs an entire course.
+Block transcripts have two legitimate sources — audio transcription or Bilibili Chinese subtitles; blocks without subtitles fall back to listening. When listening is needed, the only thing you must provide is a listening channel, delivered by the companion repository [omni-media][link-omni-media]: use its `read_audio` (zero credentials) when the host has a native audio modality, or its `read_media` (delegated to an external model) when the host is text-only — both are channels of the same package. This channel is a required part of the workflow; without it Stage 1 cannot obtain audio facts and the pipeline stops to ask you to mount one. Once installed, one command runs an entire course.
 
 <div align="right">
 
@@ -80,26 +80,34 @@ output/<course_workspace>/
 ├── articles/      模块XX_<block title>_精读长文.md  # module article (one per block)
 ├── textbooks/     模块01_<topic>_精读全书.md   # textbook (volume = book, chapter = block; named by content)
 ├── notes/         笔记XX_<theme>_笔记.md       # cross-module review note
+├── subtitles/     BLKxx_*_逐字稿.md           # block transcript (sole source of truth)
 ├── audio/         PXX_*.m4a                  # 16 kHz mono audio slices
 ├── parts.json                               # episode topology (Stage 2 numbering basis)
 └── manifest.json                            # ledger (rebuildable from disk via sync)
 ```
 
-A review note opens with a knowledge topology tree — first line carries the theme and episode range, and leaf annotations align in one column (excerpt from a real artifact):
+A review note opens directly with an H1 heading for the theme, and concept blocks adopt a high-density, multi-level indented skeleton (excerpt from a real artifact):
 
-```text
-Python 入门路线、开发环境搭建与基础语法体系（P01-P13）
-├── AI 时代的 Python 学习路线与职业前景 (P01)
-│   ├── AI 岗位爆发与政策依据 ────         纵览
-│   └── 六阶段课程主线与四块实战方向 ────   纵览
-└── Python 语言本体：出身、定位与应用领域 (P02)
-    ├── 作者、发布年份与名字由来 ────       纵览
-    └── 人类语言与编程语言的对比 ────       纵览
+```markdown
+# 计算机网络体系结构与物理层
+
+## 网络体系结构与分层模型
+
+### 协议与分层体系
+
+* **计算机网络协议（Network Protocol）**
+    * > **定义**：为进行网络中的数据交换而建立的规则、标准或约定的集合。
+    * 三要素：语法（数据与控制信息的结构形式）、语义（发出何种控制信息、完成何种动作与做出何种响应）、同步（事件实现顺序的详细说明）。
+    * 职能范围：控制网络中各层实体之间的通信交互与差错控制。
+
+* **开放系统互连参考模型（Open Systems Interconnection，OSI/RM）**
+    * > **定义**：由 ISO 制定的七层国际标准化网络体系结构模型。
+    * 层级划分：物理层 → 数据链路层 → 网络层 → 传输层 → 会话层 → 表示层 → 应用层。
 ```
 
 The default reading environment for all three tracks is Typora, with VS Code Markmap, XMind import and plain-text viewing also supported. Inline math requires "Inline Math" to be enabled under Typora's Preferences → Markdown, otherwise `$…$` renders as raw source.
 
-**Real artifacts**: the companion repository [video2book-courses][link-courses] archives the complete output of four courses (Zhejiang University Software Engineering, Database System Concepts, two Full-stack AI courses) run through the full pipeline — 385 per-episode articles, 57 modular textbooks, 19 review notes and 311 transcripts. Read there first if you want to judge the output quality before installing.
+**Real artifacts**: the companion repository [video2book-courses][link-courses] archives the complete deliverables of running the full pipeline across dozens of courses (including modular articles, textbooks, review notes and transcripts; see the repository's latest index). Read there first if you want to judge the output quality before installing.
 
 <div align="right">
 
@@ -130,7 +138,7 @@ cp -r skills/video2book ~/.config/opencode/skills/   # OpenCode
 # 2) Optional: install the CLI (then `video2book` replaces `python src/cli.py`)
 pip install -e .
 
-# 3) Listening channel (required): both services live in the omni-media repo
+# 3) Listening channel (required, can be substituted by subtitles on Bilibili): both services live in the omni-media repo
 cd .. && git clone https://github.com/LINJIANG12/omni-media.git
 
 #    Channel A: host has a native audio modality (read_audio in its tool list), zero credentials
@@ -191,7 +199,7 @@ flowchart TD
 ```
 
 - **Audio is read only by the transcriber roles, and block by block**: audio is packed into 40–60 minute blocks along episode boundaries (`audio/_blocks/`, target configurable, 50 min by default; oversized episodes are split into upper/lower halves). Each block is titled by semantically combining its episodes' names and transcribed in one pass into high-fidelity pure text; writer roles read the block transcript only and never touch audio.
-- **Dispatch thresholds live in `src/core/budget.py`**: under 60 minutes total the main agent handles work serially; over 60 minutes it must dispatch — two transcriber roles consuming the block queue, plus writer roles (one sub-agent per block, one module article per block). The window fallback applies only to transcriber roles on Channel A: a block whose computed audio tokens exceed 60% of the context window must be read in continuation chunks.
+- **Dispatch thresholds live in `src/core/budget.py`**: under 60 minutes total the main agent handles work serially; over 60 minutes it must dispatch — three transcriber roles consuming the block queue, plus writer roles (one sub-agent per block, one module article per block). The window fallback applies only to transcriber roles on Channel A: a block whose computed audio tokens exceed 60% of the context window must be read in continuation chunks.
 - **Module level needs no plan, and note merging never stalls**: a block *is* the knowledge module (audio is packed into 40–60 minute blocks, each block titled by semantically combining its episodes' names), so textbooks simply compile block articles in block order; notes merge blocks into a number of notes (`note_plan.json`, one note may span several blocks). Unknown or duplicate block claims are rescued in place (first-come-wins, orphan blocks get fallback notes), the command always exits normally, and the on-disk `note_plan.json` is never overwritten by fallback results.
 - **Stage 1 and Stage 2 are decoupled by content boundaries**, so a long course can resume from a breakpoint.
 - **The tool layer only prepares task files, dispatch payloads and gates**; writing the articles and notes is done by the host agent (usually sub-agents). "Who wrote it" and "did it really listen" are discipline clauses the tool layer cannot verify.
@@ -234,7 +242,7 @@ Five note-quality checks are fatal and fail the delivery outright: **boilerplate
 - **Python** — 3.10 or later, from `requires-python` in `pyproject.toml`
 - **Python dependencies** — `yt-dlp >= 2024.0.0`, `requests >= 2.28.0`, see `pyproject.toml`
 - **External program** — `ffmpeg`, on `PATH`, a hard prerequisite for audio extraction and slicing; `ffprobe` is optional (falls back to `ffmpeg -i` for duration parsing)
-- **Listening channel** — either `read_audio` or `read_media`, provided by the companion repository [omni-media][link-omni-media]
+- **Listening channel** — either `read_audio` or `read_media`, provided by the companion repository [omni-media][link-omni-media] (can be substituted by subtitles on Bilibili)
 - **Operating system** — OS-independent, see the classifiers in `pyproject.toml`
 
 <div align="right">
@@ -287,7 +295,7 @@ skill/
 ├── skills/video2book/          # the skill itself; this is the only directory you install
 │   ├── SKILL.md                # skill contract, the single source of truth for the Agent
 │   ├── src/                    # toolchain
-│   │   ├── cli.py              # entry point: 10 subcommands
+│   │   ├── cli.py              # entry point: 11 subcommands
 │   │   ├── core/               # paths, audio budget, pipeline, fetching, deliverable lint
 │   │   │   └── ingestion/      # unified media engine (Bilibili / local / YouTube / Douyin)
 │   │   └── generator/          # task files, prompt templates and semantic aggregation
@@ -327,7 +335,7 @@ python src/cli.py cluster-notes "<url or local path>"     # block → note aggre
 python src/cli.py check --deliver --strict                 # pre-delivery check (note quality + render)
 ```
 
-**All 10 subcommands, every flag, the full argument list, per-scenario examples and the exit codes (0–4)** live in the
+**All 11 subcommands, every flag, the full argument list, per-scenario examples and the exit codes (0–4)** live in the
 [CLI cookbook](skills/video2book/references/cli-cookbook.md) — the single source for CLI detail; this README no longer duplicates them.
 
 <div align="right">
@@ -363,11 +371,11 @@ python src/cli.py check --deliver --strict                 # pre-delivery check 
 
 ### Can I use it without omni-media?
 
-No. Both listening channels, `read_audio` and `read_media`, come from [omni-media][link-omni-media], and the workflow treats one as mandatory: when Stage 1 cannot obtain audio facts, the pipeline stops to ask you to mount one.
+No (unless it is a Bilibili course where all blocks have Chinese subtitles, in which case `fetch-subtitles` can generate transcripts directly). Block transcripts have two legitimate sources — audio transcription or Bilibili Chinese subtitles; blocks without subtitles fall back to listening. Both listening channels, `read_audio` and `read_media`, come from [omni-media][link-omni-media], and the workflow treats one as mandatory: when Stage 1 cannot obtain audio facts, the pipeline stops to ask you to mount one.
 
 ### Which entry should I mount?
 
-It depends on the host's modality. If `read_audio` is in your tool list, the host has a native audio modality — mount the `omni-media` entry (pinned `--mode native`), lowest latency and zero credentials. If only `read_media` is present, the host is text-only — mount the `omni-media-ext` entry (pinned `--mode ext`), which names an external model endpoint in `config.json`. **Both are channels of the same package**, so you install once and switch by registration name. They share the same pagination contract.
+Prioritize direct-to-disk writers. Prefer mounting the `omni-media-ext` entry (pinned `--mode ext`, calling `read_media` which supports `output_file` direct-to-disk writing with 0 tokens in context, preventing summary pollution). If `read_media` is not available or the host has native audio modalities and prefers zero credentials, mount the `omni-media` entry (pinned `--mode native`, using `read_audio` to fetch slices). **Both are channels of the same package**, so you install once and switch by registration name. They share the same pagination contract.
 
 ### The listening channel is installed but no transcript comes back
 

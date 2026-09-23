@@ -34,7 +34,7 @@
 
 - **Python 3.10+**（依赖：`yt-dlp`、`requests`）
 - **系统 ffmpeg**（在 `PATH`；取音频/切片的硬前置）
-- 宿主需具备听音通道之一：MCP 工具 `read_audio`（宿主有原生音频模态）或 `read_media`（外部模型代读）
+- 宿主需具备听音通道之一：MCP 工具 `read_audio`（宿主有原生音频模态）或 `read_media`（外部模型代读），B 站课程有中文字幕时可由字幕链路替代
 - 听音通道由配套仓库提供：[`LINJIANG12/omni-media`](https://github.com/LINJIANG12/omni-media)
   （装在 `<容器根>/omni-media/`；**单一包**——`read_audio` 与 `read_media` 是同一个服务的两条通道，
   由 `--mode native|ext` 决定宿主侧的注册名 `omni-media` / `omni-media-ext`）

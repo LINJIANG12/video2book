@@ -227,8 +227,6 @@ class TaskWorkspace:
     @classmethod
     def _populated(cls, path: Path) -> bool:
         """该目录是否已有实质语料（长文、**可复用的**逐字稿或课程结构缓存），而不是刚建出来的空壳。"""
-        from .transcript_splitter import TranscriptSplitter
-
         try:
             if (path / "parts.json").exists():
                 return True
@@ -237,14 +235,15 @@ class TaskWorkspace:
                 f for f in articles.glob("P*_*.md") if not f.name.endswith("_TASK.md")
             ):
                 return True
-            # 「什么算可复用语料」由 `TranscriptSplitter` 说了算——两处判定必须同源，
-            # 否则又会出现「工作区被反复复用、却永远推不动」的僵尸工作区（第二阶段 A7）。
+            # 「什么算可复用语料」只有 `is_reusable_transcript` 一处判定——`_populated`
+            # 与门禁/派发必须给出同一个答案，否则又会出现「工作区被反复复用、却永远推不动」
+            # 的僵尸工作区（第二阶段 A7）。
             # 通配用 `*_逐字稿.md` 而不只是 `P*`：块级稿 `BLKxx_*_逐字稿.md` 同样是真语料，
             # 只有块级稿的工作区不该被当成空壳而重建目录、把稿子丢在外面。
             subtitles = path / "subtitles"
             if subtitles.is_dir() and any(
-                TranscriptSplitter.is_reusable_transcript(f)
-                for f in subtitles.glob("*" + TranscriptSplitter.SUFFIX)
+                cls.is_reusable_transcript(f)
+                for f in subtitles.glob(f"*{cls.TRANSCRIPT_SUFFIX}")
             ):
                 return True
         except OSError:
@@ -365,6 +364,60 @@ class TaskWorkspace:
         except Exception:
             return []
 
+    # ------------------------------------------------------------------
+    # 块级逐字稿：命名、落盘与「什么算可复用语料」
+    # ------------------------------------------------------------------
+
+    # 逐字稿的正式后缀。门禁、回收、派发与 `_populated` 都以它认稿。
+    TRANSCRIPT_SUFFIX = "_逐字稿.md"
+
+    @classmethod
+    def is_reusable_transcript(cls, path: Path) -> bool:
+        """`subtitles/` 下的这个文件算不算**可复用语料**。
+
+        这是唯一真源：`_populated`（这个工作区要不要复用）与门禁/派发（这份稿能不能当语料）
+        必须给出同一个答案。历史 `PXX_*_clean.txt` 是旧链路的放行口——任何一段来路不明的
+        文本顶着这个名字就能被喂进流水线（2026-09 伪逐字稿事故），所以**不算**。
+        以前 `_populated` 却认它，于是工作区被反复复用却永远推不动（第二阶段 A7）。
+        """
+        try:
+            return (
+                path.name.endswith(cls.TRANSCRIPT_SUFFIX)
+                and path.is_file()
+                and path.stat().st_size > 0
+            )
+        except OSError:
+            return False
+
+    @classmethod
+    def block_path(cls, ws: Any, block: Dict[str, Any]) -> Path:
+        """块级原始逐字稿的路径。
+
+        优先用「块号 + 覆盖范围」（`BLK03_P18-P22_逐字稿.md`，含劈分腿时为 `BLK03_P12上-P13_逐字稿.md`）：
+        它只取决于清单里的块结构，与块音频落在哪无关。这一点在**无收益装箱**（每块仅一集、
+        块音频直接指向该集原音频）时尤其重要——否则块级稿会跟历史分集稿同名（都成
+        `P08_标题_逐字稿.md`）而互相覆盖。清单缺块号/覆盖范围时退回按音频文件名取名（兼容手写的旧清单）。
+        """
+        block_id = int(block.get("block_id") or 0)
+        pages = sorted(int(p) for p in (block.get("episodes") or []))
+        span = str(block.get("span") or "")
+        if not span:
+            labels = [str(u.get("label") or "") for u in (block.get("units") or []) if u.get("label")]
+            span = labels[0] if len(labels) == 1 else (f"{labels[0]}-{labels[-1]}" if labels else "")
+        if block_id and (span or pages):
+            span = span or (f"P{pages[0]:02d}" if len(pages) == 1 else f"P{pages[0]:02d}-P{pages[-1]:02d}")
+            return Path(ws.subtitles_dir) / f"BLK{block_id:02d}_{span}{cls.TRANSCRIPT_SUFFIX}"
+        stem = Path(str(block.get("audio") or "")).stem or f"BLK{block_id:02d}"
+        return Path(ws.subtitles_dir) / f"{stem}{cls.TRANSCRIPT_SUFFIX}"
+
+    @classmethod
+    def write_block_transcript(cls, ws: Any, block: Dict[str, Any], text: str) -> Path:
+        """落块级原始逐字稿。它是可溯源的原始事实，无论来路（听音转录或 B 站字幕）。"""
+        path = cls.block_path(ws, block)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
     # 单值路径字段（策略：入库相对仓库根，读回绝对路径）
     PATH_KEYS = {
         "audio", "transcript", "task_prompt", "task_file", "article",
@@ -467,87 +520,6 @@ class TaskWorkspace:
             while chunk := f.read(65536):
                 h.update(chunk)
         return h.hexdigest()
-
-    def scan_audio_fingerprints(self) -> Dict[str, List[Dict[str, Any]]]:
-        """扫描 audio 目录下所有分集音频的 SHA-256 指纹，按 hash 归组以识别重复分集。"""
-        fingerprints: Dict[str, List[Dict[str, Any]]] = {}
-        if not self.audio_dir.exists():
-            return fingerprints
-
-        for audio_file in sorted(self.audio_dir.glob("P*.*")):
-            if audio_file.suffix.lower() not in (".m4a", ".mp3", ".wav", ".aac", ".flac"):
-                continue
-            m = re.match(r"P(\d+)", audio_file.name)
-            page = int(m.group(1)) if m else None
-            h = self.compute_file_hash(audio_file)
-            if h not in fingerprints:
-                fingerprints[h] = []
-            fingerprints[h].append({
-                "page": page,
-                "file": audio_file,
-                "name": audio_file.name,
-                "size": audio_file.stat().st_size,
-            })
-        return fingerprints
-
-    @staticmethod
-    def _final_artifacts(directory: Path, page: int, tail: str) -> List[Path]:
-        """定位某集已落盘的最终产物，排除任务书（*_TASK.md）。"""
-        return [
-            f for f in sorted(directory.glob(f"P{page:02d}_*{tail}"))
-            if not f.name.endswith("_TASK.md")
-        ]
-
-    def sync_duplicate_assets(self, dry_run: bool = False) -> List[Dict[str, Any]]:
-        """检测并复用重复音频已切出的**分集逐字稿**，实现 0 Token 零成本去重同步。
-
-        块级链路里交付长文是**按块**的（`articles/模块XX_*_精读长文.md`），同一个块内部的两集
-        本就用同一份块级逐字稿成文，没有「一集一篇」可复用；而分集逐字稿只是事后按集查阅的
-        可选产物（`split-transcript` 的产出），重复集之间彼此等价，同步它是这里唯一还成立的动作。
-        """
-        import shutil
-        fingerprints = self.scan_audio_fingerprints()
-        synced = []
-
-        for h, items in fingerprints.items():
-            if len(items) <= 1:
-                continue
-            items_sorted = sorted(items, key=lambda x: (x["page"] if x["page"] is not None else 9999))
-            primary = items_sorted[0]
-            p_page = primary["page"]
-            if p_page is None:
-                continue
-
-            prim_sub = self._final_artifacts(self.subtitles_dir, p_page, "_逐字稿.md")
-            if not prim_sub:
-                continue
-            src_sub = prim_sub[0]
-
-            for dup in items_sorted[1:]:
-                d_page = dup["page"]
-                if d_page is None:
-                    continue
-
-                target_sub = self._final_artifacts(self.subtitles_dir, d_page, "_逐字稿.md")
-                need_sub = not target_sub or target_sub[0].stat().st_size == 0
-                if not need_sub:
-                    continue
-
-                m_d = re.match(r"P\d+_(.*)\.[^.]+", dup["name"])
-                d_title = m_d.group(1) if m_d else f"P{d_page:02d}"
-                dst_sub = self.subtitles_dir / f"P{d_page:02d}_{d_title}_逐字稿.md"
-
-                if not dry_run:
-                    shutil.copy2(src_sub, dst_sub)
-
-                synced.append({
-                    "src_page": p_page,
-                    "dst_page": d_page,
-                    "hash": h[:12],
-                    "synced_transcript": True,
-                })
-
-        return synced
 
 
 

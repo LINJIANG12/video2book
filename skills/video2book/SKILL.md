@@ -6,7 +6,7 @@ metadata:
   author: LINJIANG12
   version: 3.0.0
   category: learning-and-education
-  compatibility: Python 3.10+；系统 ffmpeg 在 PATH；宿主需具备 read_audio 或 read_media 听音通道之一。
+  compatibility: Python 3.10+；系统 ffmpeg 在 PATH；宿主听音通道之一（read_audio 或 read_media），B 站课程有中文字幕时可由字幕链路替代。
 ---
 
 # Video2Book: 视频网课重构教材与复习笔记 Skill
@@ -22,7 +22,7 @@ metadata:
 1. **黑盒调用**：不读、不改 `src/` 内部实现去找捷径；不写任何 `gen_*.py` 之类的离线造文脚本来伪造产物。
    所有任务经官方 CLI 与原生多模态工具链推进。
 2. **逐字稿事实保真（Strict Transcript Grounding）**：块级逐字稿 `subtitles/BLKxx_*_逐字稿.md` 是模块长文的
-   **唯一事实来源**；取音只发生在转录角色身上，写作角色只读逐字稿。正文必须保留讲师亲口讲的案例、例题与比喻，
+   **唯一事实来源**；逐字稿来源为听音转录或 B 站中文字幕，取音只发生在转录角色身上，写作角色只读逐字稿。正文必须保留讲师亲口讲的案例、例题与比喻，
    **严禁凭空脑补**。这一条已可校验：`check --stage1` 用技术实体覆盖率报警。
 3. **拒绝脱缰黑话**：经典基础课（数据结构、操作系统、数据库……）不得套互联网大厂浮夸黑话，必须贴课程实际。
 4. **提示词风格红线**：风格由用户确认，`pipeline` 必须带 `--article-type`。当前只提供 `learning`（学习，推荐）
@@ -43,15 +43,16 @@ metadata:
                       B 站建议 login --sessdata；本地 / YouTube 跳过
 【第 1 步：风格】向用户确认 --article-type（learning / legacy）
 【第 2 步：准备】python src/cli.py pipeline "<链接或路径>" --all --article-type learning
-                 → 收音频 → 装箱成块 → 自动去重 → 导出转录/长文任务书 → 自动回收 + 对账
+                 → 收音频 → 装箱成块 → 导出转录/长文任务书 → 自动回收 + 对账
+【第 2.5 步：字幕】B 站课程 → python src/cli.py fetch-subtitles "<链接或路径>"（有中文字幕的块直出逐字稿）
 【第 3 步：转录】转录角色取载荷：python scripts/queue_tracker.py --next-transcribe --json（默认并发 3 个任务）
-                 按块听音 → 写 subtitles/BLKxx_*_逐字稿.md → 回报一行（不回传正文）
+                 只处理字幕缺口的块 → 按块听音 → 写 subtitles/BLKxx_*_逐字稿.md → 回报一行（不回传正文）
 【第 4 步：写作】主 Agent 取载荷：python scripts/queue_tracker.py --next-module 5 --json
                  一个块一个子智能体（并发 5~6），原样透传 dispatch_prompt
                  → 写 articles/模块XX_<块标题>_精读长文.md
 【第 5 步：放行】python src/cli.py check --stage1 --strict      # 长文确实基于块逐字稿
                  通过后才允许进入阶段二
-【第 6 步：聚合】① 规划笔记：python src/cli.py cluster-notes "<链接或路径>"（导出任务书）
+【第 6 步：聚合】① 规划笔记：python src/cli.py cluster-notes "<链接或路径>"（导出笔记任务书）
                  ② 撰写笔记：python scripts/queue_tracker.py --next-note 5 --json（子智能体写笔记）
                  ③ 整编教材：python src/cli.py cluster-articles "<链接或路径>"（模块长文整编成册）
                  收尾自动执行 cleanup + sync
@@ -98,7 +99,7 @@ metadata:
 
 ## 5. 环境与缺失处理
 
-三层依赖：Python 3.10+、系统 `ffmpeg`、宿主听音通道之一（`read_audio` 或 `read_media`）。
+三层依赖：Python 3.10+、系统 `ffmpeg`、宿主听音通道之一（`read_audio` 或 `read_media`，B 站课程有中文字幕时可由字幕链路替代）。
 一条命令自检环境：`python src/cli.py info`。
 若使用外部模型代读（`read_media`），首次运行前必须在 `omni-media/config.json` 配好端点与密钥，默认采用 30 分钟切片与 5 并发。
 **硬依赖缺失即停下并给出下一步命令，绝不静默跳过**；可降级项（`ffprobe` → `ffmpeg -i`、

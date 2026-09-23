@@ -31,7 +31,6 @@ from src.core.audio_merger import (
     AudioMerger,
 )
 from src.core.quality_gate import collect_markdown
-from src.core.transcript_splitter import TranscriptSplitter
 from src.core.workspace import TaskWorkspace
 
 
@@ -59,75 +58,7 @@ def _records(durations_sec: Sequence[float]) -> List[Dict[str, Any]]:
 # 装箱样本：7×10 分钟 + 1×30 分钟 + 4×5 分钟 = 120 分钟（区间 40–60，硬上限 75）
 PACK_DURATIONS = [600.0] * 7 + [1800.0] + [300.0] * 4
 
-# 时间表样本（块内两集，各 10 分钟）
-SEGMENTS = [
-    {"page": 1, "start_sec": 0.0, "end_sec": 600.0, "start": "00:00:00", "end": "00:10:00"},
-    {"page": 2, "start_sec": 600.0, "end_sec": 1200.0, "start": "00:10:00", "end": "00:20:00"},
-]
-TEXT_WITH_STAMPS = (
-    "[00:00:00] 第一集开场\n"
-    "[00:05:00] 第一集中段\n"
-    "[00:10:00] 第二集开场\n"
-    "[00:15:00] 第二集中段\n"
-)
-# 交界（00:10:00）附近没有任何时间戳：该处切分只能靠插值推定
-TEXT_THIN_ANCHORS = "[00:00:00] 开场\n[00:15:00] 交界附近没有时间戳\n"
 
-# 稀疏标注样本：P19 整集没有时间戳，正文会一路归到 P18 名下
-SPARSE_SEGMENTS = [
-    {"page": 18, "start_sec": 0.0, "end_sec": 600.0, "start": "00:00:00", "end": "00:10:00",
-     "duration_sec": 600.0},
-    {"page": 19, "start_sec": 600.0, "end_sec": 1200.0, "start": "00:10:00", "end": "00:20:00",
-     "duration_sec": 600.0},
-    {"page": 20, "start_sec": 1200.0, "end_sec": 1800.0, "start": "00:20:00", "end": "00:30:00",
-     "duration_sec": 600.0},
-]
-SPARSE_TITLES = {18: "十八", 19: "十九", 20: "二十"}
-
-
-def _sparse_text() -> str:
-    """P18 一条时间戳之后跟着 29 行属于 P19 的无时间戳正文，再到 P20。"""
-    return (
-        "[00:00:00] P18 开场\n"
-        + "\n".join(f"这是实际属于 P19 的无时间戳正文第 {i} 行" for i in range(1, 30))
-        + "\n[00:20:00] P20 开场\n"
-    )
-
-
-RELIABLE_TEXT = (
-    "[00:00:00] P18 正确内容\n"
-    "[00:10:00] P19 正确内容\n"
-    "[00:20:00] P20 正确内容\n"
-)
-
-
-@pytest.fixture
-def suspect_ws(make_workspace):
-    """一个有污染稿的工作区 + 一份边界不可信的块（P18–P20）。"""
-    ws = make_workspace("疑点切分_BVTEST01")
-    block = {"block_id": 3, "episodes": [18, 19, 20], "segments": SPARSE_SEGMENTS}
-    stale = TranscriptSplitter.episode_path(ws, 18, "十八")
-    stale.parent.mkdir(parents=True, exist_ok=True)
-    stale.write_text("上一轮的污染稿", encoding="utf-8")
-    return ws, block, stale
-
-
-@pytest.fixture
-def fixed_split(suspect_ws):
-    """先做一次可疑切分（留下 suspect 标记与污染稿），再用可靠时间戳重切。"""
-    ws, block, stale = suspect_ws
-    TranscriptSplitter.write_episode_transcripts(
-        ws, block, _sparse_text(), titles=SPARSE_TITLES
-    )
-    fixed = TranscriptSplitter.write_episode_transcripts(
-        ws, block, RELIABLE_TEXT, titles=SPARSE_TITLES
-    )
-    return ws, block, stale, fixed
-
-
-# ===========================================================================
-# 1) 块时长口径：默认值生效、可配置、超上限夹紧、非法值回退
-# ===========================================================================
 
 def test_block_minutes_defaults_to_fifty():
     """默认目标 50 分钟（区间中段）。"""
@@ -273,164 +204,46 @@ def test_block_span_falls_back_to_episode_range():
 
 
 # ===========================================================================
-# 5) 逐字稿切分：时间戳解析、归属、锚定统计、无时间戳降级
-# ===========================================================================
-
-def test_parse_stamp_accepts_all_supported_shapes():
-    """`MM:SS` / `HH:MM:SS` / 纯秒数都要认；解析不出来就只能降级为不切。"""
-    assert TranscriptSplitter.parse_stamp("05:20") == 320.0
-    assert TranscriptSplitter.parse_stamp("00:05:20") == 320.0
-    assert TranscriptSplitter.parse_stamp("320") == 320.0
-
-
-def test_split_assigns_lines_by_timestamp():
-    """有时间戳时切分是机械的：每行归到最后一个 start<=t 的集。"""
-    outcome = TranscriptSplitter.split(TEXT_WITH_STAMPS, SEGMENTS)
-    assert outcome["mode"] == "timestamp"
-    assert outcome["buckets"][1] == ["第一集开场", "第一集中段"]
-    assert outcome["buckets"][2] == ["第二集开场", "第二集中段"]
-
-
-def test_split_counts_anchored_boundaries():
-    """交界处有时间戳 → 边界被锚定，这条数进统计供门禁判断切分可信度。"""
-    outcome = TranscriptSplitter.split(TEXT_WITH_STAMPS, SEGMENTS)
-    assert outcome["stats"]["anchored_boundaries"] == 1
-
-
-def test_split_without_timestamps_degrades_to_unsplit():
-    """无时间戳时必须降级为 unsplit，绝不按位置硬切（错位文本比不切更危险）。"""
-    outcome = TranscriptSplitter.split("没有任何时间戳的正文", SEGMENTS)
-    assert outcome["mode"] == "unsplit"
-
-
-def test_split_reports_missing_anchor_at_boundary():
-    """交界附近没有时间戳时必须如实报 0，否则错位切分会蒙混过关。"""
-    outcome = TranscriptSplitter.split(TEXT_THIN_ANCHORS, SEGMENTS)
-    assert outcome["stats"]["anchored_boundaries"] == 0
-
-
-# ===========================================================================
-# 6) 稀疏标注的过度归属：整块隔离，一集都不放行
-# ===========================================================================
-
-def test_sparse_timestamps_mark_episode_over_assigned():
-    """P19 整集没有时间戳 → 内容被 P18 吃掉，必须报出过度归属的集号。"""
-    outcome = TranscriptSplitter.split(_sparse_text(), SPARSE_SEGMENTS)
-    assert [item["page"] for item in outcome["stats"]["over_assigned"]] == [18]
-
-
-def test_sparse_timestamps_emit_diagnosis():
-    """过度归属要有人读的诊断行，否则只会静默产出错位语料。"""
-    outcome = TranscriptSplitter.split(_sparse_text(), SPARSE_SEGMENTS)
-    assert any("分到" in line and "P18" in line for line in outcome["diag"])
-
-
-def test_suspect_split_releases_no_episode_transcript(suspect_ws):
-    """边界不可信时整块不得放行任何分集稿——错归属可能污染多个相邻集。"""
-    ws, block, _stale = suspect_ws
-    outcome = TranscriptSplitter.write_episode_transcripts(
-        ws, block, _sparse_text(), titles=SPARSE_TITLES
-    )
-    assert outcome["status"] == "suspect"
-    assert outcome["files"] == {}
-
-
-def test_suspect_split_marks_every_page_in_block(suspect_ws):
-    """suspect 标记覆盖整块的所有集号（不是只标可疑的那一集）。"""
-    ws, block, _stale = suspect_ws
-    outcome = TranscriptSplitter.write_episode_transcripts(
-        ws, block, _sparse_text(), titles=SPARSE_TITLES
-    )
-    assert outcome["suspect_pages"] == [18, 19, 20]
-
-
-def test_suspect_split_keeps_existing_transcript_for_diagnosis(suspect_ws):
-    """已有文件保留供排障，不得因为不可信就删掉。"""
-    ws, block, stale = suspect_ws
-    TranscriptSplitter.write_episode_transcripts(
-        ws, block, _sparse_text(), titles=SPARSE_TITLES
-    )
-    assert stale.exists()
-
-
-def test_suspect_marker_hides_existing_transcript(suspect_ws):
-    """带 suspect 标记的旧文件不得被当作可用语料派发。"""
-    ws, block, _stale = suspect_ws
-    TranscriptSplitter.write_episode_transcripts(
-        ws, block, _sparse_text(), titles=SPARSE_TITLES
-    )
-    assert TranscriptSplitter.existing_episode_transcript(ws, 18, "十八") is None
-
-
-def test_reliable_split_clears_suspect_status(fixed_split):
-    """拿到可靠时间戳重切后必须恢复 split，并交出全部三集。"""
-    _ws, _block, _stale, fixed = fixed_split
-    assert fixed["status"] == "split"
-    assert sorted(fixed["files"]) == [18, 19, 20]
-
-
-def test_reliable_split_overwrites_polluted_transcript(fixed_split):
-    """suspect 解除后必须用可靠切分覆盖旧污染稿。"""
-    _ws, _block, stale, _fixed = fixed_split
-    assert "上一轮的污染稿" not in stale.read_text(encoding="utf-8")
-
-
-def test_reliable_split_removes_suspect_marker(fixed_split):
-    """可靠重切后 suspect 标记必须解除，否则这一集永远派发不出去。"""
-    ws, _block, _stale, _fixed = fixed_split
-    assert not TranscriptSplitter.suspect_path(ws, 18, "十八").exists()
-
-
-# ===========================================================================
 # 7) 命名与复用优先级
 # ===========================================================================
-
-def test_episode_transcript_path_has_page_prefix(make_workspace):
-    """分集逐字稿的正式路径：`subtitles/PXX_<标题>_逐字稿.md`。"""
-    ws = make_workspace("命名契约_BVTEST01")
-    assert TranscriptSplitter.episode_path(ws, 3, "绪论").name == "P03_绪论_逐字稿.md"
 
 
 def test_block_transcript_path_uses_block_structure(make_workspace):
     """清单缺块号/覆盖范围时退回按块音频文件名取名（兼容手写旧清单）。"""
     ws = make_workspace("命名契约_BVTEST01")
     block = {"audio": "audio/_blocks/BLK02_P13-P17.m4a"}
-    assert TranscriptSplitter.block_path(ws, block).name == "BLK02_P13-P17_逐字稿.md"
+    assert TaskWorkspace.block_path(ws, block).name == "BLK02_P13-P17_逐字稿.md"
 
 
-def test_missing_episode_transcript_is_none(make_workspace):
-    """尚无分集稿时返回 None，调用方据此派发转录。"""
-    ws = make_workspace("命名契约_BVTEST01")
-    assert TranscriptSplitter.existing_episode_transcript(ws, 3, "绪论") is None
-
-
-def test_legacy_clean_txt_is_not_reused(make_workspace):
+def test_legacy_clean_txt_is_not_reusable(make_workspace):
     """`_clean.txt` 曾是伪逐字稿混进流水线的放行口，顶着这个名字的文本一律不认。"""
     ws = make_workspace("命名契约_BVTEST01")
     write_text(ws.subtitles_dir / "P03_绪论_clean.txt", "来路不明的一段文本")
-    assert TranscriptSplitter.existing_episode_transcript(ws, 3, "绪论") is None
+    assert TaskWorkspace.is_reusable_transcript(
+        ws.subtitles_dir / "P03_绪论_clean.txt"
+    ) is False
 
 
-def test_split_episode_transcript_is_reused(make_workspace):
-    """已切出的分集逐字稿应被认作可用语料。"""
+def test_block_transcript_is_reused_as_corpus(make_workspace):
+    """块级稿就是语料：非空即认，派发与工作区复用都靠它。"""
     ws = make_workspace("命名契约_BVTEST01")
-    fresh = write_text(TranscriptSplitter.episode_path(ws, 3, "绪论"), "块级转录产物")
-    assert TranscriptSplitter.existing_episode_transcript(ws, 3, "绪论") == fresh
+    fresh = write_text(ws.subtitles_dir / "BLK03_P18-P22_逐字稿.md", "块级转录产物")
+    assert TaskWorkspace.is_reusable_transcript(fresh) is True
 
 
 def test_block_transcript_is_named_by_block_structure(make_workspace):
-    """无收益装箱（每块仅一集）时块级稿仍按块结构命名，不跟分集稿混。"""
+    """无收益装箱（每块仅一集）时块级稿仍按块结构命名，不跟历史分集稿混。"""
     ws = make_workspace("命名契约_BVTEST01")
     noop_block = {"block_id": 1, "episodes": [8], "audio": "audio/P08_测试集.m4a"}
-    assert TranscriptSplitter.block_path(ws, noop_block).name == "BLK01_P08_逐字稿.md"
+    assert TaskWorkspace.block_path(ws, noop_block).name == "BLK01_P08_逐字稿.md"
 
 
 def test_block_transcript_never_collides_with_episode_transcript(make_workspace):
-    """块级稿与分集稿同名会互相覆盖，命名必须结构性地区分开。"""
+    """块级稿与历史分集稿同名会互相覆盖，命名必须结构性地区分开。"""
     ws = make_workspace("命名契约_BVTEST01")
     noop_block = {"block_id": 1, "episodes": [8], "audio": "audio/P08_测试集.m4a"}
-    assert TranscriptSplitter.block_path(ws, noop_block).name != \
-        TranscriptSplitter.episode_path(ws, 8, "测试集").name
+    assert TaskWorkspace.block_path(ws, noop_block).name.startswith("BLK01_P08")
+    assert TaskWorkspace.block_path(ws, noop_block).name != "P08_测试集_逐字稿.md"
 
 
 # ===========================================================================
@@ -502,7 +315,7 @@ def test_legacy_clean_txt_only_workspace_is_a_shell(make_workspace):
     """只有历史 `_clean.txt` 的工作区**不算**有料。
 
     第二阶段 A7：`_populated` 曾把 `subtitles/P*_clean.txt` 计为真语料，而
-    `TranscriptSplitter` 拒绝复用它 → 工作区永远被判定为「已有内容」而被复用，
+    `TaskWorkspace` 拒绝复用它 → 工作区永远被判定为「已有内容」而被复用，
     却永远推不动（僵尸工作区），反复重跑也不会有进展。
     """
     ws = make_workspace("僵尸工作区_BVTEST01")
@@ -514,24 +327,24 @@ def test_empty_transcript_is_not_reusable_corpus(make_workspace):
     """0 字节的 `_逐字稿.md` 不算语料（两处判定共用 `is_reusable_transcript`）。"""
     ws = make_workspace("空稿_BVTEST01")
     write_text(ws.subtitles_dir / "BLK01_P01_逐字稿.md", "")
-    assert TranscriptSplitter.is_reusable_transcript(
+    assert TaskWorkspace.is_reusable_transcript(
         ws.subtitles_dir / "BLK01_P01_逐字稿.md"
     ) is False
     assert TaskWorkspace._populated(ws.root_dir) is False
 
 
-def test_populated_and_splitter_agree_on_reusable_corpus(make_workspace):
-    """两处判定必须**同源**：`_populated` 认的语料，`existing_episode_transcript` 也得认。
+def test_populated_and_workspace_agree_on_reusable_corpus(make_workspace):
+    """两处判定必须**同源**：`_populated` 认的语料，`is_reusable_transcript` 也得认。
 
     这正是 A7 的根因——两套「什么算可复用语料」的判定漂移了。
     """
     ws = make_workspace("同源判定_BVTEST01")
-    fresh = write_text(TranscriptSplitter.episode_path(ws, 3, "绪论"), "块级转录产物")
-    assert TranscriptSplitter.is_reusable_transcript(fresh) is True
+    fresh = write_text(ws.subtitles_dir / "BLK03_P18-P22_逐字稿.md", "块级转录产物")
+    assert TaskWorkspace.is_reusable_transcript(fresh) is True
     assert TaskWorkspace._populated(ws.root_dir) is True
 
     write_text(ws.subtitles_dir / "P04_绪论_clean.txt", "来路不明")
-    assert TranscriptSplitter.is_reusable_transcript(
+    assert TaskWorkspace.is_reusable_transcript(
         ws.subtitles_dir / "P04_绪论_clean.txt"
     ) is False
 

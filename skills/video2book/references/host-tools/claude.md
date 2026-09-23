@@ -14,7 +14,7 @@
 | 取网页 | `WebFetch` |
 | 待办清单 | `TodoWrite` |
 | 派发子智能体 | `Task`（子智能体为独立上下文） |
-| 原生听音 | MCP 工具 `read_audio` 取切片 → 用 `Read` 打开切片路径聆听；无原生音频时用 `read_media` |
+| 听音转录 | 优先用 MCP 工具 `read_media`（外部代读，支持 `output_file` 直写落盘）；无 ext 时用 `read_audio` 取切片 → 用 `Read` 打开切片路径聆听 |
 
 ## 安装
 

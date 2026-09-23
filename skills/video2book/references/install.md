@@ -22,7 +22,7 @@ skills/video2book/             ← 装这一个目录即可（核心 skill + 它
 
 三条硬依赖：**Python 3.10+**、**系统 `ffmpeg`**（在 `PATH`）、**听音通道之一**
 （MCP 工具 `read_audio` 或 `read_media`，由配套仓库 [LINJIANG12/omni-media](https://github.com/LINJIANG12/omni-media)
-提供，当前契约版本为 1）。**服务装在哪都可以**——技能在用时按宿主自己的工具列表判定通道，不需要配置路径。
+提供，当前契约版本为 1；若为 B 站课程且有中文字幕可由字幕链路替代）。**服务装在哪都可以**——技能在用时按宿主自己的工具列表判定通道，不需要配置路径。
 
 > 完整的依赖清单（含 `ffprobe`、Python 3.12、`git` 这些可选降级项）与「缺了会怎样、该怎么办」
 > 见 [`runtime.md` §1](runtime.md)——本节只列装之前必须齐备的三项，不重复那张表。

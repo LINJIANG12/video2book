@@ -437,6 +437,7 @@ def check_dead_modules_removed():
     for rel in (
         "src/core/http_client.py",
         "src/core/kernel_extractor.py",  # 逐集知识元特性随逐集链路一并移除
+        "src/core/transcript_splitter.py",
         "src/generator/cleaner.py",
         "src/generator/classifier.py",
         "src/generator/doc_builder.py",
@@ -876,7 +877,7 @@ def check_dispatch_discipline_documented():
     """阶段一派发纪律必须写进文档，不能停留在含糊措辞上（防止回退）。
 
     阈值：课程总时长 ≤ 60 分钟 → 主 Agent 可串行；超过 → 必须派发。两类角色分工：
-    转录角色按块消费（建议 2 个），写作角色按块领集、读逐字稿写长文。回报协议：
+    转录角色按块消费（建议 3 个），写作角色按块领集、读逐字稿写长文。回报协议：
     只回报一行、不回传正文。窗口兜底（音频 token 口径）只对转录角色成立。
     """
     skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")

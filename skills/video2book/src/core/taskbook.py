@@ -41,7 +41,6 @@ def export_block_transcribe_task(
 ) -> Path:
     """导出块级转录任务书（subtitles/BLK01_P08-P12_转录任务书.md）。"""
     from src.core.audio_merger import AudioMerger
-    from src.core.transcript_splitter import TranscriptSplitter
 
     block_id = int(block.get("block_id") or 0)
     pages = [int(p) for p in (block.get("episodes") or [])]
@@ -49,7 +48,7 @@ def export_block_transcribe_task(
     titles = titles or {}
 
     block_audio = Path(ws.root_dir) / str(block.get("audio") or "")
-    block_transcript = TranscriptSplitter.block_path(ws, block)
+    block_transcript = TaskWorkspace.block_path(ws, block)
     duration_min = float(block.get("duration_min") or 0.0)
     span = AudioMerger.block_span(block) if segments or pages else "?"
     block_title = str(block.get("title") or "").strip()
@@ -73,7 +72,7 @@ def export_block_transcribe_task(
         f"# BLK{block_id:02d} {span} 块级转录任务书（TRANSCRIBE_TASK）\n\n"
         f"> 📌 **执行指引（直接执行，无需探索）**：本任务输入与输出路径均已在第 1 节完全指定。直接读取指定输入文件，完成转录并保存到目标路径；无需也不要检索、扫描项目其他文件或仓库代码。\n"
         f"> 状态：need-agent-transcript | **只做转录这一件事**，不要写长文\n"
-        f"> 执行者：由**专职转录子智能体**承担（建议 2 个角色各领一半块队列、连续消费）\n"
+        f"> 执行者：由**专职转录子智能体**承担（建议 3 个角色各领一部分块队列、连续消费）\n"
         f"> 完成后只回报一行 `BLK{block_id:02d} | 逐字稿路径 | 字节数 | 执行者`，**不回传正文**\n"
         + (f"> 块标题（语义组合）：{block_title}\n" if block_title else "")
         + f"> 块时长 {duration_min:.1f} 分钟 / 覆盖 {len(pages)} 集；块内时间表见第 1 节\n\n"
@@ -86,13 +85,22 @@ def export_block_transcribe_task(
         f"{table}\n\n"
         f"---\n\n"
         f"## 2. 执行指引\n\n"
-        f"1. **转录整块**：优先调用 `omni-media-ext:read_media`（传入 `output_file`=`{block_transcript}` 直写落盘，零上下文开销）或 `omni-media:read_audio`：\n"
-        f"   - `file_path` = 第 1 节的块音频绝对路径；\n"
-        f"   - `mode` = `\"transcribe\"`；\n"
-        f"   - `duration_minutes` = {max(1.0, round(duration_min, 1))}；\n"
-        f"   - `prompt` = 第 2.1 节纯文本转录要求（**必须原样传入**）；\n"
-        f"   - `output_file` = 第 1 节的「原始逐字稿落盘路径」（传入此参数时 MCP 会原子直写磁盘，无需在上下文中回传或手动落盘）；\n"
-        f"2. **落盘原始逐字稿**：若未传入 `output_file` 或工具不支持，把完整转录正文写入第 1 节的「原始逐字稿落盘路径」；\n"
+        f"1. **转录整块**：按这个优先序挑一条通道，**只传该通道存在的参数**：\n"
+        f"   - **优先 `omni-media-ext:read_media`**（外部模型代读，能直写落盘：\n"
+        f"     `file_path` = 第 1 节的块音频绝对路径；`mode` = `\"transcribe\"`；\n"
+        f"     `prompt` = 第 2.1 节纯文本转录要求（**必须原样传入**）；\n"
+        f"     `output_file` = 第 1 节的「原始逐字稿落盘路径」——传入它 MCP 就原子直写磁盘，\n"
+        f"     全文 0 Token 进上下文，也不必在对话里回传或手动落盘；\n"
+        f"     唯二例外：需要限定本片时长时加 `duration_minutes` = {max(1.0, round(duration_min, 1))}；\n"
+        f"     需要按名切换端点时加 `endpoint`）；\n"
+        f"   - **工具列表里没有 `read_media` 时才用 `omni-media:read_audio`**（宿主原生听音：\n"
+        f"     `file_path` = 第 1 节的块音频绝对路径；`output_mode` = `\"file\"` 拿切片路径，再用\n"
+        f"     宿主的「读文件」能力聆听；**不要传 `duration_minutes`**——任务书里的切片本就按\n"
+        f"     60 分钟预算切好，一次听完整片即可；\n"
+        f"     `read_audio` 没有 `mode` / `prompt` / `output_file` / `endpoint` 这几个参数，别把\n"
+        f"     `read_media` 的参数抄进来）；\n"
+        f"2. **落盘原始逐字稿**：`read_media` 未传 `output_file` 时，把完整转录正文写入第 1 节的\n"
+        f"   「原始逐字稿落盘路径」；`read_audio` 由宿主聆听后自行落盘。\n"
         f"3. **核对完整性后回报**：确认逐字稿已成功落盘且非空，然后按抬头格式回报单行即可。\n\n"
         f"### 2.1 纯文本转录要求（原样传给 `prompt`）\n\n"
         f"```text\n{TRANSCRIBE_INSTRUCTION}\n```\n\n"

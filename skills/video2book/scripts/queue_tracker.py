@@ -298,12 +298,10 @@ def scan_transcript_status(ws: Path) -> Dict:
     那条门禁的语义始终是「长文是否齐备」，混入逐字稿条件会让全部历史工作区一夜之间不再完工。
 
     就绪口径是**块**（`BLKxx_*_逐字稿.md` 存在且非空）：写作按块成文，块稿在即语料在。
-    `episode_transcripts` 只是「事后按集查阅」时用 split-transcript 切出来的可选产物，
-    缺了它不代表转录没做——它不进任何派发门禁。
+    逐字稿只有这一种粒度——它由听音转录或 B 站中文字幕产出，不再是「切的」。
     """
     from src.core.audio_merger import AudioMerger
-    from src.core.transcript_splitter import TranscriptSplitter
-    from src.core.workspace import TaskWorkspace, sanitize_filename
+    from src.core.workspace import TaskWorkspace
 
     empty = {
         "has_manifest": False,
@@ -313,8 +311,6 @@ def scan_transcript_status(ws: Path) -> Dict:
         "blocks_transcribed": 0,
         "blocks_pending": 0,
         "blocks": [],
-        "transcript_ready": 0,
-        "transcript_pending": [],
     }
     try:
         tws = TaskWorkspace.from_existing(ws)
@@ -324,36 +320,18 @@ def scan_transcript_status(ws: Path) -> Dict:
     if not manifest:
         return empty
 
-    titles = {}
-    for part in load_parts(ws):
-        if part.get("page") is None:
-            continue
-        titles[int(part["page"])] = sanitize_filename(str(part.get("title") or f"P{int(part['page']):02d}"))
-
     blocks_info = []
-    ready = 0
-    pending_pages = []
     for block in manifest.get("blocks") or []:
-        raw = TranscriptSplitter.block_path(tws, block)
+        raw = TaskWorkspace.block_path(tws, block)
         transcribed = raw.exists() and raw.stat().st_size > 0
-        episodes = [int(p) for p in (block.get("episodes") or [])]
-        paths = {}
-        for page in episodes:
-            found = TranscriptSplitter.existing_episode_transcript(tws, page, titles.get(page, f"P{page:02d}"))
-            paths[page] = str(found) if found else ""
-            if found is not None:
-                ready += 1
-            else:
-                pending_pages.append(page)
         blocks_info.append({
             "block_id": int(block.get("block_id") or 0),
-            "episodes": episodes,
+            "episodes": [int(p) for p in (block.get("episodes") or [])],
             "span": AudioMerger.block_span(block),
             "audio": str(Path(tws.root_dir) / str(block.get("audio") or "")),
             "duration_min": float(block.get("duration_min") or 0.0),
             "block_transcript": str(raw),
             "transcribed": transcribed,
-            "episode_transcripts": paths,
         })
 
     transcribed = sum(1 for b in blocks_info if b["transcribed"])
@@ -365,8 +343,6 @@ def scan_transcript_status(ws: Path) -> Dict:
         "blocks_transcribed": transcribed,
         "blocks_pending": len(blocks_info) - transcribed,
         "blocks": blocks_info,
-        "transcript_ready": ready,
-        "transcript_pending": sorted(pending_pages),
     }
 
 
@@ -387,8 +363,9 @@ def _transcribe_payload(tstatus: Dict, n: int) -> List[Dict]:
             f"【执行规范（单任务直达）】：本任务输入与输出路径均已完全指定。直接读取指定输入文件，完成转录并保存到目标路径；无需也不要检索、扫描项目其他文件或仓库代码。\n\n"
             f"请阅读转录任务书文件：\n"
             f"`{task_file}`\n"
-            f"调用宿主当前可用的听音工具（有 read_audio 则使用 output_mode=\"file\" 获取切片并聆听，"
-            f"只有 read_media 则以 mode=\"transcribe\" 外部代读，优先传入 output_file 直接落盘），严格按照任务书 2.1 节的要求进行纯文本忠实转录（无需时间戳），"
+            f"调用听音工具转录（**优先 read_media**：它能 output_file 直写落盘、全文 0 Token 进上下文；"
+            f"工具列表里没有 read_media 时才用 read_audio 的 output_mode=\"file\" 取切片自行聆听），"
+            f"严格按照任务书 2.1 节的要求进行纯文本忠实转录（无需时间戳），"
             f"将完整逐字稿直接写入目标文件：\n"
             f"`{block_transcript}`\n"
             f"落盘后仅在最后汇报单行：\n"
@@ -405,7 +382,6 @@ def _transcribe_payload(tstatus: Dict, n: int) -> List[Dict]:
             "task_file": str(task_file),
             "task_file_exists": task_file.exists(),
             "block_transcript": block["block_transcript"],
-            "episode_transcripts": block["episode_transcripts"],
             "dispatch_prompt": dispatch_prompt,
         })
         if len(items) >= n:
@@ -651,10 +627,7 @@ def main():
             # 块级转录进度：老工作区（无块清单）会得到全 0，不影响 STAGE1 判定
             f"BLOCKS={tstatus['blocks_total']};"
             f"BLOCKS_TRANSCRIBED={tstatus['blocks_transcribed']};"
-            f"BLOCKS_PENDING={tstatus['blocks_pending']};"
-            # 转录就绪按块计（分集稿是可选切分产物，不计入）
-            f"TRANSCRIPT_READY={tstatus['blocks_transcribed']};"
-            f"TRANSCRIPT_PENDING={tstatus['blocks_pending']}"
+            f"BLOCKS_PENDING={tstatus['blocks_pending']}"
         )
         return
 
@@ -685,8 +658,6 @@ def main():
                 "blocks_total": tstatus["blocks_total"],
                 "blocks_transcribed": tstatus["blocks_transcribed"],
                 "blocks_pending": tstatus["blocks_pending"],
-                "transcript_ready": tstatus["transcript_ready"],
-                "transcript_pending": tstatus["transcript_pending"],
             },
             "next": payload,
             "next_transcribe": transcribe_payload,
@@ -705,7 +676,7 @@ def main():
     if tstatus["has_manifest"]:
         print(f"[*] 块级转录进度: 块 {tstatus['blocks_transcribed']}/{tstatus['blocks_total']} 已转录"
               f"（块目标 {tstatus['target_minutes']:g} 分钟 / 上限 {tstatus['ceiling_minutes']:g} 分钟）"
-              f" | 逐字稿就绪 {tstatus['transcript_ready']} 集 | 待转录 {tstatus['blocks_pending']} 块")
+              f" | 待转录 {tstatus['blocks_pending']} 块")
     print(f"[*] 阶段二模块资产: 模块全书 {status['textbooks_count']} 部 | 复习笔记 {status['notes_count']} 篇")
     status_label = "【已竣工 - 可放行进入阶段二模块整编】" if status["is_stage1_complete"] else "【阶段一动态滑动流水线进行中】"
     print(f"[*] 当前阶段状态: {status_label}")
@@ -726,7 +697,6 @@ def main():
                   f" {len(item['episodes'])} 集]: {item['audio_file']}")
             print(f"    - 转录任务书: {item['task_file']}")
             print(f"    - 块级逐字稿: {item['block_transcript']}")
-            print(f"    - 切分后产出: {len(item['episode_transcripts'])} 份分集逐字稿")
 
     if payload:
         print(f"\n【待派发模块长文 Next {len(payload)} 个块（一个块一篇）】：")

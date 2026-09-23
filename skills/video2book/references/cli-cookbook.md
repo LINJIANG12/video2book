@@ -57,18 +57,16 @@ video2book pipeline "https://www.bilibili.com/video/BV14VqVBrEhc" --all --dry-ru
 # 只收齐音频并装箱、导出块级转录任务书后返回（原 `audio` 子命令）
 video2book pipeline "https://www.bilibili.com/video/BV14VqVBrEhc" --all --audio-only
 
-# 可选：用 B 站中文字幕直接生成块级逐字稿，替代听音转录（需先 login --sessdata）
+# 可选：用 B 站中文字幕直接生成块级逐字稿，替代听音转录（需先收齐音频并装箱，建议先 login --sessdata）
 video2book fetch-subtitles "<产物根>/<课程工作区>"
 video2book fetch-subtitles "<产物根>/<课程工作区>" --force   # 覆盖已有逐字稿
 ```
 
-> 去重由 `pipeline` 在音频收齐后**自动执行**（相同分集按 SHA-256 指纹复用既有语料与长文，0 Token），
-> 不再有独立的 `dedup` 命令。
-
-> **字幕转逐字稿（可选）**：只取**中文字幕**——人工上传的 CC 字幕优先，AI 自动字幕兜底；
-> 一个块里只要有任一集没有中文字幕，该块**整块跳过**（不产出半份逐字稿），留给听音转录兜底。
-> 产出的逐字稿抬头会注明「来源为 B 站字幕、非听音转录，质量可能有差距」。
-> 需登录态（`login --sessdata`）；字幕为平台生成/上传，识别与断句质量不一，据此成文时对存疑处保持谨慎。
+> **字幕转逐字稿（可选前置，可替代听音）**：
+> - **何时用**：B 站课程、各分集普遍配有中文字幕（尤其是人工上传/校对的 CC 字幕）。直接由字幕生成块级逐字稿，可实现 0 Token 零开销迅速就绪，完全免去大模型听音消耗。
+> - **何时不用**：课程无中文字幕、AI 自动生成的字幕断句错乱或技术术语识别质量差、或非 B 站源（YouTube/抖音/本地）。此时无需强求字幕，直接留给专职转录角色听音转录即可。
+> - **仍需先收音频**：`fetch-subtitles` 是在音频收齐并装箱成块后执行的（依据 `blocks.json` 确定块边界并直出块级逐字稿）。
+> - **兜底机制**：只取中文字幕，人工 CC 字幕优先，AI 自动字幕兜底；一个块里只要有任一集缺失中文字幕，该块**整块跳过**，留给后续听音角色兜底转录。产出的逐字稿抬头会注明来源为 B 站字幕。需登录态（`login --sessdata`）。
 
 ## 场景四：重新装箱 / 改动块标题
 
@@ -190,7 +188,7 @@ python src/cli.py sync                 # 以磁盘产物为唯一真相回填 ma
 | `check` | `--stage1` `--deliver` `--fix-numbering` `--strict` `--dir` `--task` `--base-dir` `--json` `--min-freq N`(2) `--min-coverage F`(0.5) `--max-truncated N`(4) `--require-structure` `--require-lang` `--require-no-numbering` `--only {textbooks,articles,both}` `--dry-run` `--max-samples N`(5) `--hash-nonheading` | `--stage1` 依据级校验（块级逐字稿技术实体在模块长文里的覆盖率）；`--deliver`（默认）笔记成色 + 渲染合规；`--fix-numbering` 存量标题去号；默认提示级，`--strict` 才纳入门禁 |
 | `cleanup` | `--keep N`（默认 1） `--dry-run` `--task 关键字` `--all` | 每类保留 N 份任务书范本；`--all` 为兼容保留（不加即全量） |
 | `sync` | `--dry-run` `--task 关键字` `--all` | 按磁盘对账回填 manifest |
-| `queue_tracker.py` | `--next-transcribe [N]` `--next-module N` `--next-note N` `--summary` `--json` `--dir PATH` `--pattern/--task 关键字` `--base-dir DIR` `--log-dispatch` | 派发前取载荷：三种载荷均自带预制 `dispatch_prompt`；`--next-transcribe` 默认并发 3 个任务；`--summary` 额外给出 `BLOCKS/BLOCKS_TRANSCRIBED/TRANSCRIPT_READY`（就绪口径是块）；`--log-dispatch` 追加派发台账（默认关闭） |
+| `queue_tracker.py` | `--next-transcribe [N]` `--next-module N` `--next-note N` `--summary` `--json` `--dir PATH` `--pattern/--task 关键字` `--base-dir DIR` `--log-dispatch` | 派发前取载荷：三种载荷均自带预制 `dispatch_prompt`；`--next-transcribe` 默认并发 3 个任务；`--summary` 额外给出 `BLOCKS/BLOCKS_TRANSCRIBED/BLOCKS_PENDING`（就绪口径是块）；`--log-dispatch` 追加派发台账（默认关闭） |
 
 ## 其余脚本入口
 
@@ -205,7 +203,7 @@ python src/cli.py sync                 # 以磁盘产物为唯一真相回填 ma
 - `0` — 正常结束
 - `1` — 通用错误 / 目标工作区缺失或参数非法
 - `2` — 阶段一准备错误（音频下载未 100% 就绪或解析异常）
-- `3` — 块级转录装箱/切分异常，或任务书导出失败
+- `3` — 块级转录装箱异常，或任务书导出失败
 - `4` — 未确认长文提示词风格，即 `--article-type` 缺失或取值非法
 
 ---

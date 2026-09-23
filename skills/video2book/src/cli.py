@@ -4,8 +4,9 @@
 
 Commands:
   pipeline         - Stage-1 single entry: parse topology (--dry-run) / gather audio+blocks (--audio-only)
-                     / full run: audio -> blocks -> dispatch task-files -> auto dedup + cleanup + sync
+                     / full run: audio -> blocks -> dispatch task-files -> auto cleanup + sync
   merge-audio      - (Re)pack per-episode audio into blocks and export block task files
+  fetch-subtitles  - Fetch Bilibili Chinese subtitles to generate block transcripts directly
   cluster-notes    - Aggregate blocks into review notes (task files), then auto cleanup + sync
   cluster-articles - Consolidate module long-forms into modular textbooks, then auto cleanup + sync
   check            - Unified quality gate: --stage1 (grounding) / --deliver (note+render) / --fix-numbering
@@ -228,7 +229,7 @@ def cmd_merge_audio(args):
 
     print(f"[✓] 块清单：{AudioMerger.manifest_path(ws)}")
     print(f"[✓] 块级转录任务书 {len(result['blocks'])} 份 → {Path(ws.subtitles_dir).name}/")
-    print("[i] 下一步：转录角色照任务书用 read_media 出块级逐字稿；写作角色读它写模块长文（一个块一篇）")
+    print("[i] 下一步：转录角色照任务书出块级逐字稿（优先 read_media，无 ext 时才 read_audio）；写作角色读它写模块长文（一个块一篇）")
 
 
 def cmd_fetch_subtitles(args):
@@ -239,7 +240,6 @@ def cmd_fetch_subtitles(args):
     """
     from src.core import subtitles as subtitle_core
     from src.core.audio_merger import AudioMerger
-    from src.core.transcript_splitter import TranscriptSplitter
 
     ws = _workspace_from_path(args.workspace)
     blocks = AudioMerger.load_blocks(ws)
@@ -296,7 +296,7 @@ def cmd_fetch_subtitles(args):
     缺字幕: list = []
     for block in blocks:
         block_id = int(block.get("block_id") or 0)
-        目标 = TranscriptSplitter.block_path(ws, block)
+        目标 = TaskWorkspace.block_path(ws, block)
         if 目标.exists() and 目标.stat().st_size > 0 and not args.force:
             已跳过.append(block_id)
             print(f"    [=] BLK{block_id:02d} 已有逐字稿，跳过（--force 覆盖）")
@@ -310,7 +310,7 @@ def cmd_fetch_subtitles(args):
             缺字幕.append((block_id, 结果["missing_pages"]))
             print(f"    [!] BLK{block_id:02d} 缺中文字幕的分集 {结果['missing_pages']} → 整块留给听音转录")
             continue
-        路径 = TranscriptSplitter.write_block_transcript(ws, block, 结果["text"])
+        路径 = TaskWorkspace.write_block_transcript(ws, block, 结果["text"])
         已写.append(block_id)
         print(f"    [✓] BLK{block_id:02d} {AudioMerger.block_span(block)}：{结果['kind_label']}"
               f"，{路径.name}（{len(结果['text'].encode('utf-8'))} 字节）")
@@ -711,7 +711,7 @@ def cmd_info(args):
         else f"未发现 {_omni_dir}{_omni_src}"))
     print("    read_audio（宿主原生听音）  ← 宿主挂载注册名 omni-media（--mode native，零凭证）")
     print("    read_media（外部模型代读）  ← 宿主挂载注册名 omni-media-ext（--mode ext，需 api_key）")
-    print("  两者都不可用时：阶段一必须停下并提示先挂载其一，不得跳过音频保真直接编造正文。")
+    print("  两者都不可用时：阶段一必须停下并提示先挂载其一（B 站课程有中文字幕时可由字幕链路替代），不得跳过音频保真直接编造正文。")
     print("=" * 65)
     print("【三域路径（代码 / MCP / 产物 互相隔离）】")
     _三域 = _paths.describe()

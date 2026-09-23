@@ -45,7 +45,7 @@ _NOTE_RE = re.compile(r"^笔记(\d+)_")
 # 块级转录任务书/成品统一为 `BLKxx_…`（一个块一份）：块号是清单里的事实
 _BLOCK_RE = re.compile(r"^BLK(\d+)_")
 # 转录任务书 / 逐字稿的文件名后缀（与 `export_block_transcribe_task`、
-# `TranscriptSplitter.block_path` 同源；这里只做**同名换后缀**的定位，不重算路径）
+# `TaskWorkspace.block_path` 同源；这里只做**同名换后缀**的定位，不重算路径）
 _TRANSCRIBE_TASK_SUFFIX = "_转录任务书.md"
 _BLOCK_TRANSCRIPT_SUFFIX = "_逐字稿.md"
 

@@ -501,16 +501,6 @@ class PipelineCoordinator:
             print("=" * 65, file=sys.stderr)
             raise PipelineGateError(2)
 
-        # ===== 自动去重：相同分集（SHA-256 指纹）复用既有语料与长文，0 Token =====
-        # 原 `dedup` 子命令由 pipeline 在音频收齐后自动执行——手动那一步没有存在价值，
-        # 漏跑只会白烧 token；显式去重需求仍可用 `merge-audio` 的幂等重装链路覆盖。
-        try:
-            _dups = ws.sync_duplicate_assets(dry_run=False)
-            if _dups:
-                print(f"[*] 自动去重：复用 {len(_dups)} 组重复分集的既有语料/长文（0 Token）")
-        except Exception as _dup_err:
-            print(f"[!] 自动去重已跳过：{_dup_err}", file=sys.stderr)
-
         # ===== 阶段一点五「音频装箱合并」：把连续的几集拼成块（每块 40–60 分钟）=====
         # 块不只是「少调用几次取音接口」的容器：**块就是知识模块**。转录按块走，长文按块写
         # （一块一篇模块长文），教材按块整编，笔记按块归并——整条链路的下游都以块为粒度。
@@ -601,7 +591,6 @@ class PipelineCoordinator:
         print(f"[*] 长文提示词风格：{article_type or '未指定（将在派发时终止并给出风格菜单）'}")
         print("=" * 65)
 
-        from src.core.transcript_splitter import TranscriptSplitter
         from src.core.workspace import find_module_article, module_article_path
 
         manifest_entries: List[Dict[str, Any]] = []
@@ -612,7 +601,7 @@ class PipelineCoordinator:
             block_id = int(block.get("block_id") or 0)
             span = str(block.get("span") or AudioMerger.block_span(block))
             block_title = str(block.get("title") or "").strip() or span
-            transcript_path = TranscriptSplitter.block_path(ws, block)
+            transcript_path = TaskWorkspace.block_path(ws, block)
             target_article = module_article_path(ws.articles_dir, block)
             print(
                 f"\n[{idx:02d}/{len(blocks):02d}] BLK{block_id:02d} {span} {block_title}"

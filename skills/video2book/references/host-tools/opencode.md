@@ -14,7 +14,7 @@
 | 待办清单 | `todowrite` |
 | 派发子智能体 | `task` 工具，`subagent_type: "general"`（代码库探索可用 `"explore"`） |
 | 调用技能 | OpenCode 原生 `skill` 工具 |
-| 原生听音 | 先用 MCP 工具 `read_audio` 取切片，再用上表的 `read` 打开切片路径聆听；<br>宿主无原生音频模态时改用 MCP 工具 `read_media` |
+| 听音转录 | 优先用 MCP 工具 `read_media`（外部代读，支持 `output_file` 直写落盘）；<br>无 ext 时用 `read_audio` 取切片，再用上表的 `read` 打开切片路径聆听 |
 
 ## 安装
 

@@ -38,11 +38,12 @@ from src.core.deliverable_lint import (
     summarize_render,
 )
 from src.core.task_cleanup import find_workspaces
-from src.core.transcript_splitter import TranscriptSplitter
 from src.core.workspace import TaskWorkspace, find_module_article
 
 # 非交付物：任务书是派发物，逐字稿是给写作角色看的原始语料（ASR 文本里围栏不闭合属正常）。
-EXCLUDE_NAME_SUFFIXES = ("_TASK.md", "_KERNEL_TASK.md", "_转录任务书.md", "_逐字稿.md")
+EXCLUDE_NAME_SUFFIXES = (
+    "_TASK.md", "_KERNEL_TASK.md", "_转录任务书.md", TaskWorkspace.TRANSCRIPT_SUFFIX,
+)
 
 # 依据级校验阈值
 DEFAULT_MIN_COVERAGE = 0.5
@@ -125,7 +126,7 @@ def check_grounding_block(
         entry["error"] = str(err)
         return entry
 
-    transcript = TranscriptSplitter.block_path(ws, block)
+    transcript = TaskWorkspace.block_path(ws, block)
     if not transcript.exists():
         # 没有逐字稿就没有比对基准：计入不可校验，绝不因此判失败
         entry["status"] = "unverifiable"
