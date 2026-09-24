@@ -57,6 +57,75 @@ _TIMESTAMP_BLOCK_RE = re.compile(r"[\[【]\s*(?:\d{1,3}:)?\d{1,2}:\d{2}(?:[.,]\d
 _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{2,}")
 # 多位数字：单数字噪声太大，只要 2 位以上（含小数）
 _NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
+# 连续汉字段（骨架法的切分单元；逐字稿无标点，不能靠标点分词）
+_CN_RUN_RE = re.compile(r"[^\u4e00-\u9fff]+")
+
+# 中文实体单独用更高的频次门槛：中文语料里口水串的出现次数远高于英文虚词，
+# 与英文层共用门槛会把「这个/所以/然后」灌进分母。
+DEFAULT_CN_MIN_FREQ = 3
+
+# 繁简归一表（常用字子集，纯标准库：环境无 opencc/zhconv）。
+# 为什么必须有：转录源（尤其 B 站 AI 字幕）繁简混杂，同一术语会以两种字形
+# 并存，不归一就算成两个词，长文照写也命中不了。
+TRAD_TO_SIMP = {
+    "個": "个", "這": "这", "關": "关", "係": "系", "數": "数", "據": "据", "庫": "库",
+    "學": "学", "習": "习", "們": "们", "對": "对", "說": "说", "講": "讲", "課": "课",
+    "時": "时", "間": "间", "問": "问", "題": "题", "點": "点", "線": "线", "條": "条",
+    "進": "进", "過": "过", "還": "还", "現": "现", "發": "发", "應": "应", "該": "该",
+    "為": "为", "實": "实", "機": "机", "電": "电", "軟": "软", "硬": "硬", "體": "体",
+    "結": "结", "構": "构", "設": "设", "計": "计", "劃": "划", "執": "执", "態": "态",
+    "屬": "属", "優": "优", "選": "选", "擇": "择", "義": "义", "賴": "赖", "範": "范",
+    "鍵": "键", "碼": "码", "鎖": "锁", "視": "视", "圖": "图", "參": "参", "傳": "传",
+    "輸": "输", "協": "协", "處": "处", "並": "并", "儲": "储", "讀": "读", "寫": "写",
+    "檔": "档", "資": "资", "料": "料", "記": "记", "錄": "录", "匯": "汇", "總": "总",
+    "檢": "检", "驗": "验", "標": "标", "準": "准", "術": "术", "語": "语", "詞": "词",
+    "則": "则", "導": "导", "證": "证", "圍": "围", "繞": "绕", "轉": "转", "換": "换",
+    "價": "价", "級": "级", "聯": "联", "絡": "络", "議": "议", "編": "编", "譯": "译",
+    "環": "环", "境": "境", "項": "项", "開": "开", "訓": "训", "練": "练", "述": "述",
+    "決": "决", "覆": "覆", "蓋": "盖", "腦": "脑", "靠": "靠", "份": "份", "恢": "恢",
+    "復": "复", "誌": "志", "審": "审", "戶": "户", "動": "动", "靜": "静", "務": "务",
+    "競": "竞", "爭": "争", "兩": "两", "段": "段", "別": "别", "析": "析", "異": "异",
+    "況": "况", "訪": "访", "輯": "辑", "刪": "删", "觸": "触", "認": "认", "獨": "独",
+    "維": "维", "護": "护", "與": "与", "評": "评", "估": "估", "調": "调", "內": "内",
+    "完": "完", "斷": "断", "確": "确", "錯": "错", "誤": "误", "略": "略", "假": "假",
+    "來": "来", "值": "值", "備": "备", "加": "加", "反": "反", "員": "员", "存": "存", "密": "密", "將": "将", "對": "对", "常": "常", "序": "序", "庫": "库", "弱": "弱", "從": "从", "接": "接", "擇": "择", "據": "据", "整": "整", "數": "数", "會": "会", "束": "束", "案": "案", "條": "条", "業": "业", "標": "标", "樣": "样", "正": "正", "準": "准", "無": "无", "照": "照", "碼": "码", "立": "立", "策": "策", "算": "算", "範": "范", "約": "约", "級": "级", "絡": "络", "統": "统", "網": "网", "線": "线", "織": "织", "置": "置", "聯": "联", "致": "致", "處": "处", "計": "计", "設": "设", "讓": "让", "賴": "赖", "輯": "辑", "運": "运", "達": "达", "選": "选", "邏": "逻", "鏈": "链", "關": "关", "頁": "页",
+}
+
+# 口水词（英文）：课堂高频但与技术无关。它们留在分母里就是「污染型扣分」——
+# 逼写作者把 sorry / ppt 写进正文来凑覆盖率。宁可漏检噪声，也不可奖励污染。
+FILLER_TOKENS = frozenset({
+    "ppt", "powerpoint", "okay", "ok", "sorry", "hello", "yeah", "yes", "hmm",
+    "course", "lecture", "video", "class", "test", "hello",
+})
+
+# 中文停用字：虚词、连接词、代词、数量词、口头禅。骨架法把连续汉字段里的
+# 这些字删掉，剩下的就是术语核心（「這個資料庫系統」→「数据库系统」）。
+CN_STOP_CHARS = frozenset(
+    "的了是在和就都也你他她它这那有吧呢啊吗哦嗯呀嘛呗咱"
+    "把被对从为与及或者但又再只更最太很非没不未所由向朝"
+    "来去上下里中前后时会说想要能可应该当然其实"
+    "我你他她它们咱您谁什么哪怎嘛噢哈嘿嘻"
+    "一二三四五六七八九十之其此该每如若则乃亦且跟"
+    "同比较据照着第叫叫做明白首先另外够给专业问题"
+    # 高频功能动词/副词：实测逐字稿里它们出现数百次，不切开会
+    # 把两侧术语粘成一个假片段（「资料库系统讲资料库系统」不被切开，
+    # 术语计数从 3 掉到 1）。
+    # 刻意不收构词字：式(范式/模式)、表(关系表)、接(连接)、分(部分/分解)、
+    # 候(候选码)、体(实体)、内(内模式)、定(定义/定点)…它们是术语的一部分，
+    # 收进来会把真术语切碎——实测「式」进表后「范式」整词直接消失。
+    "讲看到用出行好两样人相过点方等边起已让并因以果虽开始继续还才刚正准备发现觉得认表示例般通常大概必须需肯东西事情法面况部分整体各几百千多少次"
+)
+
+# 停用字连续串：在段内把「连续非停用片段」切出来（骨架法的真正切分动作）。
+# 必须定义在 CN_STOP_CHARS 之后——字符集要从它构造。
+_CN_STOP_RUN_RE = re.compile("[" + re.escape("".join(sorted(CN_STOP_CHARS))) + "]+")
+
+
+def normalize_script(text: str) -> str:
+    """繁体折简体（常用字子集）。逐字稿繁简混杂时不归一，同术语会算成两个。"""
+    if not text or not any(ch in TRAD_TO_SIMP for ch in text):
+        return text or ""
+    return "".join(TRAD_TO_SIMP.get(ch, ch) for ch in text)
 
 
 def resolve_workspaces(
@@ -82,16 +151,45 @@ def resolve_workspaces(
 # ---------------------------------------------------------------------------
 
 def extract_entities(text: str, min_freq: int) -> Counter:
-    """抽取候选技术实体及其在语料中的出现次数（已抹掉时间戳）。"""
+    """抽取英文/数字层实体（兼容旧口径：只数讲师念出的标识符与多位数字）。
+
+    口水词不进分母。见 `extract_cn_entities` —— 中文层是这道门禁真正的补丁。
+    """
     body = _TIMESTAMP_BLOCK_RE.sub(" ", text or "")
     counter: Counter = Counter()
     for match in _TOKEN_RE.finditer(body):
-        counter[match.group(0).lower()] += 1
+        token = match.group(0).lower()
+        if token in FILLER_TOKENS:
+            continue
+        counter[token] += 1
     for match in _NUMBER_RE.finditer(body):
         raw = match.group(0)
         if len(raw.replace(".", "")) >= 2:
             counter[raw] += 1
     return Counter({token: n for token, n in counter.items() if n >= min_freq})
+
+
+def extract_cn_entities(text: str, min_freq: int = DEFAULT_CN_MIN_FREQ) -> Counter:
+    """抽取中文技术实体：连续汉字段去掉停用字后剩下的「术语骨架」。
+
+    为什么用骨架法而不是滑窗切 n-gram：逐字稿是无标点口语转录，滑窗会把
+    「函数依赖」切碎成「函数 / 数依 / 依赖」重复计数——实测实体数从 85 膨胀
+    到 6008，忠实长文的覆盖率被自己的碎片淹没（13%）。骨架法保留完整术语，
+    实体数回到几十量级。
+
+    为什么先繁简归一：转录源常见繁简混杂，「這個資料庫系統」与「这个数据库系统」
+    会被算成两个术语，长文照写也命中不了其中一个。
+    """
+    body = normalize_script(_TIMESTAMP_BLOCK_RE.sub(" ", text or ""))
+    counter: Counter = Counter()
+    for run in _CN_RUN_RE.split(body):
+        # 段内再按停用字切开：每个「连续非停用字片段」独立计数。
+        # 不能对整段一次性去停用字——同段内重复出现的术语会被粘连成
+        # 「范式范式」这种既非真实术语、又吞掉「范式」计数的假骨架。
+        for piece in _CN_STOP_RUN_RE.split(run):
+            if len(piece) >= 2:
+                counter[piece] += 1
+    return Counter({term: n for term, n in counter.items() if n >= min_freq})
 
 
 def check_grounding_block(
@@ -141,20 +239,44 @@ def check_grounding_block(
     entry["transcript"] = str(transcript)
     entry["transcript_bytes"] = transcript.stat().st_size
 
+    # 语料要先归一再抽：长文侧同样归一后才好比对（同一术语可能一边繁一边简）。
     entities = extract_entities(transcript_text, min_freq)
-    if not entities:
+    cn_entities = extract_cn_entities(transcript_text)
+    if not entities and not cn_entities:
         entry["status"] = "no_entities"
         return entry
 
-    missing = [token for token in entities if token not in article_text]
-    covered = len(entities) - len(missing)
-    coverage = covered / len(entities)
-    entry["entities"] = len(entities)
+    article_norm = normalize_script(article_text)
+
+    def _hit(token: str) -> bool:
+        return token in article_text or token in article_norm
+
+    def _layer(counter: Counter) -> tuple:
+        """(覆盖率, 实体数, 命中数, 缺失清单)。空层返回 (None, 0, 0, [])。"""
+        if not counter:
+            return None, 0, 0, []
+        missing = [token for token in counter if not _hit(token)]
+        covered = len(counter) - len(missing)
+        return covered / len(counter), len(counter), covered, missing
+
+    coverage, total, covered, missing = _layer(entities)
+    cn_coverage, cn_total, cn_covered, cn_missing = _layer(cn_entities)
+
+    entry["entities"] = total
     entry["covered"] = covered
-    entry["coverage"] = round(coverage, 4)
+    entry["coverage"] = round(coverage, 4) if coverage is not None else None
+    entry["cn_entities"] = cn_total
+    entry["cn_covered"] = cn_covered
+    entry["cn_coverage"] = round(cn_coverage, 4) if cn_coverage is not None else None
     # 缺失清单按语料里的出现频次排序：出现得越多却没写进长文，越可疑
     entry["missing"] = sorted(missing, key=lambda t: -entities[t])[:12]
-    entry["status"] = "ok" if coverage >= min_coverage else "low_coverage"
+    entry["cn_missing"] = sorted(cn_missing, key=lambda t: -cn_entities[t])[:12]
+
+    # 双层判据：任一层过线即放行。忠实长文常把 sno/cno 改写成「学号/课程号」，
+    # 英文层因此偏低——中文层正是救它的那一层；而脱稿文两层同时低，仍被拦下。
+    layers = [c for c in (coverage, cn_coverage) if c is not None]
+    passed = bool(layers) and max(layers) >= min_coverage
+    entry["status"] = "ok" if passed else "low_coverage"
     return entry
 
 
@@ -168,7 +290,13 @@ def check_grounding_workspace(ws: TaskWorkspace, min_freq: int, min_coverage: fl
     checked = [e for e in entries if e["status"] in ("ok", "low_coverage")]
     low = [e for e in checked if e["status"] == "low_coverage"]
     unverifiable = [e for e in entries if e["status"] == "unverifiable"]
-    avg = round(sum(e["coverage"] for e in checked) / len(checked), 4) if checked else None
+    # 展示用的覆盖率取两层里更高的那层（与放行判据一致），否则会出现
+    # 「平均覆盖 22% 却全部达标」这种自相矛盾的读数。
+    def _best(e: Dict[str, Any]) -> float:
+        layers = [c for c in (e.get("coverage"), e.get("cn_coverage")) if c is not None]
+        return max(layers) if layers else 0.0
+
+    avg = round(sum(_best(e) for e in checked) / len(checked), 4) if checked else None
     return {
         "workspace": ws.root_dir.name,
         "total": len(entries),
@@ -182,6 +310,7 @@ def check_grounding_workspace(ws: TaskWorkspace, min_freq: int, min_coverage: fl
         "avg_coverage": avg,
         "min_coverage": min_coverage,
         "min_freq": min_freq,
+        "cn_min_freq": DEFAULT_CN_MIN_FREQ,
         "entries": entries,
         "low_entries": low,
     }
@@ -212,10 +341,10 @@ def run_stage1(
     else:
         print("=" * 72)
         print("[*] 长文依据级校验（模块长文 ↔ 块级逐字稿 技术实体覆盖率）")
-        print(f"[*] 口径：实体出现次数 ≥ {min_freq}；覆盖率下限 {min_coverage:.0%}；"
-              f"无逐字稿的块不参与判定")
-        print("[i] 这是启发式：只测英文标识符与数字，中文表述为主但忠实于语料的长文也会偏低；"
-              "它证明「用了语料」，不证明「用得对」")
+        print(f"[*] 口径：英文/数字实体出现 ≥ {min_freq} 次、中文术语骨架 ≥ {DEFAULT_CN_MIN_FREQ} 次；"
+              f"两层任一层覆盖率达 {min_coverage:.0%} 即放行；无逐字稿的块不参与判定")
+        print("[i] 这是启发式：分层测「讲师念出的英文/数字」与「中文术语骨架」（繁简已归一、"
+              "口水词已剔除），证明「用了语料」，不证明「用得对」")
         print("=" * 72)
         for report in reports:
             print(f"\n▶ {report['workspace']}")
@@ -225,18 +354,24 @@ def run_stage1(
                   f"{report['read_error']} 块读取失败）")
             print(f"    达标 {report['ok']} | 低于下限 {report['low_coverage']} | 平均覆盖 {avg}")
             for entry in report["low_entries"][:12]:
-                print(f"    [✗] BLK{entry['block_id']:02d} {entry['span']} 覆盖 {entry['coverage']:.1%} "
-                      f"（{entry['covered']}/{entry['entities']} 个实体）"
+                en_c = entry.get("coverage")
+                cn_c = entry.get("cn_coverage")
+                en_txt = "—" if en_c is None else f"{en_c:.0%}（{entry['covered']}/{entry['entities']}）"
+                cn_txt = "—" if cn_c is None else f"{cn_c:.0%}（{entry['cn_covered']}/{entry['cn_entities']}）"
+                print(f"    [✗] BLK{entry['block_id']:02d} {entry['span']}"
+                      f" 英文层 {en_txt} / 中文层 {cn_txt}"
                       f" 长文 {entry['article_bytes']:,}B / 逐字稿 {entry['transcript_bytes']:,}B")
-                if entry["missing"]:
-                    print(f"         └ 逐字稿里高频但长文未出现：{'、'.join(entry['missing'][:8])}")
+                _miss = list(entry.get("missing") or [])[:5] + list(entry.get("cn_missing") or [])[:5]
+                if _miss:
+                    print(f"         └ 逐字稿里高频但长文未出现：{'、'.join(_miss)}")
             if report["low_coverage"] > 12:
                 print(f"    … 其余 {report['low_coverage'] - 12} 块见 --json 输出")
             if report["checked"] and report["low_coverage"] == 0:
                 print("    ── 全部达标")
             if not report["checked"]:
                 print("    ── 无可校验的块（尚无块级逐字稿 / 尚无模块长文 / 逐字稿里没有重复出现的"
-                      "英文标识符与多位数字——纯中文口语讲述的块会落在这里，不等于长文有问题）")
+                      "够频次的英文标识符、多位数字或中文术语——过短的块会落在这里，"
+                      "不等于长文有问题）")
         print("\n" + "=" * 72)
 
     any_low = any(r["low_coverage"] > 0 for r in reports)

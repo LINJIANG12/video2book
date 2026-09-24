@@ -276,5 +276,106 @@ def test_check_stage1_json_reports_no_article(run_cli, make_parts, blocks_factor
     report = json.loads(result.out)["reports"][0]
     assert report["total"] == 1 and report["no_article"] == 1, f"口径异常: {report}"
 
+
+# ---------------------------------------------------------------------------
+# 4) 依据级覆盖率：中文术语层 + 双层判据 + 口水词剔除
+# ---------------------------------------------------------------------------
+# 这三条契约各防一种实测故障：
+# 1. **中文长文被误杀**：逐字稿是中文口语，讲师不念英文时，忠实却通篇中文
+#    表述的长文抽不到任何实体 → 覆盖率 0 → 被判「没覆盖语料」。门禁反过来
+#    惩罚了正确写法。
+# 2. **口水词污染分母**：`ppt`/`sorry` 占着分母，逼写作者凑词进正文换覆盖率。
+# 3. **碎片化**：中文若用滑窗切 n-gram，「函数依赖」会被切成「函数/数依/依赖」
+#    重复计数，实体数暴涨、忠实文覆盖率被自己的碎片淹没。
+
+
+def test_cn_entities_keep_terminology_and_drop_filler():
+    """中文层要留下真术语、滤掉口水词；英文层不得把 ppt/sorry 算进分母。"""
+    from src.core.quality_gate import extract_cn_entities, extract_entities
+
+    # 显式 min_freq=2：这条测的是「抽得出真术语、滤得掉口水词」，
+    # 不是默认门槛（默认 3 是给真实长逐字稿用的，短样本够不上）。
+    cn = extract_cn_entities(
+        "范式讲了范式，范式又回到范式。完全函数依赖也讲完全函数依赖。", min_freq=2
+    )
+    assert "范式" in cn, f"高频中文术语未被抽出: {list(cn)}"
+    assert any("完全函数依赖" in t for t in cn), f"多字术语骨架丢失: {list(cn)}"
+    # 停用字被剥掉：这些串不该以原样留在实体里
+    assert not any(t in ("这个", "所以这个") for t in cn), f"口水串进了实体: {list(cn)}"
+
+    en = extract_entities("ppt ppt sorry sorry select select where where", min_freq=2)
+    assert "select" in en and "where" in en, f"真英文术语丢了: {list(en)}"
+    assert "ppt" not in en and "sorry" not in en, f"口水词进了分母: {list(en)}"
+
+
+def test_cn_entities_normalize_traditional_to_simplified():
+    """转录源繁简混杂：不归一则「這個/这个」算两个词，长文照写也命中不了。"""
+    from src.core.quality_gate import extract_cn_entities, normalize_script
+
+    assert normalize_script("這個資料庫系統") == "这个资料库系统"
+    ents = extract_cn_entities("資料庫系統講資料庫系統，資料庫系統很重要。")
+    assert any("资料库系统" in t for t in ents), f"繁体术语未归一: {list(ents)}"
+
+
+def _grounding_entry(make_parts, blocks_factory, *, transcript: str, article: str,
+                     span: str = "P01-P02"):
+    """落一份「块清单 + 块级逐字稿 + 模块长文」，跑一次依据级判定并返回结果。
+
+    走真实 TaskWorkspace（而不是临时目录拼的 SimpleNamespace）：判定函数内部
+    走 find_module_article / TaskWorkspace.block_path 定位，假的 ws 对象会让它
+    找不到文章、返回 no_article，测的就不是覆盖率逻辑了。
+    长文用 pad_to 补到产品阈值以上——find_module_article 按字节数判「已产出」，
+    样本太短会被当成没交稿。
+    """
+    from src.core.quality_gate import check_grounding_block
+    from src.core.workspace import TaskWorkspace, module_article_path
+
+    ws = make_parts((1, 2))
+    block = blocks_factory(1, [1, 2], "关系模型", span=span)
+    write_blocks(ws, [block])
+    ws.subtitles_dir.mkdir(parents=True, exist_ok=True)
+    TaskWorkspace.block_path(ws, block).write_text(transcript, encoding="utf-8")
+    ws.articles_dir.mkdir(parents=True, exist_ok=True)
+    module_article_path(ws.articles_dir, block).write_text(
+        pad_to(article), encoding="utf-8"
+    )
+    return check_grounding_block(ws, block, 2, 0.5)
+
+
+def test_stage1_gate_accepts_faithful_chinese_article(make_parts, blocks_factory):
+    """忠实但通篇中文表述的长文必须放行——这正是原门禁误杀的那一类。"""
+    transcript = (
+        "我们讲关系数据库的关系模型。关系的码就是候选码，候选码能唯一确定一个元组。"
+        "关系的属性也叫字段，字段来自关系的域。范式有第一范式、第二范式、第三范式。"
+        "完全函数依赖是第一范式到第二范式之间的关系，部分函数依赖决定第二范式。"
+    ) * 6
+    # 忠实复述讲法，但把英文例子改写成中文——英文层必然低，中文层应当救回
+    article = (
+        "关系数据库的核心是关系模型。关系里的码叫候选码，它能唯一确定一个元组。"
+        "关系中的属性也叫字段，字段取自关系的域。范式体系包含第一范式、第二范式和第三范式。"
+        "完全函数依赖与部分函数依赖是判断第二范式的关键。"
+    ) * 6
+
+    entry = _grounding_entry(
+        make_parts, blocks_factory, transcript=transcript, article=article
+    )
+    assert entry["cn_entities"] > 0, f"中文层没有抽到任何实体: {entry}"
+    assert entry["status"] == "ok", f"忠实中文长文被误杀: {entry}"
+
+
+def test_stage1_gate_rejects_off_topic_article(make_parts, blocks_factory):
+    """脱稿另写的文章：两层覆盖都低，必须拦下（中文层不是万能放行器）。"""
+    transcript = (
+        "今天讲查询优化。先算清楚代价，再谈快。选择运算先做，投影运算后做。"
+        "连接有嵌套循环连接和排序合并连接，等值连接和不等值连接。代价估算看块数。"
+    ) * 6
+    article = "今天天气不错，我们去公园散步吧，顺便买点吃的喝的。"
+
+    entry = _grounding_entry(
+        make_parts, blocks_factory, transcript=transcript, article=article
+    )
+    assert entry["status"] == "low_coverage", f"脱稿文被放行了: {entry}"
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))
