@@ -475,7 +475,7 @@ def _autoclose_workspace(ws, label: str) -> None:
 def cmd_check(args):
     """交付质量门禁统一入口（合并原三个质检脚本 + 标题去号清理脚本）。
 
-    - `--stage1`：阶段一放行门禁——模块长文是否基于本块逐字稿（实体覆盖率）；
+    - `--stage1`：阶段一放行门禁——模块长文是否基于本块逐字稿（双层实体覆盖率：英文标识符与多位数字 / 中文技术术语骨架，任一层达下限即放行）；
     - `--deliver`（默认）：交付前体检——笔记成色 + 渲染合规；
     - `--fix-numbering`：存量产物标题手写序号就地清理（幂等，可先 `--dry-run` 预演）；
     - `--strict`：致命项才返回非零退出码（默认提示级）。
@@ -881,9 +881,10 @@ def main():
     p_check.add_argument("--json", action="store_true", help="JSON 输出")
     p_check.add_argument("--strict", action="store_true", help="存在致命项才返回非零（默认提示级）")
     p_check.add_argument("--min-freq", type=int, default=2, dest="min_freq",
-                         help="[--stage1] 实体在逐字稿里的最低出现次数（默认 2）")
+                         help="[--stage1] 英文标识符/数字实体的最低出现次数（默认 2；"
+                              "中文术语层固定用 3，不受此参数影响）")
     p_check.add_argument("--min-coverage", type=float, default=0.5, dest="min_coverage",
-                         help="[--stage1] 覆盖率下限（默认 0.5）")
+                         help="[--stage1] 覆盖率下限（默认 0.5；英文层与中文层任一层达标即放行）")
     p_check.add_argument("--max-truncated", type=int, default=4, dest="max_truncated",
                          help="[--deliver] 每份笔记允许的断句上限（默认 4）")
     p_check.add_argument("--require-structure", action="store_true", dest="require_structure",

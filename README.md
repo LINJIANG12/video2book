@@ -227,7 +227,7 @@ python src/cli.py pipeline "D:\courses\software_engineering" --all --article-typ
 - **按平台 / 按区间取音**：B 站合集与「每个分集都是独立 BV」的旧版合集、YouTube 频道、抖音博主合集、`--page` / `--range` 选集；
 - **派发队列与阶段门禁**：`queue_tracker.py` 的转录侧 / 写作侧 / 笔记侧取载荷与单行状态；
 - **生成教材与笔记**：`cluster-articles` / `cluster-notes`（含 `--force` 重编）；
-- **质检与收尾**：`check` 统一门禁（`--stage1` 放行 / `--deliver` 体检 / `--fix-numbering` 标题去号）、`cleanup` 与 `sync`（已由主流程自动执行）。
+- **质检与收尾**：`check` 统一门禁（`--stage1` 放行，按英文标识符与中文术语双层覆盖率判定 / `--deliver` 体检 / `--fix-numbering` 标题去号）、`cleanup` 与 `sync`（已由主流程自动执行）。
 
 笔记成色的五类致命项为**套话填充、空壳标题、分集平铺标题、行内残缺引用、分集口吻**，命中即判失败；断句与结构缺件属提示项，加 `--require-structure` 才纳入门禁。渲染合规的致命项为 GitHub 告警块、围栏外裸字符画与围栏配对；**围栏语言标识**默认只提示，加 `--require-lang` 才纳入门禁。
 

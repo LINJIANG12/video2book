@@ -227,7 +227,7 @@ For everything else see the [CLI cookbook](skills/video2book/references/cli-cook
 - **Per platform / per range fetching**: Bilibili collections and legacy collections where every episode is its own BV, YouTube channels, Douyin creator collections, `--page` / `--range`;
 - **Dispatch queue and stage gate**: `queue_tracker.py` payloads for the transcriber / writer / note side, plus one-line status;
 - **Textbooks and notes**: `cluster-articles` / `cluster-notes` (with `--force`);
-- **Quality checks and close-out**: the unified `check` gate (`--stage1` release / `--deliver` audit / `--fix-numbering` heading cleanup), plus `cleanup` and `sync` (already run automatically).
+- **Quality checks and close-out**: the unified `check` gate (`--stage1` release, judged by two-layer entity coverage over English identifiers and Chinese terminology / `--deliver` audit / `--fix-numbering` heading cleanup), plus `cleanup` and `sync` (already run automatically).
 
 Five note-quality checks are fatal and fail the delivery outright: **boilerplate filler, hollow headings, per-episode headings, inline quote fragments and episode voice**. Sentence truncation and missing structure are advisory; add `--require-structure` to gate on them. Rendering fatals are GitHub alert blocks, bare ASCII art outside fences and fence pairing; a missing fence **language tag** is advisory unless you pass `--require-lang`.
 

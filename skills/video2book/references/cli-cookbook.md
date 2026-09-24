@@ -98,6 +98,9 @@ video2book cluster-articles "https://www.bilibili.com/video/BV14VqVBrEhc" --forc
 
 ```bash
 # 阶段一放行门禁：模块长文是否真的基于本块逐字稿（默认提示级，--strict 才纳入门禁）
+#   双层实体：英文标识符与多位数字（--min-freq，默认 2）/ 中文技术术语骨架（固定 3 次）；
+#   任一层覆盖率达 --min-coverage 即放行——忠实长文把 sno/cno 改写成「学号/课程号」时，
+#   英文层偏低但中文层兜底；两层同时低才是脱稿文。口水词（ppt/sorry）不进分母
 python src/cli.py check --stage1 --strict
 python src/cli.py check --stage1 --strict --min-coverage 0.6      # 调整覆盖率下限
 
@@ -185,7 +188,7 @@ python src/cli.py sync                 # 以磁盘产物为唯一真相回填 ma
 | `fetch-subtitles` | `<工作区目录>` `--force` `--sessdata` | 可选：字幕转块级逐字稿（替代听音转录）；只取中文字幕、人工优先，缺中文字幕的块整块跳过；`--force` 覆盖已有逐字稿 |
 | `cluster-notes` | `--force` `--block-id N` `--start-block N` `--end-block N` | 块 → 笔记归并派发；后三个按**笔记序号**只处理指定区间（参数名是历史遗留）；`--force` 强制重导笔记任务书 |
 | `cluster-articles` | `--force` | 默认复用已有教材，`--force` 按最新章节重编 |
-| `check` | `--stage1` `--deliver` `--fix-numbering` `--strict` `--dir` `--task` `--base-dir` `--json` `--min-freq N`(2) `--min-coverage F`(0.5) `--max-truncated N`(4) `--require-structure` `--require-lang` `--require-no-numbering` `--only {textbooks,articles,both}` `--dry-run` `--max-samples N`(5) `--hash-nonheading` | `--stage1` 依据级校验（块级逐字稿技术实体在模块长文里的覆盖率）；`--deliver`（默认）笔记成色 + 渲染合规；`--fix-numbering` 存量标题去号；默认提示级，`--strict` 才纳入门禁 |
+| `check` | `--stage1` `--deliver` `--fix-numbering` `--strict` `--dir` `--task` `--base-dir` `--json` `--min-freq N`(2) `--min-coverage F`(0.5) `--max-truncated N`(4) `--require-structure` `--require-lang` `--require-no-numbering` `--only {textbooks,articles,both}` `--dry-run` `--max-samples N`(5) `--hash-nonheading` | `--stage1` 依据级校验（块级逐字稿的**双层实体**在模块长文里的覆盖率：英文标识符与多位数字 / 中文技术术语骨架，任一层达 `--min-coverage` 即放行；`--min-freq` 只调英文层，中文层固定 3 次）；`--deliver`（默认）笔记成色 + 渲染合规；`--fix-numbering` 存量标题去号；默认提示级，`--strict` 才纳入门禁 |
 | `cleanup` | `--keep N`（默认 1） `--dry-run` `--task 关键字` `--all` | 每类保留 N 份任务书范本；`--all` 为兼容保留（不加即全量） |
 | `sync` | `--dry-run` `--task 关键字` `--all` | 按磁盘对账回填 manifest |
 | `queue_tracker.py` | `--next-transcribe [N]` `--next-module N` `--next-note N` `--summary` `--json` `--dir PATH` `--pattern/--task 关键字` `--base-dir DIR` `--log-dispatch` | 派发前取载荷：三种载荷均自带预制 `dispatch_prompt`；`--next-transcribe` 默认并发 3 个任务；`--summary` 额外给出 `BLOCKS/BLOCKS_TRANSCRIBED/BLOCKS_PENDING`（就绪口径是块）；`--log-dispatch` 追加派发台账（默认关闭） |
