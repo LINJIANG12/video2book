@@ -67,6 +67,10 @@ video2book fetch-subtitles "<产物根>/<课程工作区>" --force   # 覆盖已
 > - **何时不用**：课程无中文字幕、AI 自动生成的字幕断句错乱或技术术语识别质量差、或非 B 站源（YouTube/抖音/本地）。此时无需强求字幕，直接留给专职转录角色听音转录即可。
 > - **仍需先收音频**：`fetch-subtitles` 是在音频收齐并装箱成块后执行的（依据 `blocks.json` 确定块边界并直出块级逐字稿）。
 > - **兜底机制**：只取中文字幕，人工 CC 字幕优先，AI 自动字幕兜底；一个块里只要有任一集缺失中文字幕，该块**整块跳过**，留给后续听音角色兜底转录。产出的逐字稿抬头会注明来源为 B 站字幕。需登录态（`login --sessdata`）。
+> - **CDN 截断会自动重试**：字幕 CDN 对**同一 URL** 会时好时坏地返回**残缺正文**——HTTP 200、JSON 合法，只是内容被截断到开头几分钟（实测同一分集连取 6 次仅 1 次完整），`subtitle_url` 也会偶发空串。这类「成功但内容少」的故障不触发状态码重试，
+>   因此覆盖度判定与退避重试都收在内容层：末条字幕时间 / 分集时长低于 **90%** 即判不可用并重试，
+>   轮次取 `BVB_SUBTITLE_ATTEMPTS`（默认 4，线性退避 1.5s × 轮次）；**重试用尽**才判该集没字幕、整块降级听音。
+>   确实没有中文字幕的分集一次即返回，不浪费轮次。调大 `BVB_SUBTITLE_ATTEMPTS` 可换取更高的字幕链路成功率。
 
 ## 场景四：重新装箱 / 改动块标题
 
@@ -185,7 +189,7 @@ python src/cli.py sync                 # 以磁盘产物为唯一真相回填 ma
 | :--- | :--- | :--- |
 | `pipeline` | `--all` `--range X-Y` `--page N` `--quality <档>` `--prefetch-workers N` `--skip-failed` `--block-minutes N` `--force` `--article-type <风格>` `--dry-run` `--audio-only` `--task NAME` `--base-dir DIR` | 阶段一主入口；`--skip-failed` 把音频失败集记入跳过名单继续跑；`--block-minutes` 是**块时长目标**（默认取 `BVB_AUDIO_BLOCK_MINUTES`，再默认 50，落进 40–60 带；硬上限看 `BVB_AUDIO_ONESHOT_LIMIT_MINUTES`）；`--force` 重派已完成块 |
 | `merge-audio` | `<工作区目录>` `--block-minutes N` `--force` | 单独重跑音频装箱合并并重出块级转录任务书（幂等；改完 `block_titles.json` 后重跑即按新标题改名） |
-| `fetch-subtitles` | `<工作区目录>` `--force` `--sessdata` | 可选：字幕转块级逐字稿（替代听音转录）；只取中文字幕、人工优先，缺中文字幕的块整块跳过；`--force` 覆盖已有逐字稿 |
+| `fetch-subtitles` | `<工作区目录>` `--force` `--sessdata` | 可选：字幕转块级逐字稿（替代听音转录）；只取中文字幕、人工优先，缺中文字幕的块整块跳过；覆盖度不足按 `BVB_SUBTITLE_ATTEMPTS`（默认 4）退避重试，`--force` 覆盖已有逐字稿 |
 | `cluster-notes` | `--force` `--block-id N` `--start-block N` `--end-block N` | 块 → 笔记归并派发；后三个按**笔记序号**只处理指定区间（参数名是历史遗留）；`--force` 强制重导笔记任务书 |
 | `cluster-articles` | `--force` | 默认复用已有教材，`--force` 按最新章节重编 |
 | `check` | `--stage1` `--deliver` `--fix-numbering` `--strict` `--dir` `--task` `--base-dir` `--json` `--min-freq N`(2) `--min-coverage F`(0.5) `--max-truncated N`(4) `--require-structure` `--require-lang` `--require-no-numbering` `--only {textbooks,articles,both}` `--dry-run` `--max-samples N`(5) `--hash-nonheading` | `--stage1` 依据级校验（块级逐字稿的**双层实体**在模块长文里的覆盖率：英文标识符与多位数字 / 中文技术术语骨架，任一层达 `--min-coverage` 即放行；`--min-freq` 只调英文层，中文层固定 3 次）；`--deliver`（默认）笔记成色 + 渲染合规；`--fix-numbering` 存量标题去号；默认提示级，`--strict` 才纳入门禁 |

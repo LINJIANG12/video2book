@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 from conftest import write_blocks
 
+from src.core import subtitles
 from src.core.subtitles import (
     SUBTITLE_COVERAGE_MIN,
     _is_ai,
@@ -217,6 +218,91 @@ def test_subtitle_coverage_accepts_full_length_subtitle():
 def test_subtitle_coverage_unknown_duration_does_not_block():
     assert subtitle_coverage([{"from": 3.0, "content": "a"}], 0.0) == 1.0
     assert subtitle_coverage([], 100.0) == 1.0
+
+
+# ---------------------------------------------------------------------------
+# 瞬时故障重试（CDN 对同一 URL 返回残缺正文：200 + 合法 JSON，内容只到开头）
+# ---------------------------------------------------------------------------
+
+def _假取(序列, 记录):
+    """构造 `_取字幕一次` 替身：按序返回 (字幕 or None, 瞬时原因)。"""
+    def _取(bvid, cid, sessdata, keys_file, duration_sec):
+        记录.append(1)
+        return 序列[min(len(记录) - 1, len(序列) - 1)]
+    return _取
+
+
+def _monkeypatch_attempt(monkeypatch, 序列, 记录, 无延迟=True):
+    monkeypatch.setattr(subtitles, "_取字幕一次", _假取(序列, 记录))
+    if 无延迟:
+        monkeypatch.setattr(subtitles.time, "sleep", lambda _s: None)
+
+
+def test_retry_recovers_from_truncated_cdn_body(monkeypatch):
+    """实测形态：连取 6 次仅 1 次完整。残缺时必须重试，而不是直接判"没字幕"。"""
+    完整 = ({"is_ai": True, "lan": "ai-zh", "lan_doc": "中文", "coverage": 0.99,
+             "cues": [{"from": 0.0, "content": "甲"}]}, "")
+    记录: list = []
+    _monkeypatch_attempt(monkeypatch, [(None, "覆盖不足（82%）"), (None, "正文为空"), 完整], 记录)
+
+    诊断: dict = {}
+    结果 = subtitles.fetch_episode_subtitle("BV1x", 1, 次数=4, 诊断=诊断)
+
+    assert 结果 is not None and 结果["cues"] == [{"from": 0.0, "content": "甲"}]
+    assert 结果["attempts"] == 3
+    assert len(记录) == 3
+    assert 诊断["reason"] == "" and 诊断["attempts"] == 3
+    assert 诊断["coverage"] == 0.99
+
+
+def test_retry_gives_up_after_configured_attempts(monkeypatch):
+    """重试用尽才判不可用，且必须把原因交出去，让调用方区分两种"没有字幕"。"""
+    记录: list = []
+    _monkeypatch_attempt(monkeypatch, [(None, "地址为空")], 记录)
+
+    诊断: dict = {}
+    结果 = subtitles.fetch_episode_subtitle("BV1x", 1, 次数=3, 诊断=诊断)
+
+    assert 结果 is None
+    assert len(记录) == 3                      # 3 次都试过
+    assert 诊断["reason"] == "地址为空"
+    assert 诊断["attempts"] == 3
+
+
+def test_no_chinese_subtitle_is_not_retried(monkeypatch):
+    """确实没有中文字幕（瞬时原因为空）→ 一次即返回，不烧重试轮次。"""
+    记录: list = []
+    _monkeypatch_attempt(monkeypatch, [(None, "")], 记录)
+
+    诊断: dict = {}
+    assert subtitles.fetch_episode_subtitle("BV1x", 1, 次数=4, 诊断=诊断) is None
+    assert len(记录) == 1
+    assert 诊断["reason"] == ""
+
+
+def test_retry_backoff_is_linear_and_only_between_attempts(monkeypatch):
+    """退避 = 基数 × 轮次，且末轮不再睡（否则白等一个退避时长）。"""
+    睡眠: list = []
+    记录: list = []
+    _monkeypatch_attempt(monkeypatch, [(None, "正文为空")], 记录, 无延迟=False)
+    monkeypatch.setattr(subtitles.time, "sleep", 睡眠.append)
+
+    assert subtitles.fetch_episode_subtitle("BV1x", 1, 次数=3) is None
+    assert 睡眠 == pytest.approx([
+        subtitles.SUBTITLE_RETRY_BACKOFF_SEC,
+        subtitles.SUBTITLE_RETRY_BACKOFF_SEC * 2,
+    ])
+
+
+def test_attempts_default_reads_env(monkeypatch):
+    monkeypatch.setenv(subtitles.ENV_SUBTITLE_ATTEMPTS, "7")
+    assert subtitles._重试次数() == 7
+    monkeypatch.setenv(subtitles.ENV_SUBTITLE_ATTEMPTS, "0")
+    assert subtitles._重试次数() == 1              # 下限保护，不允许 0 轮
+    monkeypatch.setenv(subtitles.ENV_SUBTITLE_ATTEMPTS, "abc")
+    assert subtitles._重试次数() == subtitles.DEFAULT_SUBTITLE_ATTEMPTS
+    monkeypatch.delenv(subtitles.ENV_SUBTITLE_ATTEMPTS, raising=False)
+    assert subtitles._重试次数() == subtitles.DEFAULT_SUBTITLE_ATTEMPTS
 
 
 # ---------------------------------------------------------------------------

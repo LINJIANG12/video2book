@@ -4,7 +4,7 @@ description: 把 B 站、YouTube、抖音长视频/系列网课或本地音视�
 license: MIT
 metadata:
   author: LINJIANG12
-  version: 3.0.0
+  version: 3.1.0
   category: learning-and-education
   compatibility: Python 3.10+；系统 ffmpeg 在 PATH；宿主听音通道之一（read_audio 或 read_media），B 站课程有中文字幕时可由字幕链路替代。
 ---

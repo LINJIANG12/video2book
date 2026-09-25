@@ -237,6 +237,8 @@ def cmd_fetch_subtitles(args):
 
     只取中文字幕、人工字幕优先于 AI；任一成员分集缺中文字幕的块**整块跳过**，留给听音转录
     兜底（绝不静默漏内容）。已有逐字稿的块默认跳过，`--force` 覆盖。
+    字幕 CDN 会返回残缺正文，覆盖度不足会**退避重试**（`BVB_SUBTITLE_ATTEMPTS`，默认 4 轮），
+    重试用尽才判定为不可用——覆盖度判定与重试都在 `subtitles` 层收口。
     """
     from src.core import subtitles as subtitle_core
     from src.core.audio_merger import AudioMerger
@@ -275,19 +277,19 @@ def cmd_fetch_subtitles(args):
         cid = 条目.get("cid")
         字幕 = None
         if bvid and cid is not None:
-            字幕 = subtitle_core.fetch_episode_subtitle(
-                bvid, int(cid), sessdata=args.sessdata
-            )
-        if 字幕 is not None:
             try:
                 时长 = float(条目.get("duration") or 0.0)
             except (TypeError, ValueError):
                 时长 = 0.0
-            覆盖 = subtitle_core.subtitle_coverage(字幕.get("cues"), 时长)
-            if 覆盖 < subtitle_core.SUBTITLE_COVERAGE_MIN:
-                print(f"    [!] P{page:02d} 字幕覆盖不足（末条 {覆盖 * 时长:.0f}s / "
-                      f"时长 {时长:.0f}s = {覆盖:.0%}）→ 视为不可用")
-                字幕 = None
+            诊断: dict = {}
+            # 覆盖度判定与内容级重试都在 subtitles 层：CDN 会返回 200 + 残缺正文，
+            # 在这里判一次就判成"没字幕"会把整块白扔给听音兜底。
+            字幕 = subtitle_core.fetch_episode_subtitle(
+                bvid, int(cid), sessdata=args.sessdata, duration_sec=时长, 诊断=诊断
+            )
+            if 字幕 is None and 诊断.get("reason"):
+                print(f"    [!] P{page:02d} 字幕重试 {诊断.get('attempts', 0)} 次后仍"
+                      f"{诊断['reason']} → 视为不可用")
         缓存[page] = 字幕
         return 缓存[page]
 

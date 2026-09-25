@@ -8,10 +8,18 @@
 正确性护栏：一个块内只要有任一成员分集没有中文字幕，就**整块不产出**（返回 `ok=False`
 并列出缺失分集），留给听音转录兜底——绝不静默漏掉一部分内容。同理，字幕只覆盖开头一段
 （末条字幕时间远早于分集时长）也视为不可用：与音频截断是同一类静默漏内容的故障。
+
+瞬时故障必须重试：字幕 CDN 对**同一 URL** 会时好时坏地返回**残缺正文**——HTTP 200、
+JSON 合法，只是内容被截断到开头几分钟（实测同一分集连取 6 次，仅 1 次完整），
+`subtitle_url` 字段也会偶发空串。`fetcher._请求元数据` 的重试只看状态码与网络异常，
+抓不到这种"成功但内容少"，因此重试与覆盖度判定都收在内容层（见 `fetch_episode_subtitle`）。
+否则一次瞬时抖动就会把整块误判成"没字幕"，白扔掉 40~60 分钟的听音兜底成本。
 """
 
 from __future__ import annotations
 
+import os
+import time
 import urllib.parse
 from typing import Any, Dict, List, Optional, Set
 
@@ -27,6 +35,21 @@ _AI_LAN_PREFIX = "ai-"
 
 # 字幕覆盖度下限：末条字幕时间 / 分集时长低于此值即视为字幕被截断，不采用
 SUBTITLE_COVERAGE_MIN = 0.9
+
+# 内容级重试：同一分集被 CDN 截断时重试几轮（线性退避，轮次 × 该基数）。
+# 默认 4 轮：实测单次成功率约 1/6 ~ 1/2，4 轮足够把"整块降级听音"变成"照常走字幕链路"。
+ENV_SUBTITLE_ATTEMPTS = "BVB_SUBTITLE_ATTEMPTS"
+DEFAULT_SUBTITLE_ATTEMPTS = 4
+SUBTITLE_RETRY_BACKOFF_SEC = 1.5
+
+
+def _重试次数() -> int:
+    """字幕取回的重试轮数；环境变量写坏时退回默认（与 audio_merger 同口径）。"""
+    原始 = str(os.environ.get(ENV_SUBTITLE_ATTEMPTS, "") or "").strip()
+    try:
+        return max(1, int(原始))
+    except (TypeError, ValueError):
+        return DEFAULT_SUBTITLE_ATTEMPTS
 
 
 def _is_ai(条目: Dict[str, Any]) -> bool:
@@ -131,15 +154,18 @@ def subtitle_coverage(cues: Any, duration_sec: float) -> float:
     return max(时间) / duration_sec
 
 
-def fetch_episode_subtitle(
+def _取字幕一次(
     bvid: str,
     cid: int,
-    sessdata: Optional[str] = None,
-    keys_file: Optional[Any] = None,
-) -> Optional[Dict[str, Any]]:
-    """取单集的**中文字幕**；没有中文字幕返回 None。
+    sessdata: Optional[str],
+    keys_file: Optional[Any],
+    duration_sec: float,
+):
+    """单次取中文字幕，返回 `(字幕 or None, 瞬时原因)`。
 
-    返回 `{is_ai, lan, lan_doc, cues:[{from, content}]}`，`from` 为**集内秒数**。
+    瞬时原因为空串表示**不是**可重试故障：字幕非空即成功；字幕为 `None` 且原因为空
+    说明该集确实没有中文字幕（重试也不会有）。原因为非空的三种瞬时故障——地址为空、
+    正文为空、覆盖度不足——都由 `fetch_episode_subtitle` 退避重试。
     """
     参数 = WbiSigner.enc_wbi({"bvid": bvid, "cid": cid}, sessdata=sessdata, keys_file=keys_file)
     地址 = f"{PLAYER_V2_API}?{urllib.parse.urlencode(参数)}"
@@ -154,14 +180,67 @@ def fetch_episode_subtitle(
     字幕组 = ((数据.get("data") or {}).get("subtitle") or {}).get("subtitles") or []
     选中 = pick_chinese_subtitle(字幕组)
     if not 选中:
-        return None
-    正文 = _请求元数据(_绝对地址(选中.get("subtitle_url")), _请求头(sessdata), 超时=20)
+        return None, ""
+    正文地址 = _绝对地址(选中.get("subtitle_url"))
+    if not 正文地址:
+        # 实测：接口偶发给出 `subtitle_url` 为空串的中文轨；直接请求会因"无主机名"抛异常
+        # 中断整条命令，必须当成可重试的瞬时故障。
+        return None, "地址为空"
+    正文 = _请求元数据(正文地址, _请求头(sessdata), 超时=20)
+    线索 = _正文到线索(正文)
+    if not 线索:
+        return None, "正文为空"
+    覆盖 = subtitle_coverage(线索, duration_sec)
+    if 覆盖 < SUBTITLE_COVERAGE_MIN:
+        return None, (f"覆盖不足（末条 {覆盖 * duration_sec:.0f}s / "
+                      f"时长 {duration_sec:.0f}s = {覆盖:.0%}）")
     return {
         "is_ai": _is_ai(选中),
         "lan": str(选中.get("lan") or ""),
         "lan_doc": str(选中.get("lan_doc") or ""),
-        "cues": _正文到线索(正文),
-    }
+        "cues": 线索,
+        "coverage": 覆盖,
+    }, ""
+
+
+def fetch_episode_subtitle(
+    bvid: str,
+    cid: int,
+    sessdata: Optional[str] = None,
+    keys_file: Optional[Any] = None,
+    duration_sec: float = 0.0,
+    次数: Optional[int] = None,
+    诊断: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """取单集的**中文字幕**；没有中文字幕（或重试后仍不可用）返回 None。
+
+    返回 `{is_ai, lan, lan_doc, cues, coverage, attempts}`，`cues[].from` 为**集内秒数**。
+    `次数` 缺省取 `BVB_SUBTITLE_ATTEMPTS`（默认 4），线性退避 `SUBTITLE_RETRY_BACKOFF_SEC`。
+
+    只对**瞬时故障**重试（CDN 残缺正文 / 地址为空 / 覆盖度不足）；确实没有中文字幕
+    直接返回，不浪费轮次。`诊断` 传入字典会被回填 `reason`/`attempts`/`coverage`，
+    供调用方把"没有字幕"与"重试后仍不完整"两种结局分开告知。
+    """
+    上限 = max(1, int(次数)) if 次数 else _重试次数()
+    瞬时 = ""
+    for 轮 in range(1, 上限 + 1):
+        字幕, 瞬时 = _取字幕一次(bvid, cid, sessdata, keys_file, duration_sec)
+        if 字幕 is not None:
+            字幕["attempts"] = 轮
+            if 诊断 is not None:
+                诊断.update(reason="", attempts=轮, coverage=字幕["coverage"])
+            return 字幕
+        if not 瞬时:
+            if 诊断 is not None:
+                诊断.update(reason="", attempts=轮, coverage=0.0)
+            return None
+        if 轮 < 上限:
+            等待 = SUBTITLE_RETRY_BACKOFF_SEC * 轮
+            print(f"    [重试]字幕{瞬时}（第 {轮} 次）→ {等待:.1f}s 后重试")
+            time.sleep(等待)
+    if 诊断 is not None:
+        诊断.update(reason=瞬时, attempts=上限, coverage=0.0)
+    return None
 
 
 def _格式时间(秒: float) -> str:
