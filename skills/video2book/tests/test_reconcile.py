@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import write_blocks
+
 from src.core import paths
 from src.core.state_sync import reconcile_workspace_manifest
 from src.core.workspace import TaskWorkspace
@@ -28,22 +30,28 @@ def sync_ws(make_workspace, blocks_factory):
     ws = make_workspace("sync_probe")
     ws.save_parts([{"page": 1, "title": "绪论"}, {"page": 2, "title": "数制"}])
     block = blocks_factory(1, [1, 2], title="绪论与数制", span="P01-P02",
-                           audio="audio/_blocks/探针_01_绪论与数制(P01-P02).m4a",
                            duration_min=46.0)
     block["segments"] = []
-    block_dir = ws.audio_dir / "_blocks"
-    block_dir.mkdir(parents=True, exist_ok=True)
-    (block_dir / "blocks.json").write_text(json.dumps({
-        "version": 2, "target_minutes": 50.0, "min_minutes": 40.0, "max_minutes": 60.0,
-        "effective_limit_minutes": 75.0, "course_short": "探针", "noop": False,
-        "input_signature": "probe", "blocks": [block],
-    }, ensure_ascii=False), encoding="utf-8")
+    write_blocks(ws, [block])
     return ws
 
 
 # ---------------------------------------------------------------------------
 # 对账按块跑通
 # ---------------------------------------------------------------------------
+
+def test_reconcile_ignores_legacy_block_manifest(sync_ws):
+    """根 `block_plan.json` 是唯一块来源；旧块清单即使存在也不能进入对账。"""
+    sync_ws.root_dir.joinpath("block_plan.json").unlink()
+    legacy = sync_ws.audio_dir / "_blocks" / "blocks.json"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(json.dumps({
+        "version": 2,
+        "blocks": [{"block_id": 9, "title": "旧块", "span": "P01-P02", "episodes": [1, 2]}],
+    }), encoding="utf-8")
+    report = reconcile_workspace_manifest(sync_ws, dry_run=True)
+    assert report["blocks_total"] == 0 and report["stage1_unit"] == "none", report
+
 
 def test_reconcile_runs_in_block_units(sync_ws):
     """对账必须跑通并如实报「0/1 块完成」，而不是抛异常被 pipeline 吞掉。"""

@@ -5,8 +5,8 @@
 其【排版】一节自带渲染硬约束）组装成 `notes/笔记XX_*_TASK.md`，交由宿主 Agent
 （通常是每篇笔记一个子智能体）原生撰写。
 
-粒度（v2.8）：模块层没有独立规划——**块就是模块**（`audio/_blocks/blocks.json`，每块 40–60 分钟，
-一块一篇模块长文）。一篇笔记覆盖的块号来自**语义归并**（`note_plan.json`），
+粒度（v4）：模块层没有独立规划——**块就是模块**（唯一来源为工作区根目录
+`block_plan.json`，一块一篇模块长文）。一篇笔记覆盖的块号来自**语义归并**（`note_plan.json`），
 一篇笔记**可以跨多个块**。归并失位时按「一块一篇」兜底，流程不终止。
 
 语料：笔记的唯一事实来源是**模块长文**（块级逐字稿才是长文的语料，笔记不再直接读逐字稿）。
@@ -302,7 +302,7 @@ class BlockSynthesizer:
     ) -> Dict[str, Any]:
         """块清单 → 语义归并 → 笔记任务书派发，返回本次执行的结构化结果。
 
-        流程：读 `blocks.json`（模块的唯一来源）→ 把块归并成笔记 → 逐篇导出任务书。
+        流程：读 `block_plan.json`（模块的唯一来源）→ 把块归并成笔记 → 逐篇导出任务书。
         缺归并时按「一块一篇」兜底继续，**绝不终止**；`note_plan.json` 不会被兜底结果覆盖。
         """
         from src.generator.topic_planner import SemanticTopicPlanner
@@ -318,11 +318,11 @@ class BlockSynthesizer:
         result["blocks"] = blocks
         if not blocks:
             result["note_status"] = "no-blocks"
-            print("\n[!] 本工作区没有块清单，无法归并笔记：模块边界来自音频装箱（块即模块）。")
-            print(f"[*] 请先跑：python src/cli.py merge-audio \"{Path(ws.root_dir).as_posix()}\"")
+            print("\n[!] 本工作区没有 v4 块计划，无法归并笔记：模块边界来自块计划（块即模块）。")
+            print(f"[*] 请先完成块规划，并确认工作区根目录存在 `block_plan.json`：{Path(ws.root_dir).as_posix()}")
             return result
 
-        print(f"\n[✓] 模块（块）：共 {len(blocks)} 个，来自 audio/_blocks/blocks.json")
+        print(f"\n[✓] 模块（块）：共 {len(blocks)} 个，来自 block_plan.json")
         for b in blocks:
             eps = sorted(int(e) for e in b.get("episodes") or [])
             print(f"    - 块 {int(b.get('block_id') or 0):02d} "

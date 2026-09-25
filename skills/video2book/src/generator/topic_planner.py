@@ -1,7 +1,7 @@
 """笔记归并规划器（Semantic Planner）：块即模块，只做**第二趟**归并。
 
-模块层**没有独立规划**：阶段一点五的音频装箱（`audio/_blocks/blocks.json`，每块 40–60 分钟）
-就是知识模块——块标题由块内分集名语义组合而来，直接写进块音频文件名；一块一篇模块长文
+模块层**没有独立规划**：v4 根目录 `block_plan.json` 里的块就是知识模块——
+块标题由块内分集名语义组合而来；一块一篇模块长文
 （`articles/模块XX_<块标题>_精读长文.md`）。于是**教材 = 块长文按块序整编**（`cluster-articles`），
 不再需要 Agent 另划一遍模块边界。
 
@@ -23,6 +23,8 @@ Agent 产出，落成工作区根下的 `note_plan.json`：
 import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+from src.core.block_plan import BlockPlan
 
 
 class SemanticTopicPlanner:
@@ -78,13 +80,8 @@ class SemanticTopicPlanner:
     # ─────────────────────────────────────────────────────────────────────────
     @classmethod
     def load_blocks(cls, ws: Any) -> List[Dict[str, Any]]:
-        """读块清单（`audio/_blocks/blocks.json`）——**模块的唯一来源**。
-
-        归一化逻辑只在 `AudioMerger.load_blocks` 一处（本方法只是它在本类上的名字）。
-        """
-        from src.core.audio_merger import AudioMerger
-
-        return AudioMerger.load_blocks(ws)
+        """从工作区根目录的 v4 `block_plan.json` 读取块——模块的唯一来源。"""
+        return BlockPlan.load_blocks(ws)
 
     @classmethod
     def expected_pages(cls, expected: Sequence[Any]) -> set:
@@ -282,9 +279,7 @@ class SemanticTopicPlanner:
         covered: set = set()
         for note in note_plan:
             covered.update(cls.note_episodes(note, blocks))
-        # 覆盖基准收窄到「块实际覆盖的集号」：--skip-failed 豁免的失败集有集号无音频、
-        # 不进任何块，拿 parts 全集当基准会让按块口径完全合法的归并永远过不了校验
-        # （也就永远落不到 planned），与「补齐归并后重跑即自动替换」直接矛盾。
+        # 覆盖基准收窄到「块实际覆盖的集号」：没有进入任何块的分集不属于归并校验范围。
         reachable = {int(e) for b in blocks for e in (b.get("episodes") or [])} & target
         gap = reachable - covered
         if gap:
@@ -307,7 +302,7 @@ class SemanticTopicPlanner:
             minutes = float(block.get("duration_min") or 0.0)
             lines.append(
                 f"- 块 {block_id:02d}（{cls.describe_episodes(eps)}，{minutes:.0f} 分钟）: "
-                f"{block.get('title') or block.get('span') or ''}"
+                f"{block.get('title') or BlockPlan.span(block)}"
             )
             theme = str((block_titles or {}).get(block_id) or "").strip()
             if theme:
@@ -340,7 +335,7 @@ class SemanticTopicPlanner:
             f"# 笔记归并规划任务书（NOTE_PLAN_TASK：块 → 笔记）\n\n"
             f"> 状态：{cls.STATUS_PENDING_NOTES} | 由宿主 Agent 依据块标题与模块长文主题语义归并\n"
             f"> 本趟产物供**笔记**使用（`cluster-notes` 据此派发笔记任务书）\n"
-            f"> 模块边界不需要规划：块就是模块（音频按 40–60 分钟装箱，见 `audio/_blocks/blocks.json`）\n\n"
+            f"> 模块边界不需要规划：块就是模块（唯一来源为工作区根目录 `block_plan.json`）\n\n"
             f"## 1. 落盘要求\n\n"
             f"- 目标文件：`{plan_file.as_posix()}`\n"
             f"- 必须为合法 JSON Array，元素形如 "

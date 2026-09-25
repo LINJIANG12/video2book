@@ -1,222 +1,144 @@
 # CLI 场景手册
 
-本手册收录按任务目标划分的完整命令清单。`SKILL.md` 只给出主路径与入口导航，其余场景在此展开。
+本手册是命令用法的单一事实源。所有命令都经：
 
-## 运行约定
+- `python src/cli.py <子命令>`（推荐）
+- `python scripts/run.py <子命令>`（免安装入口）
+- `video2book <子命令>`（`pip install -e .` 后）
 
-- **工作目录 = 技能目录**（`SKILL.md` 所在目录，即 `skills/video2book/`）。下文所有 `python src/cli.py …` /
-  `python scripts/…` 均以此为当前目录；
-- 若已执行 `pip install -e .`，可直接使用 `video2book` 命令，等价于 `python src/cli.py`；
-- 产物一律落在**产物根**，与代码目录分离；下文示例中的 `output/<task>/…` 均**相对产物根**；
-  **产物根默认是「你跑命令时的工作目录」下的 `output/`**（在容器内工作时为 `<容器根>/output`）；
-- 想固定位置：`--base-dir <路径>`，或环境变量 `BVB_OUTPUT_DIR`（产物根）/ `BVB_HOME`（容器根）。
+产物落在产物根，默认是当前工作目录下的 `output/`；用 `--base-dir` 或 `BVB_OUTPUT_DIR` 固定位置。
 
----
-
-## 场景一：处理整门课程流水线
+## 场景一：处理整门课程
 
 ```bash
-# 处理整门 B 站网课合集（--article-type 必填，不传即退出码 4）
-video2book pipeline "https://www.bilibili.com/video/BV14VqVBrEhc" --all --article-type learning
-
-# 处理「每个分集都是独立 BV」的 B 站旧版合集（任一入口都可，自动展开整季）
-video2book pipeline "https://space.bilibili.com/87476569/lists/695667?type=season" --all --article-type learning
-video2book pipeline "https://www.bilibili.com/list/87476569?sid=695667&type=season" --all --article-type learning
-video2book pipeline "https://www.bilibili.com/video/BV1RV4y1T7jf" --all --article-type learning
-
-# 处理本地整套视频课程目录
-video2book pipeline "D:\courses\software_engineering\" --all --article-type learning
-
-# 处理 YouTube 单视频或播放列表/频道课程
-video2book pipeline "https://www.youtube.com/watch?v=kqtD5dpn9C8" --article-type learning
-video2book pipeline "https://www.youtube.com/@freecodecamp" --all --article-type learning
-
-# 处理抖音单视频或博主主页合集
-video2book pipeline "https://v.douyin.com/xxxx/" --article-type learning
-video2book pipeline "https://www.douyin.com/user/MS4wLjAB..." --all --article-type learning
+python src/cli.py pipeline "https://www.bilibili.com/video/BV14VqVBrEhc" --all --article-type learning
+python src/cli.py pipeline "D:\courses\software_engineering" --all --article-type learning
+python src/cli.py pipeline "https://www.youtube.com/@freecodecamp" --all --article-type learning
 ```
 
-> `pipeline` 是**阶段一唯一入口**：收音频 → 装箱成块 → 自动去重 → 导出转录/长文任务书 → 自动回收任务书 + 对账。
+`pipeline` 是阶段一唯一入口，内部顺序固定为：元数据 → `parts.json` → `block_plan.json` → 字幕 → 缺字幕块按需音频 → 任务书。B 站字幕完整时不会下载音频；非 B 站来源会为全部块物化音频。
 
-## 场景二：处理指定分集或区间
+## 场景二：选择分集或区间
 
 ```bash
-# 处理第 1 讲
-video2book pipeline "https://www.bilibili.com/video/BV14VqVBrEhc" --page 1 --article-type learning
-
-# 处理第 2 讲至第 5 讲
-video2book pipeline "https://www.bilibili.com/video/BV14VqVBrEhc" --range 2-5 --article-type learning
+python src/cli.py pipeline "<链接>" --page 3 --article-type learning
+python src/cli.py pipeline "<链接>" --range 2-8 --article-type learning
 ```
 
-## 场景三：只解析拓扑 / 只收音频 / 字幕转逐字稿（轻量入口）
+`--page` / `--range` 只决定本次处理哪些分集，不会用局部子集重定义已有的完整 `block_plan.json`。
+
+## 场景三：预演与准备阶段一
 
 ```bash
-# 只解析拓扑并列出将处理的分集，不下载音频、不写任务书（原 `parse` 子命令）
-video2book pipeline "https://www.bilibili.com/video/BV14VqVBrEhc" --all --dry-run
+# 只解析拓扑，不写 parts、计划、音频或任务书
+python src/cli.py pipeline "<链接>" --all --dry-run
 
-# 只收齐音频并装箱、导出块级转录任务书后返回（原 `audio` 子命令）
-video2book pipeline "https://www.bilibili.com/video/BV14VqVBrEhc" --all --audio-only
-
-# 可选：用 B 站中文字幕直接生成块级逐字稿，替代听音转录（需先收齐音频并装箱，建议先 login --sessdata）
-video2book fetch-subtitles "<产物根>/<课程工作区>"
-video2book fetch-subtitles "<产物根>/<课程工作区>" --force   # 覆盖已有逐字稿
+# 完成计划、字幕、缺块音频与转录任务书后返回，不派发模块长文任务书
+python src/cli.py pipeline "<链接>" --all --audio-only --article-type learning
 ```
 
-> **字幕转逐字稿（可选前置，可替代听音）**：
-> - **何时用**：B 站课程、各分集普遍配有中文字幕（尤其是人工上传/校对的 CC 字幕）。直接由字幕生成块级逐字稿，可实现 0 Token 零开销迅速就绪，完全免去大模型听音消耗。
-> - **何时不用**：课程无中文字幕、AI 自动生成的字幕断句错乱或技术术语识别质量差、或非 B 站源（YouTube/抖音/本地）。此时无需强求字幕，直接留给专职转录角色听音转录即可。
-> - **仍需先收音频**：`fetch-subtitles` 是在音频收齐并装箱成块后执行的（依据 `blocks.json` 确定块边界并直出块级逐字稿）。
-> - **兜底机制**：只取中文字幕，人工 CC 字幕优先，AI 自动字幕兜底；一个块里只要有任一集缺失中文字幕，该块**整块跳过**，留给后续听音角色兜底转录。产出的逐字稿抬头会注明来源为 B 站字幕。需登录态（`login --sessdata`）。
-> - **CDN 截断会自动重试**：字幕 CDN 对**同一 URL** 会时好时坏地返回**残缺正文**——HTTP 200、JSON 合法，只是内容被截断到开头几分钟（实测同一分集连取 6 次仅 1 次完整），`subtitle_url` 也会偶发空串。这类「成功但内容少」的故障不触发状态码重试，
->   因此覆盖度判定与退避重试都收在内容层：末条字幕时间 / 分集时长低于 **90%** 即判不可用并重试，
->   轮次取 `BVB_SUBTITLE_ATTEMPTS`（默认 4，线性退避 1.5s × 轮次）；**重试用尽**才判该集没字幕、整块降级听音。
->   确实没有中文字幕的分集一次即返回，不浪费轮次。调大 `BVB_SUBTITLE_ATTEMPTS` 可换取更高的字幕链路成功率。
+## 场景四：字幕优先与按需音频
 
-## 场景四：重新装箱 / 改动块标题
+字幕阶段由 `pipeline` 内部执行：
 
-```bash
-# 单独重跑装箱合并并重出块级转录任务书（幂等）
-video2book merge-audio "<产物根>/<课程工作区>"
+1. 从 B 站元数据取得完整分集拓扑；
+2. 用 `block_plan.json` 锁定逻辑块；
+3. 优先取中文字幕（人工优先，AI 自动字幕兜底）；
+4. 覆盖度不足的块进入音频兜底；
+5. 只下载缺字幕块涉及的分集音频，并按既有 `units`/`segments` 物化块音频。
 
-# 忽略指纹强制重建块
-video2book merge-audio "<产物根>/<课程工作区>" --force
+字幕 CDN 返回残缺正文时，字幕服务按 `BVB_SUBTITLE_ATTEMPTS`（默认 4 轮）退避重试；确实没有中文字幕的块不会被伪造或静默跳过，而是进入音频兜底。
 
-# 改块标题：编辑 <工作区>/audio/_blocks/block_titles.json 后重跑，即按新标题改名
-video2book merge-audio "<产物根>/<课程工作区>"
-```
-
-## 场景五：生成思维导图复习笔记 + 模块合辑教材
+## 场景五：取派发载荷
 
 ```bash
-# 笔记归并（块 → 成篇笔记）：导出 note_plan_TASK.md，Agent 写 note_plan.json 后重跑即派发
-# 缺归并不会卡住，命令始终正常退出；收尾自动 cleanup + sync
-video2book cluster-notes "https://www.bilibili.com/video/BV14VqVBrEhc"
-video2book cluster-notes "https://www.bilibili.com/video/BV14VqVBrEhc" --force   # 强制重导笔记任务书
-
-# 教材整编（按块序整编成册，册=书、章=块）；默认复用已有教材，按最新章节重编加 --force
-video2book cluster-articles "https://www.bilibili.com/video/BV14VqVBrEhc"
-video2book cluster-articles "https://www.bilibili.com/video/BV14VqVBrEhc" --force
-```
-
-## 场景六：质量门禁（阶段一放行 / 交付前体检 / 存量标题去号）
-
-```bash
-# 阶段一放行门禁：模块长文是否真的基于本块逐字稿（默认提示级，--strict 才纳入门禁）
-#   双层实体：英文标识符与多位数字（--min-freq，默认 2）/ 中文技术术语骨架（固定 3 次）；
-#   任一层覆盖率达 --min-coverage 即放行——忠实长文把 sno/cno 改写成「学号/课程号」时，
-#   英文层偏低但中文层兜底；两层同时低才是脱稿文。口水词（ppt/sorry）不进分母
-python src/cli.py check --stage1 --strict
-python src/cli.py check --stage1 --strict --min-coverage 0.6      # 调整覆盖率下限
-
-# 交付前体检（默认）：笔记成色 + 渲染合规
-#   笔记致命项：套话填充 / 空壳标题 / 分集平铺标题 / 行内残缺引用 / 分集口吻
-#   渲染致命项：GitHub 告警块 / 围栏外裸字符画 / 围栏配对
-python src/cli.py check --deliver --strict
-python src/cli.py check --deliver --strict --require-structure    # 结构缺件纳入门禁
-python src/cli.py check --deliver --strict --require-lang         # 围栏缺语言标识纳入门禁
-python src/cli.py check --deliver --strict --require-no-numbering # 标题手写序号纳入门禁
-
-# 存量产物标题手写序号就地清理（幂等；先 --dry-run 预演）
-python src/cli.py check --fix-numbering --dry-run
-python src/cli.py check --fix-numbering
-
-# 多工作区并存时用 --task / --dir / --base-dir 定位
-python src/cli.py check --deliver --strict --task 微机原理
-python src/cli.py check --stage1 --dir "<工作区绝对路径>"
-```
-
-## 场景七：查看与监控任务队列状态
-
-```bash
-# 查看当前任务工作区的完成进度与阶段判定（含块级转录进度）
-python scripts/queue_tracker.py
-
-# 转录侧取载荷：待转录的块（块音频 / 块内时间表 / 逐字稿目标路径，默认并发 3 个任务）
-python scripts/queue_tracker.py --next-transcribe --json
-
-# 写作侧取载荷：只返回「块逐字稿已就绪且模块长文缺失」的块
+# 写作侧：逐字稿已就绪且模块长文缺失
 python scripts/queue_tracker.py --next-module 5 --json --log-dispatch
 
-# 笔记侧取载荷
+# 转录侧：逐字稿缺失且物理音频已就绪
+python scripts/queue_tracker.py --next-transcribe --json
+
+# 笔记侧
 python scripts/queue_tracker.py --next-note 5 --json
 
-# 单行状态（含 STAGE1_DONE 与块级转录进度）
+# 单行进度
 python scripts/queue_tracker.py --summary
-
-# 多课程并存时指定工作区（否则取最近活动的那个）
-python scripts/queue_tracker.py --pattern "微机原理" --next-module 5
 ```
 
-## 场景八：收尾（一般无需手动执行）
+载荷中的 `dispatch_prompt` 必须原样透传。缺物理音频的块不会进入转录载荷；应由 `pipeline` 先完成按需物化。
+
+## 场景六：笔记与教材
 
 ```bash
-# 以下两条已由 pipeline 与 cluster-* 收尾自动执行；仅在需要单独复算时手动跑
-python src/cli.py cleanup --dry-run    # 任务书回收预演（成品产出后才回收，每类保留 1 份范本）
-python src/cli.py cleanup              # 真正回收
-python src/cli.py sync                 # 以磁盘产物为唯一真相回填 manifest.json
+python src/cli.py cluster-notes "<链接或工作区>"
+python src/cli.py cluster-articles "<链接或工作区>"
 ```
 
-> **任务书是临时派发物**：`*_TASK.md` 在成品产出后由 `cleanup` 自动回收，每个类别保留编号最小的 1 份作为提示词范本；
-> `note_plan_TASK.md` 属课程级规划任务书，永不回收。
+`cluster-notes` 读 `block_plan.json` 与模块长文，导出 `note_plan_TASK.md`；`cluster-articles` 按块序整编教材。两者收尾都会执行任务书回收与账本对账。
 
----
+## 场景七：质量门禁
+
+```bash
+# 阶段一：模块长文是否基于本块逐字稿
+python src/cli.py check --stage1 --strict
+
+# 交付前：笔记成色 + 渲染合规
+python src/cli.py check --deliver --strict
+python src/cli.py check --deliver --strict --require-structure
+python src/cli.py check --deliver --strict --require-lang
+python src/cli.py check --deliver --strict --require-no-numbering
+
+# 清理存量标题手写序号
+python src/cli.py check --fix-numbering --dry-run
+python src/cli.py check --fix-numbering
+```
+
+阶段一使用双层实体覆盖率：英文标识符与多位数字、中文技术术语骨架；任一层达到 `--min-coverage` 即放行。中文层固定 3 次门槛，`--min-freq` 只调英文层。
+
+## 场景八：收尾
+
+```bash
+python src/cli.py cleanup --dry-run
+python src/cli.py cleanup
+python src/cli.py sync
+```
+
+`pipeline`、`cluster-notes`、`cluster-articles` 会自动收尾；独立命令用于复算或补做。
 
 ## 子命令全表
 
-所有任务必须通过以下标准入口调用（功能一致，三选一均可）：
-
-- 仓库推荐：`python src/cli.py <子命令>`
-- 免安装脚本：`python scripts/run.py <子命令>`（可任意工作目录调用）
-- 系统命令：`video2book <子命令>`（`pip install -e .` 后可用）
-
 | 子命令 | 用途 |
 | :--- | :--- |
-| `pipeline` | 阶段一唯一入口：`--dry-run` 只解析 / `--audio-only` 只取音装箱 / 默认跑完整链路并自动收尾 |
-| `merge-audio` | 单独重跑装箱合并（幂等，可改块标题） |
-| `fetch-subtitles` | 可选：用 B 站中文字幕直接生成块级逐字稿（人工字幕优先；缺中文字幕的块整块跳过） |
-| `cluster-notes` | 块 → 笔记归并，导出笔记任务书（收尾自动 cleanup + sync） |
-| `cluster-articles` | 按块序把模块长文整编成册（册=书、章=块；收尾自动 cleanup + sync） |
-| `check` | 质量门禁：`--stage1` 依据级校验 / `--deliver` 交付前体检 / `--fix-numbering` 存量标题去号 |
-| `cleanup` | 回收已完成的任务书，每类保留编号最小的 1 份范本 |
-| `sync` | 以磁盘产物为准回填 `manifest.json` |
-| `info` | 环境与工具链就绪状态（含凭证来源与上次 412/熔断记录） |
-| `login` | 持久化 B 站 `SESSDATA` / 抖音 Cookie |
-| `logout` | 清除已保存的凭证 |
+| `pipeline` | 阶段一唯一入口：元数据、BlockPlan、字幕、按需音频与任务书 |
+| `cluster-notes` | 块 → 笔记归并，导出笔记任务书 |
+| `cluster-articles` | 按块序把模块长文整编成册 |
+| `check` | 质量门禁：阶段一放行、交付体检、标题去号 |
+| `cleanup` | 回收已完成任务书，每类保留 1 份范本 |
+| `sync` | 以磁盘产物回填 `manifest.json` |
+| `info` | 环境、工具链与凭证状态 |
+| `login` | 持久化 SESSDATA / 抖音 Cookie |
+| `logout` | 清除已保存凭证 |
 
 ## 完整参数表
 
 | 入口 | 参数 | 用途 |
 | :--- | :--- | :--- |
-| `pipeline` | `--all` `--range X-Y` `--page N` `--quality <档>` `--prefetch-workers N` `--skip-failed` `--block-minutes N` `--force` `--article-type <风格>` `--dry-run` `--audio-only` `--task NAME` `--base-dir DIR` | 阶段一主入口；`--skip-failed` 把音频失败集记入跳过名单继续跑；`--block-minutes` 是**块时长目标**（默认取 `BVB_AUDIO_BLOCK_MINUTES`，再默认 50，落进 40–60 带；硬上限看 `BVB_AUDIO_ONESHOT_LIMIT_MINUTES`）；`--force` 重派已完成块 |
-| `merge-audio` | `<工作区目录>` `--block-minutes N` `--force` | 单独重跑音频装箱合并并重出块级转录任务书（幂等；改完 `block_titles.json` 后重跑即按新标题改名） |
-| `fetch-subtitles` | `<工作区目录>` `--force` `--sessdata` | 可选：字幕转块级逐字稿（替代听音转录）；只取中文字幕、人工优先，缺中文字幕的块整块跳过；覆盖度不足按 `BVB_SUBTITLE_ATTEMPTS`（默认 4）退避重试，`--force` 覆盖已有逐字稿 |
-| `cluster-notes` | `--force` `--block-id N` `--start-block N` `--end-block N` | 块 → 笔记归并派发；后三个按**笔记序号**只处理指定区间（参数名是历史遗留）；`--force` 强制重导笔记任务书 |
-| `cluster-articles` | `--force` | 默认复用已有教材，`--force` 按最新章节重编 |
-| `check` | `--stage1` `--deliver` `--fix-numbering` `--strict` `--dir` `--task` `--base-dir` `--json` `--min-freq N`(2) `--min-coverage F`(0.5) `--max-truncated N`(4) `--require-structure` `--require-lang` `--require-no-numbering` `--only {textbooks,articles,both}` `--dry-run` `--max-samples N`(5) `--hash-nonheading` | `--stage1` 依据级校验（块级逐字稿的**双层实体**在模块长文里的覆盖率：英文标识符与多位数字 / 中文技术术语骨架，任一层达 `--min-coverage` 即放行；`--min-freq` 只调英文层，中文层固定 3 次）；`--deliver`（默认）笔记成色 + 渲染合规；`--fix-numbering` 存量标题去号；默认提示级，`--strict` 才纳入门禁 |
-| `cleanup` | `--keep N`（默认 1） `--dry-run` `--task 关键字` `--all` | 每类保留 N 份任务书范本；`--all` 为兼容保留（不加即全量） |
-| `sync` | `--dry-run` `--task 关键字` `--all` | 按磁盘对账回填 manifest |
-| `queue_tracker.py` | `--next-transcribe [N]` `--next-module N` `--next-note N` `--summary` `--json` `--dir PATH` `--pattern/--task 关键字` `--base-dir DIR` `--log-dispatch` | 派发前取载荷：三种载荷均自带预制 `dispatch_prompt`；`--next-transcribe` 默认并发 3 个任务；`--summary` 额外给出 `BLOCKS/BLOCKS_TRANSCRIBED/BLOCKS_PENDING`（就绪口径是块）；`--log-dispatch` 追加派发台账（默认关闭） |
-
-## 其余脚本入口
-
-| 脚本 | 用途 | 常用参数 |
-| :--- | :--- | :--- |
-| `python scripts/queue_tracker.py` | 阶段门禁与派发载荷（派发中枢） | 见上表 |
-| `python scripts/selfcheck.py` | 仓库唯一门禁自检（技能自包含 + 多宿主声明 + 三域分离） | — |
-| `python scripts/run.py <子命令>` | 免安装 CLI 入口，等价于 `python src/cli.py <子命令>` | 透传子命令 |
+| `pipeline` | `--all` `--range X-Y` `--page N` `--quality <档>` `--block-minutes N` `--force` `--article-type <风格>` `--dry-run` `--audio-only` `--task NAME` `--base-dir DIR` | 阶段一主入口；`--force` 只重取物理音频/逐字稿/任务书，不改变已有计划 |
+| `cluster-notes` | `--force` `--block-id N` `--start-block N` `--end-block N` | 笔记归并派发；后三者按笔记序号筛选 |
+| `cluster-articles` | `--force` | 默认复用已有教材，`--force` 按最新计划重编 |
+| `check` | `--stage1` `--deliver` `--fix-numbering` `--strict` `--dir` `--task` `--base-dir` `--json` `--min-freq N` `--min-coverage F` `--max-truncated N` `--require-structure` `--require-lang` `--require-no-numbering` `--only` `--dry-run` `--max-samples N` `--hash-nonheading` | 质量门禁与存量标题清理 |
+| `cleanup` | `--keep N` `--dry-run` `--task 关键字` | 每类保留 N 份任务书范本 |
+| `sync` | `--dry-run` `--task 关键字` | 按磁盘对账回填 manifest |
+| `queue_tracker.py` | `--next-transcribe [N]` `--next-module N` `--next-note N` `--summary` `--json` `--dir PATH` `--pattern/--task 关键字` `--base-dir DIR` `--log-dispatch` | 派发载荷与阶段进度 |
 
 ## 退出码
 
-- `0` — 正常结束
-- `1` — 通用错误 / 目标工作区缺失或参数非法
-- `2` — 阶段一准备错误（音频下载未 100% 就绪或解析异常）
-- `3` — 块级转录装箱异常，或任务书导出失败
-- `4` — 未确认长文提示词风格，即 `--article-type` 缺失或取值非法
-
----
+- `0`：正常结束
+- `1`：通用错误、工作区缺失或参数非法
+- `2`：元数据、块计划或音频准备失败
+- `3`：任务书导出或阶段编排失败
+- `4`：未确认长文提示词风格
 
 ## 环境与凭证
 
-安装前置、平台对照与缺失处理见 [`install.md`](install.md)；
-运行依赖、两条听音通道与凭证获取见 [`runtime.md`](runtime.md)；
-宿主工具名差异见 [`host-tools/`](host-tools/)。
+依赖与听音通道见 `references/runtime.md`；平台工具名映射见 `references/host-tools/`。

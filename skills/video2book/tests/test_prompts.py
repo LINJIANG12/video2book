@@ -58,7 +58,6 @@ def style_workspace(make_workspace):
 def task_block(blocks_factory):
     return blocks_factory(
         1, [1, 2], "绪论与数制", span="P01-P02", duration_min=46.0,
-        audio="audio/_blocks/测试课_01_绪论与数制(P01-P02).m4a",
     )
 
 
@@ -254,19 +253,20 @@ def test_taskbook_stops_when_transcript_missing(style_workspace, task_block, blo
     assert "逐字稿未就绪" in text
 
 
-def test_taskbook_flags_missing_transcript_state(style_workspace, task_block, block_transcript):
-    """语料状态要如实反映磁盘：没转录就写「未就绪」，转录了就写「已就绪」。"""
+def test_taskbook_defers_transcript_state_to_queue(style_workspace, task_block, block_transcript):
+    """v4 任务书不复制动态就绪状态；队列按逐字稿文件实际存在性派发。"""
     ready = _export(style_workspace, task_block, block_transcript, "learning").read_text(encoding="utf-8")
-    assert "语料状态：逐字稿已就绪" in ready
-
     pending = _export(style_workspace, task_block, None, "learning").read_text(encoding="utf-8")
-    assert "语料状态：逐字稿**未就绪**" in pending
+    assert "语料状态由派发队列" in ready
+    assert "语料状态由派发队列" in pending
+    assert "唯一事实来源" in ready and "逐字稿未就绪" in pending
 
 
 def test_taskbook_does_not_ask_writer_to_listen_again(style_workspace, task_block, block_transcript):
-    """块音频只作备查：让写作角色重听一遍，等于把转录成本再付一次且引入新失真。"""
+    """写作任务书只消费逐字稿；不把块音频交给写作角色重新听。"""
     text = _export(style_workspace, task_block, block_transcript, "learning").read_text(encoding="utf-8")
-    assert "所属块音频（备查，不必再听）" in text
+    assert "所属块音频（备查，不必再听）" not in text
+    assert "不要去别处找音频补听" in text
 
 
 @pytest.mark.parametrize("episode_label", ["P01 绪论", "P02 数制"])

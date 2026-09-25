@@ -556,42 +556,28 @@ def test_run_removes_stale_volumes_even_when_nothing_is_ready(make_workspace, bl
 
 
 # ---------------------------------------------------------------------------
-# 端到端：CLI 退出码与成品落盘
+# v4 根块计划：唯一来源与成品落盘
 # ---------------------------------------------------------------------------
 
-def _local_source_dir(tmp_path: Path) -> Path:
-    """给 CLI 一个**本地**媒体目录当入口：解析走 local provider，全程离线。"""
-    src = tmp_path / "本地课程源"
-    src.mkdir(parents=True, exist_ok=True)
-    (src / "第01讲.mp4").write_bytes(b"")
-    return src
+def test_integrator_does_not_fall_back_to_legacy_block_manifest(make_parts):
+    """没有根块计划就没有模块；旧块清单不能作为教材整编的兼容来源。"""
+    ws = make_parts(pages=(1,), task_name="教材无块计划")
+    legacy = ws.audio_dir / "_blocks" / "blocks.json"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(json.dumps({
+        "version": 2,
+        "blocks": [{"block_id": 1, "title": "旧块", "span": "P01", "episodes": [1]}],
+    }), encoding="utf-8")
+    assert _integrator(ws).load_blocks() == []
+    assert _integrator(ws).run(course_title=COURSE, force=True) == []
 
 
-def test_cluster_articles_cli_exits_2_without_blocks(run_cli, make_parts, tmp_path):
-    """没有块清单就没有模块可整编：明确以退出码 2 停下并给出装箱命令，而不是产出空书。"""
-    ws = make_parts(pages=(1,), task_name="教材CLI无块")
-    res = run_cli(
-        "cluster-articles", str(_local_source_dir(tmp_path)),
-        "--task", ws.root_dir.name, "--base-dir", str(ws.base_dir),
-    )
-    assert res.code == 2, res.out[-500:]
-    assert "merge-audio" in res.out
-
-
-def test_cluster_articles_cli_writes_volume(
-    run_cli, make_parts, blocks_factory, tmp_path
-):
-    """端到端：整编以 0 退出、册落进 textbooks/，且原 articles/ 一字不动。"""
-    ws = make_parts(pages=(1,), task_name="教材CLI探针")
+def test_integrator_writes_volume(make_parts, blocks_factory):
+    """整编从 v4 根块计划取块，册落进 textbooks/，且原 articles/ 一字不动。"""
+    ws = make_parts(pages=(1,), task_name="教材整编探针")
     blocks = [blocks_factory(1, [1], "甲", span="P01")]
     write_blocks(ws, blocks)
     article = _article_with_h1(ws, 1, "甲", "甲主题")
-    res = run_cli(
-        "cluster-articles", str(_local_source_dir(tmp_path)),
-        "--task", ws.root_dir.name, "--base-dir", str(ws.base_dir),
-    )
-    assert res.code == 0, res.out[-500:]
-    assert "教材已整编" in res.out, res.out[-500:]
-    volumes = sorted(p.name for p in (ws.root_dir / "textbooks").glob("*_精读全书.md"))
-    assert len(volumes) == 1 and volumes[0].startswith("模块01_"), volumes
+    books = _integrator(ws).run(course_title=COURSE, force=True)
+    assert [book.name for book in books] == ["模块01_甲_精读全书.md"]
     assert article.exists(), "整编动了 articles/ 里的原文"

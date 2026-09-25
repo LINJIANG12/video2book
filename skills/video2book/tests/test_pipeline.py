@@ -21,7 +21,6 @@ import pytest
 
 from conftest import pad_to, write_blocks, write_text
 
-from src.core.audio_merger import AudioMerger
 from src.pipeline import (
     KIND_IMAGE_ALBUM,
     KIND_VIDEO,
@@ -153,6 +152,20 @@ def test_merge_parts_accepts_empty_incoming():
     assert TaskWorkspace.merge_parts([{"page": 1}], []) == [{"page": 1}]
 
 
+def test_local_scope_keeps_only_fully_covered_blocks():
+    """局部运行不能用半个块派发；完整计划仍由 BlockPlan 保存。"""
+    from src.pipeline import PipelineCoordinator
+
+    blocks = [
+        {"block_id": 1, "episodes": [1], "span": "P01"},
+        {"block_id": 2, "episodes": [2, 3], "span": "P02-P03"},
+        {"block_id": 3, "episodes": [4], "span": "P04"},
+    ]
+    selected, partial = PipelineCoordinator._blocks_in_scope(blocks, {1, 3})
+    assert [b["block_id"] for b in selected] == [1]
+    assert [b["block_id"] for b in partial] == [2]
+
+
 # ===========================================================================
 # 3) 笔记复用：非规范后缀的成品也必须被认出
 # ===========================================================================
@@ -212,7 +225,7 @@ def textbook_probe(make_workspace):
     ws.save_parts([{"page": 1, "title": "绪论"}, {"page": 2, "title": "数制"}])
     write_text(ws.articles_dir / "模块01_绪论_精读长文.md", ARTICLE_WITH_HEADER)
     block = {"block_id": 1, "title": "绪论", "span": "P01", "episodes": [1],
-             "duration_min": 30.0, "audio": "audio/_blocks/探针_01_绪论(P01).m4a"}
+             "duration_min": 30.0}
     return ws, block
 
 
@@ -454,46 +467,13 @@ def test_saved_parts_keep_media_kind(make_workspace):
 
 
 # ===========================================================================
-# 8) 畸形/过期块清单一律视为「无清单」
-# ===========================================================================
+# 8) v4 计划输入
 
-BAD_MANIFESTS = [
-    '{"version": 2, "blocks": [{"block_id": 1}]}',          # 条目缺 episodes
-    '{"version": 2, "blocks": [null]}',                     # 条目不是对象
-    '{"version": 2, "blocks": [{"block_id": 0, "episodes": [1]}]}',   # 块号非法
-    '{"version": 1, "blocks": [{"block_id": 1, "episodes": [1]}]}',   # 旧版本
-    '{"version": 2, "blocks": []}',                          # 空表
-]
-
-
-@pytest.mark.parametrize("payload", BAD_MANIFESTS)
-def test_malformed_manifest_is_treated_as_absent(make_workspace, payload: str):
-    """照单全收的后果实测过：`block_stem` 抛 IndexError，装箱/队列/对账/整编一路崩穿。"""
-    ws = make_workspace("畸形清单_BVTEST01")
-    write_text(ws.audio_dir / "_blocks" / "blocks.json", payload)
-    assert AudioMerger.load_manifest(ws) is None
-
-
-def test_malformed_manifest_yields_no_blocks_for_planner(make_workspace):
-    """畸形清单不得进入笔记归并链路。"""
-    ws = make_workspace("畸形清单_BVTEST01")
-    write_text(ws.audio_dir / "_blocks" / "blocks.json", BAD_MANIFESTS[0])
-    assert SemanticTopicPlanner.load_blocks(ws) == []
-
-
-def test_malformed_manifest_yields_no_blocks_for_integrator(make_workspace):
-    """畸形清单不得进入教材整编链路。"""
-    ws = make_workspace("畸形清单_BVTEST01")
-    write_text(ws.audio_dir / "_blocks" / "blocks.json", BAD_MANIFESTS[0])
-    assert ArticleIntegrator(ws.root_dir).load_blocks() == []
-
-
-# ===========================================================================
 # 9) 整编的纯路径入参、缺长文 gate、块号 >99
 # ===========================================================================
 
 PATH_PROBE_BLOCK = {"block_id": 1, "title": "绪论", "span": "P01", "episodes": [1],
-                    "duration_min": 46.0, "audio": "audio/_blocks/探针_01_绪论(P01).m4a"}
+                    "duration_min": 46.0}
 
 
 def test_integrator_reads_blocks_from_plain_path(make_workspace):
@@ -571,9 +551,9 @@ def merged_note_probe(make_workspace):
     ws.save_parts([{"page": 1, "title": "绪论"}, {"page": 2, "title": "数制"}])
     write_blocks(ws, [
         {"block_id": 1, "title": "绪论", "span": "P01", "episodes": [1],
-         "duration_min": 46.0, "audio": "audio/a.m4a"},
+         "duration_min": 46.0},
         {"block_id": 2, "title": "数制", "span": "P02", "episodes": [2],
-         "duration_min": 46.0, "audio": "audio/b.m4a"},
+         "duration_min": 46.0},
     ])
     for block_id, title in ((1, "绪论"), (2, "数制")):
         write_text(ws.articles_dir / f"模块{block_id:02d}_{title}_精读长文.md", "正文" * 400)
@@ -600,11 +580,11 @@ def test_merged_plan_ignores_same_id_legacy_product(merged_note_probe):
 
 VOLUME_BLOCKS = [
     {"block_id": 1, "title": "甲", "span": "P01", "episodes": [1],
-     "duration_min": 46.0, "audio": "audio/a.m4a"},
+     "duration_min": 46.0},
     {"block_id": 2, "title": "乙", "span": "P02", "episodes": [2],
-     "duration_min": 46.0, "audio": "audio/b.m4a"},
+     "duration_min": 46.0},
     {"block_id": 3, "title": "丙", "span": "P03", "episodes": [3],
-     "duration_min": 46.0, "audio": "audio/c.m4a"},
+     "duration_min": 46.0},
 ]
 
 
@@ -744,9 +724,9 @@ def test_block_without_article_leaves_no_placeholder(volume_probe):
 
 DUP_BLOCKS = [
     {"block_id": 1, "title": "关系数据库（下）", "span": "P06上", "episodes": [6],
-     "duration_min": 43.6, "audio": "audio/d1.m4a"},
+     "duration_min": 43.6},
     {"block_id": 2, "title": "关系数据库（下）", "span": "P06下", "episodes": [6],
-     "duration_min": 43.6, "audio": "audio/d2.m4a"},
+     "duration_min": 43.6},
 ]
 
 
@@ -797,7 +777,7 @@ def test_toc_lists_disambiguated_chapter(duplicate_chapter_probe):
 
 
 H1_BLOCK = {"block_id": 1, "title": "数据库第2章 关系数据库 （上）", "span": "P05",
-            "episodes": [5], "duration_min": 57.0, "audio": "audio/h1.m4a"}
+            "episodes": [5], "duration_min": 57.0}
 
 
 @pytest.fixture
@@ -836,7 +816,7 @@ def test_episode_name_is_kept_in_block_trace(h1_probe):
 # ===========================================================================
 
 GROUNDING_BLOCK = {"block_id": 1, "title": "绪论", "span": "P01", "episodes": [1],
-                   "duration_min": 46.0, "audio": "audio/a.m4a", "segments": []}
+                   "duration_min": 46.0, "segments": []}
 
 
 @pytest.fixture

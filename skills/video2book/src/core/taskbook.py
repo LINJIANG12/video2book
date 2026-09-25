@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from src.core.constants import DEFAULT_TRANSCRIBE_WORKERS
+from src.core.block_plan import BlockPlan
 from src.core.workspace import TaskWorkspace, module_article_path, module_article_stem, module_task_path
 from src.prompts import resolve_article_prompt
 
@@ -42,17 +43,15 @@ def export_block_transcribe_task(
     course_title: str = "",
 ) -> Path:
     """导出块级转录任务书（subtitles/BLK01_P08-P12_转录任务书.md）。"""
-    from src.core.audio_merger import AudioMerger
-
     block_id = int(block.get("block_id") or 0)
     pages = [int(p) for p in (block.get("episodes") or [])]
     segments = block.get("segments") or []
     titles = titles or {}
 
-    block_audio = Path(ws.root_dir) / str(block.get("audio") or "")
+    block_audio = Path(BlockPlan.audio_path(ws, block)).resolve()
     block_transcript = TaskWorkspace.block_path(ws, block)
     duration_min = float(block.get("duration_min") or 0.0)
-    span = AudioMerger.block_span(block) if segments or pages else "?"
+    span = BlockPlan.span(block) if segments or pages else "?"
     block_title = str(block.get("title") or "").strip()
 
     task_file = Path(ws.subtitles_dir) / f"BLK{block_id:02d}_{span}_转录任务书.md"
@@ -125,21 +124,16 @@ def export_block_article_task(
     page_titles: Optional[Dict[int, str]] = None,
 ) -> Path:
     """导出模块长文任务书（一个块一篇，替代原来的「一集一篇」）。"""
-    from src.core.audio_merger import AudioMerger
-
     resolved = resolve_article_prompt(article_type)
     block_id = int(block.get("block_id") or 0)
-    span = str(block.get("span") or AudioMerger.block_span(block))
+    span = BlockPlan.span(block)
     block_title = str(block.get("title") or "").strip() or span
     stem = module_article_stem(block)
 
     task_file = module_task_path(ws.articles_dir, block)
     target_article = module_article_path(ws.articles_dir, block)
     transcript_path = Path(transcript_file).resolve() if transcript_file else None
-    transcript_ready = bool(
-        transcript_path and transcript_path.exists() and transcript_path.stat().st_size > 0
-    )
-    block_audio = Path(ws.root_dir) / str(block.get("audio") or "")
+    block_audio = Path(BlockPlan.audio_path(ws, block)).resolve()
     duration_min = float(block.get("duration_min") or 0.0)
     pages = [int(p) for p in (block.get("episodes") or [])]
     titles = page_titles or {}
@@ -166,12 +160,11 @@ def export_block_article_task(
         f"> 　　　　　　`BLK{block_id:02d} | 文件路径 | 字节数 | 执行者`，**不回传正文**\n"
         f"> 块标题（由块内分集名语义组合而来）：{block_title}\n"
         f"> 块时长 {duration_min:.1f} 分钟 / 覆盖 {len(pages)} 集；块内范围 {span}\n"
-        f"> 语料状态：逐字稿{'已就绪' if transcript_ready else '**未就绪**'}\n\n"
+        f"> 语料状态由派发队列按逐字稿文件实际存在性判断\n\n"
         f"## 1. 任务输入\n\n"
         f"- 课程全称：{course_title}\n"
         f"- 块覆盖分集：{episodes}\n"
         f"- 本块逐字稿（**唯一事实来源**）：`{transcript_path}`\n"
-        f"- 所属块音频（备查，不必再听）：`{block_audio}`\n"
         f"- 目标长文落盘路径：`{target_article}`\n\n"
         f"### 前置条件（先判再写）\n\n"
         f"`{transcript_path}` 存在且非空 → 正常撰写。\n\n"

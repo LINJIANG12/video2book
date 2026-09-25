@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.core import fsutil
-from src.core.audio_merger import AudioMerger
+from src.core.block_plan import BlockPlan
 from src.core.deliverable_lint import (
     FATAL_NOTE_KEYS,
     STRUCTURE_KEYS,
@@ -282,7 +282,7 @@ def check_grounding_block(
 
 def check_grounding_workspace(ws: TaskWorkspace, min_freq: int, min_coverage: float) -> Dict[str, Any]:
     """校验整个工作区的模块长文依据覆盖率（一块一验）。"""
-    blocks = (AudioMerger.load_manifest(ws) or {}).get("blocks") or []
+    blocks = BlockPlan.load_blocks(ws)
     entries = [
         check_grounding_block(ws, b, min_freq, min_coverage)
         for b in blocks if isinstance(b, dict)

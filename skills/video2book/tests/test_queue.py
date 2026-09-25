@@ -13,7 +13,10 @@ from pathlib import Path
 
 import pytest
 
+from conftest import write_blocks
+
 from src.core import budget
+from src.core.block_plan import BlockPlan
 
 # 派发载荷的字段清单（缺一个主程序就读不到该做什么）
 MODULE_ITEM_KEYS = (
@@ -39,16 +42,11 @@ def dispatch_ws(make_workspace, blocks_factory):
         {"page": 2, "title": "变量", "duration": 1200},
     ])
     block = blocks_factory(1, [1, 2], title="导学与变量", span="P01-P02",
-                           audio="audio/_blocks/探针课_01_导学与变量(P01-P02).m4a",
                            duration_min=35.0)
-    block_dir = ws.audio_dir / "_blocks"
-    block_dir.mkdir(parents=True, exist_ok=True)
-    (block_dir / "探针课_01_导学与变量(P01-P02).m4a").write_bytes(b"x" * 20000)
-    (block_dir / "blocks.json").write_text(json.dumps({
-        "version": 2, "target_minutes": 50.0, "min_minutes": 40.0, "max_minutes": 60.0,
-        "effective_limit_minutes": 75.0, "course_short": "探针课", "noop": False,
-        "input_signature": "probe", "blocks": [block],
-    }, ensure_ascii=False), encoding="utf-8")
+    write_blocks(ws, [block])
+    block_audio = BlockPlan.audio_path(ws, block)
+    block_audio.parent.mkdir(parents=True, exist_ok=True)
+    block_audio.write_bytes(b"x" * 20000)
     return ws
 
 
@@ -104,6 +102,20 @@ def test_next_transcribe_payload_shape(run_queue, dispatch_ws):
         assert key in item, f"转录载荷缺少字段：{key}"
     assert "转录任务书文件" in item["dispatch_prompt"]
     assert item["block_transcript"] in item["dispatch_prompt"]
+    block = BlockPlan.load_blocks(dispatch_ws)[0]
+    assert Path(item["audio_file"]) == BlockPlan.audio_path(dispatch_ws, block)
+    assert item["task_file"].endswith("BLK01_P01-P02_转录任务书.md")
+
+
+def test_next_transcribe_skips_block_without_physical_audio(run_queue, dispatch_ws):
+    """块计划存在但物理块音频缺失时，不得派发一个必然失败的转录任务。"""
+    block = BlockPlan.load_blocks(dispatch_ws)[0]
+    BlockPlan.audio_path(dispatch_ws, block).unlink()
+    payload = _payload(run_queue(
+        "--base-dir", str(dispatch_ws.root_dir), "--next-transcribe", "1", "--json"
+    ))
+    assert payload["next_transcribe"] == []
+    assert payload["transcript"]["blocks_total"] == 1
 
 
 def test_next_module_payload_shape_with_transcript(run_queue, dispatch_ws):

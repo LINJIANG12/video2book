@@ -101,7 +101,7 @@ def check_imports():
 # 收敛后的 CLI 唯一入口面（`check_cli_help` / `check_cli_surface_consolidated` / 文档全表共用）。
 # `parse` / `audio` / `dedup` / `split-transcript` 已分别并入 pipeline 与 check，不许回加。
 CLI_SUBCOMMANDS = (
-    "pipeline", "merge-audio", "fetch-subtitles", "cluster-notes", "cluster-articles",
+    "pipeline", "cluster-notes", "cluster-articles",
     "check", "cleanup", "sync", "login", "logout", "info",
 )
 
@@ -151,7 +151,7 @@ def check_cli_surface_consolidated():
     table = cookbook[table_start:]
     for sub in CLI_SUBCOMMANDS:
         assert f"`{sub}`" in table, f"cli-cookbook 子命令全表缺少 `{sub}`"
-    for 已收敛 in ("`parse`", "`audio`", "`dedup`", "`split-transcript`"):
+    for 已收敛 in ("`parse`", "`audio`", "`dedup`", "`split-transcript`", "`merge-audio`", "`fetch-subtitles`"):
         assert 已收敛 not in table, f"cli-cookbook 子命令全表仍列出已收敛入口 {已收敛}"
 
 
@@ -346,18 +346,12 @@ def check_subprocess_timeouts():
     Windows 会为每个控制台程序新开窗口（成片闪黑窗，一门 84 集课程约 250 次）。
     窗口抑制集中在 src/core/proc.py，此处防止有人回退成裸调用。
     """
-    import src.core.audio_chunker as ac
-    import src.core.audio_merger as am
     import src.core.local_media as lm
     import src.core.proc as proc_mod
     import ast as _ast
 
     assert lm.PROBE_TIMEOUT_SEC > 0 and lm.TRANSCODE_TIMEOUT_SEC > 0
-    assert ac.PROBE_TIMEOUT_SEC == lm.PROBE_TIMEOUT_SEC
-    # 转码（拼接/转码）口径现由块级合并侧引用：audio_chunker 只留取时长与时间格式化
-    assert am.TRANSCODE_TIMEOUT_SEC == lm.TRANSCODE_TIMEOUT_SEC
-    assert not hasattr(ac, 'chunk_audio'), '单集音频切片（chunk_audio）已随逐集听音移除，不许回加'
-    assert not hasattr(ac, 'SUPPORTED_VIDEO_EXTS'), 'audio_chunker 不该再持有视频扩展名表（已归 local_media）'
+    # 物理音频物化层使用 local_media 的统一转码超时口径。
     assert hasattr(proc_mod, "run_quiet") and hasattr(proc_mod, "CREATE_NO_WINDOW")
 
     import os as _os
@@ -439,6 +433,8 @@ def check_dead_modules_removed():
         "src/core/http_client.py",
         "src/core/kernel_extractor.py",  # 逐集知识元特性随逐集链路一并移除
         "src/core/transcript_splitter.py",
+        "src/core/audio_merger.py",
+        "src/core/audio_chunker.py",
         "src/generator/cleaner.py",
         "src/generator/classifier.py",
         "src/generator/doc_builder.py",

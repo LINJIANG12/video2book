@@ -3,25 +3,22 @@
 """Pipeline Coordination Domain Service（流水线领域调度服务）。
 
 职责：
-1. 承载原 CLI 中 `cmd_pipeline` 的两阶段编排逻辑：
-   阶段一「音频收齐」→ 阶段二「转录任务派发与落盘」→ 阶段三「知识块聚合」。
-2. 收口跨命令共享的领域辅助函数（目标解析、412 富化、范围解析、任务书导出），
-   供 CLI 的 audio / transcribe / note / cluster-notes 等命令复用。
-3. 通过 PipelineGateError 表达硬门禁终止（等价于原实现中的 sys.exit 非零退出），
-   CLI 层仅需捕获并转换为进程退出码。
+1. 承载 v4 plan-first 编排：元数据 → BlockPlan → 字幕 → 按需音频物化 → 任务书 → 笔记收尾。
+2. 收口跨命令共享的领域辅助函数（目标解析、412 富化、范围解析、任务书导出）。
+3. 通过 PipelineGateError 表达硬门禁终止，CLI 层转换为进程退出码。
 
 设计约束：
 - 不依赖 argparse 命名空间，参数全部显式传入，可独立单元测试；
-- 输出行为与原 CLI 实现逐行一致，保证用户可感知行为零变化。
+- 物理音频永远不进入 BlockPlan，所有路径与范围由 v4 API 推导。
 """
 
-import json
 import sys
-import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set
 
-from src.core.fetcher import AudioFetcher
+from src.core.audio_materializer import AudioMaterializer, AudioMaterializationError
+from src.core.block_plan import BlockPlan
+from src.core.subtitle_service import SubtitleService
 from src.core.workspace import TaskWorkspace, sanitize_filename
 from src.core import paths as _paths
 from src.generator.block_synthesizer import BlockSynthesizer
@@ -74,61 +71,8 @@ class PipelineGateError(RuntimeError):
         self.exit_code = exit_code
 
 
-def is_412(err: Any) -> bool:
-    """判断异常是否为 412 风控拦截。"""
-    return "412" in str(err)
-
-
-def record_412_status(err: Any) -> None:
-    """记录 412/熔断状态到状态文件供 info 读取。"""
-    try:
-        _STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _STATUS_FILE.write_text(
-            json.dumps({"last_412": time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "error": str(err)[:500]}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-    except Exception:
-        pass
-
-
-def format_412(err: Any, resume_hint: Optional[str] = None) -> str:
-    """412 三要素文案：定性 + 可复制动作 + 预期。"""
-    hint = resume_hint or _RESUME_HINT
-    return (
-        f"[412 风控拦截] {err}\n"
-        "①定性：B 站风控拦截（请求过频/缺登录态），非视频删除。\n"
-        "②可复制动作：浏览器登录 bilibili.com → F12 → 应用/存储 → Cookie → 复制 SESSDATA，"
-        f"然后运行：python src/cli.py pipeline \"<链接>\" --all --sessdata YOUR_SESSDATA\n"
-        f"③预期：等待 30-60 分钟后再试；跑 python src/cli.py info 验证状态；断点续跑：{hint}"
-    )
-
-
-def enrich_network_error(err: Any, resume_hint: Optional[str] = None) -> str:
-    """区分 412 与普通网络错误，412 走三要素文案并落盘状态。"""
-    if is_412(err):
-        record_412_status(err)
-        return format_412(err, resume_hint)
-    return f"[网络/接口异常] {err}（非 412：建议检查网络后重试；频繁失败可补 --sessdata 后重跑）"
-
-
-def get_audio_stream(
-    bvid: str,
-    cid: Any,
-    sessdata: Optional[str] = None,
-    prefer_quality: str = "low",
-    resume_hint: Optional[str] = None,
-) -> Dict[str, Any]:
-    """音频流获取统一入口，412 富化后抛出。"""
-    try:
-        return AudioFetcher.get_audio_stream_info(bvid, cid, sessdata=sessdata, prefer_quality=prefer_quality)
-    except Exception as err:
-        raise RuntimeError(enrich_network_error(err, resume_hint)) from err
-
-
 from src.core.taskbook import (
     TRANSCRIBE_INSTRUCTION,
-    TRANSCRIBE_TIMESTAMP_INSTRUCTION,
     export_block_article_task,
     export_block_transcribe_task,
     resolve_article_type,
@@ -136,7 +80,6 @@ from src.core.taskbook import (
 
 __all__ = [
     "TRANSCRIBE_INSTRUCTION",
-    "TRANSCRIBE_TIMESTAMP_INSTRUCTION",
     "export_block_article_task",
     "export_block_transcribe_task",
     "resolve_article_type",
@@ -237,21 +180,240 @@ def parse_range_string(range_str: str, max_val: int) -> List[int]:
     return sorted(pages)
 
 
-def classify_audio_error(err: Any) -> str:
-    """失败分类：412 风控 / 缺登录态 / 网络超时 / 其他。"""
-    msg = str(err)
-    if "412" in msg:
-        return "412风控拦截"
-    low = msg.lower()
-    if any(k in msg for k in ("SESSDATA", "sessdata", "401", "403", "登录", "Cookie", "cookie")):
-        return "缺登录态/权限"
-    if any(k in low for k in ("timeout", "timed out", "connection", "network", "dns", "reset", "超时", "网络", "连接")):
-        return "网络超时"
-    return "其他下载异常"
-
-
 class PipelineCoordinator:
-    """两阶段流水线调度器：音频收齐 → 转录任务派发（+可选知识块聚合）。"""
+    """v4 plan-first 流水线调度器。
+
+    物理音频不是计划的一部分：先由 ``BlockPlan.ensure`` 锁定逻辑块，再按字幕缺口
+    选择性物化音频，最后导出任务书。计划文件一旦存在就只允许按分集追加，``--force``
+    不会重算或覆盖它。
+    """
+
+    @staticmethod
+    def _source_type(info: Mapping[str, Any]) -> str:
+        return str(
+            info.get("source_type")
+            or ("local" if info.get("is_local") else "bilibili")
+        ).strip().lower()
+
+    @staticmethod
+    def _is_bilibili(info: Mapping[str, Any]) -> bool:
+        """只把明确的 B 站来源送进字幕服务，不能把 YouTube/本地误判成 B 站。"""
+        source = PipelineCoordinator._source_type(info)
+        if source == "bilibili":
+            return True
+        if source in {"local", "youtube", "douyin"}:
+            return False
+        bvid = str(info.get("bvid") or "").strip().upper()
+        return bvid.startswith("BV")
+
+    @staticmethod
+    def _clean_parts(parts: Any) -> List[Dict[str, Any]]:
+        """去掉解析器临时字段，保留完整分集元数据供计划追加和物化使用。"""
+        return [
+            {str(k): v for k, v in part.items() if not str(k).startswith("_")}
+            for part in (parts or [])
+            if isinstance(part, dict) and part.get("page") is not None
+        ]
+
+    @staticmethod
+    def _parts_by_page(parts: Any) -> Dict[int, Dict[str, Any]]:
+        result: Dict[int, Dict[str, Any]] = {}
+        for part in parts or []:
+            if not isinstance(part, dict) or part.get("page") is None:
+                continue
+            try:
+                result[int(part["page"])] = part
+            except (TypeError, ValueError):
+                continue
+        return result
+
+    @staticmethod
+    def _block_ids(value: Any) -> List[int]:
+        """把字幕服务可能返回的 id/块对象/路径记录统一成块号列表。"""
+        if value is None:
+            return []
+        if isinstance(value, (str, bytes, Path)):
+            value = [value]
+        if isinstance(value, Mapping):
+            value = [value]
+        result: List[int] = []
+        for item in value:
+            if isinstance(item, Mapping):
+                raw = item.get("block_id", item.get("id"))
+            else:
+                raw = item
+            try:
+                number = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if number > 0 and number not in result:
+                result.append(number)
+        return result
+
+    @classmethod
+    def _subtitle_state(
+        cls,
+        raw: Any,
+        blocks: List[Dict[str, Any]],
+        ws: Any,
+    ) -> Dict[str, Any]:
+        """兼容服务返回的稳定字段与早期 ``missing`` 字段，不改变服务实现。"""
+        result = dict(raw) if isinstance(raw, Mapping) else {}
+        all_ids = [int(b.get("block_id") or 0) for b in blocks]
+        valid = set(all_ids)
+        ready = [i for i in cls._block_ids(result.get("subtitle_ready")) if i in valid]
+        written_ids = [i for i in cls._block_ids(result.get("written")) if i in valid]
+        for block_id in written_ids:
+            if block_id not in ready:
+                ready.append(block_id)
+        cached = [i for i in cls._block_ids(result.get("cached")) if i in valid]
+        if "needs_audio" in result:
+            needs = [i for i in cls._block_ids(result.get("needs_audio")) if i in valid]
+        elif "missing" in result:
+            needs = [i for i in cls._block_ids(result.get("missing")) if i in valid]
+        else:
+            needs = [i for i in all_ids if i not in set(ready) | set(cached)]
+
+        # 服务若只返回 written/missing，补齐稳定字段；若它报告了 ready，则不再凭
+        # 文件系统猜测其它块，避免把字幕成功的块错误地重新下载。
+        transcript_ready: List[int] = []
+        for block in blocks:
+            try:
+                target = TaskWorkspace.block_path(ws, block)
+                if target.is_file() and target.stat().st_size > 0:
+                    transcript_ready.append(int(block.get("block_id") or 0))
+            except (OSError, TypeError, ValueError):
+                continue
+        if not needs and not ready and not cached:
+            needs = [i for i in all_ids if i not in set(transcript_ready)]
+        result.update({
+            "subtitle_ready": ready,
+            "cached": cached,
+            "needs_audio": [i for i in needs if i not in set(cached) | set(ready)],
+            "written": list(result.get("written") or []),
+            "errors": list(result.get("errors") or []),
+        })
+        return result
+
+    @staticmethod
+    def _transcript_exists(ws: Any, block: Mapping[str, Any]) -> bool:
+        try:
+            path = TaskWorkspace.block_path(ws, dict(block))
+            return path.is_file() and path.stat().st_size > 0
+        except (OSError, TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _block_is_video(block: Mapping[str, Any], video_pages: Set[int]) -> bool:
+        pages = {
+            int(p) for p in (
+                block.get("episodes") or []
+            ) if str(p).lstrip("-").isdigit()
+        }
+        units = block.get("units") or []
+        if units:
+            pages.update(
+                int(u.get("page") or 0)
+                for u in units
+                if isinstance(u, Mapping) and str(u.get("page") or "").lstrip("-").isdigit()
+            )
+        return bool(pages) and pages.issubset(video_pages)
+
+    @staticmethod
+    def _blocks_in_scope(
+        blocks: Sequence[Mapping[str, Any]], selected_pages: Set[int]
+    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """返回完整落在本次选中分集内的块，以及与选中范围相交的块。
+
+        块是原子模块：局部运行不能用半个块生成逐字稿或长文任务书。完整计划仍由
+        ``BlockPlan`` 保存，局部运行只在派发/物化阶段收窄处理范围。
+        """
+        if not selected_pages:
+            return [dict(b) for b in blocks], []
+        in_scope: List[Dict[str, Any]] = []
+        partial: List[Dict[str, Any]] = []
+        for raw in blocks:
+            pages = {
+                int(p) for p in (raw.get("episodes") or [])
+                if str(p).lstrip("-").isdigit()
+            }
+            if pages and pages.issubset(selected_pages):
+                in_scope.append(dict(raw))
+            elif pages & selected_pages:
+                partial.append(dict(raw))
+        return in_scope, partial
+
+    @staticmethod
+    def _fetch_callback(
+        info: Mapping[str, Any],
+        sessdata: Optional[str],
+        quality: str,
+        force: bool,
+    ):
+        """把物化器的下载回调接到统一 IngestionCoordinator。"""
+        from src.core.ingestion import get_coordinator
+
+        coordinator = get_coordinator()
+
+        def _fetch(part: Dict[str, Any], output: Path) -> Path:
+            """物化器只传分集元数据；课程级 info 在闭包中捕获，避免参数错位。"""
+            if not isinstance(part, Mapping):
+                raise AudioMaterializationError("音频物化回调没有收到分集元数据")
+            return coordinator.fetch_episode_audio(
+                dict(info),
+                dict(part),
+                Path(output),
+                force=force,
+                sessdata=sessdata,
+                quality=quality,
+            )
+
+        return _fetch
+
+    @staticmethod
+    def _save_runtime_manifest(
+        ws: Any,
+        plan: Mapping[str, Any],
+        subtitle_state: Mapping[str, Any],
+        materialized: Mapping[int, Any],
+        video_blocks: List[Dict[str, Any]],
+        *,
+        mode: str,
+    ) -> Dict[str, Any]:
+        """只记录计划路径和运行态，不把块定义复制回 manifest。"""
+        try:
+            manifest = ws.load_manifest(absolute=True)
+        except Exception:
+            manifest = {}
+        if not isinstance(manifest, dict):
+            manifest = {}
+        manifest.pop("audio_blocks", None)
+        manifest.pop("blocks_manifest", None)
+        block_ids = [int(b.get("block_id") or 0) for b in video_blocks]
+        audio_ready = [
+            int(block.get("block_id") or 0) for block in video_blocks
+            if BlockPlan.audio_ready(ws, block)
+        ]
+        manifest.update({
+            "block_plan": str(BlockPlan.path(ws)),
+            "pipeline": {
+                "mode": str(mode),
+                "status": "ready" if not block_ids or len(audio_ready) == len(block_ids) else "partial",
+                "subtitle": {
+                    "ready": list(subtitle_state.get("subtitle_ready") or []),
+                    "cached": list(subtitle_state.get("cached") or []),
+                    "needs_audio": list(subtitle_state.get("needs_audio") or []),
+                    "written": list(subtitle_state.get("written") or []),
+                    "errors": list(subtitle_state.get("errors") or []),
+                },
+                "materialization": {
+                    "requested": list(subtitle_state.get("needs_audio") or []),
+                    "ready": audio_ready,
+                },
+            },
+        })
+        ws.save_manifest(manifest)
+        return manifest
 
     def run(
         self,
@@ -263,508 +425,386 @@ class PipelineCoordinator:
         range_str: Optional[str] = None,
         process_all: bool = False,
         force: bool = False,
-        prefetch_workers: int = 12,
-        skip_failed: bool = False,
         quality: str = "low",
         article_type: str = "",
         block_minutes: float = 0.0,
         mode: str = "full",
     ) -> Dict[str, Any]:
-        """执行完整流水线；硬门禁失败时抛出 PipelineGateError（由 CLI 转换为退出码）。
+        """按 v4 计划优先顺序执行完整流水线。
 
-        阶段一固定走**块级转录链路**：音频收齐后按集装箱成块、导出块级转录任务书，长文由
-        写作角色读块级逐字稿撰写。块时长目标取 `block_minutes`，为 0 时用 `AudioMerger`
-        的默认值（环境变量 `BVB_AUDIO_BLOCK_MINUTES`，默认 50 分钟，落 40–60 带中段）。
-
-        `mode` 控制三个入口共用同一条编排：
-        - `full`（默认）：完整链路；
-        - `dry-run`：只解析拓扑并列出将处理的分集，不下载音频、不写任务书；
-        - `audio-only`：收齐音频并装箱、导出块级转录任务书后即返回（不派发长文任务书）。
+        ``dry-run`` 在解析拓扑后立即返回，不保存 parts、计划、manifest 或任务书。
+        ``audio-only`` 完成计划、字幕、按需音频物化和转录任务书后返回，不派发模块
+        长文任务书。``--force`` 只影响物理音频、逐字稿和任务书重建，不改变已锁定计划。
         """
-        from concurrent.futures import ThreadPoolExecutor
-
-        # 工作区参数必须一并传入：离线自愈按 base_dir/task 找 parts.json 缓存，
-        # 漏传会退化成当前目录下的默认 output/，导致 --base-dir 指定时自愈失效。
+        # 1) 元数据解析与工作区绑定在任何磁盘状态变更之前完成。
         info = resolve_target_info(url, sessdata=sessdata, custom_task=task, base_dir=base_dir)
-        bvid = info["bvid"]
-
+        bvid = str(info.get("bvid") or "")
         ws = TaskWorkspace.create(
-            title=info["title"],
+            title=str(info.get("title") or "未命名课程"),
             bvid=bvid,
             custom_name=task,
             base_dir=base_dir,
             info_name=info.get("workspace_name"),
         )
         print("=" * 65)
-        print(f"[*] 全流程处理流水线启动 (Task Workspace: {ws.root_dir.name})")
+        print(f"[*] v4 计划优先流水线启动 (Task Workspace: {ws.root_dir.name})")
         print("=" * 65)
 
-        print("[*] 阶段一策略: 音频装箱（块即模块）→ 块级转录 → 一块一篇模块长文")
-
+        # 2) 只决定本次拓扑选择；完整 parts 会在计划建立后落盘。
+        info_parts = [p for p in (info.get("parts") or []) if isinstance(p, dict)]
         if process_all or range_str:
-            all_parts = info["parts"]
             if range_str:
-                target_indices = parse_range_string(range_str, len(all_parts))
-                selected_parts = [all_parts[i - 1] for i in target_indices]
+                indices = parse_range_string(range_str, len(info_parts))
+                selected_parts = [info_parts[i - 1] for i in indices if 0 < i <= len(info_parts)]
             else:
-                selected_parts = all_parts
-        elif info["has_multi_pages"]:
+                selected_parts = list(info_parts)
+        elif info.get("has_multi_pages"):
             req_page = page if page is not None else (info.get("url_page") or 1)
-            p_idx = max(1, min(req_page, len(info["parts"])))
-            selected_parts = [info["parts"][p_idx - 1]]
+            try:
+                p_idx = max(1, min(int(req_page), len(info_parts)))
+            except (TypeError, ValueError):
+                p_idx = 1
+            selected_parts = [info_parts[p_idx - 1]] if info_parts else []
         else:
             selected_parts = [{
                 "page": 1,
-                "title": info["title"],
-                "cid": info["cid"],
-                "duration": info["duration"],
+                "title": info.get("title", ""),
+                "cid": info.get("cid"),
+                "duration": info.get("duration"),
                 "filepath": info.get("source_path", ""),
+                "url": url,
+                "media_kind": KIND_VIDEO,
             }]
+        selected_parts = self._clean_parts(selected_parts)
+        if not selected_parts:
+            raise PipelineGateError(2, "没有可处理的分集；请检查链接或本地课程目录后重跑 pipeline")
+        print(f"[*] 本次选中分集: {len(selected_parts)}；拓扑缓存将保留完整 parts.json")
 
-        total_episodes = len(selected_parts)
-        print(f"[*] 待处理分集总数: {total_episodes}")
-
-        # ===== --dry-run：只解析拓扑（取代原 `parse` 子命令）=====
+        # 3) dry-run 必须在这里结束；不得触发任何计划、音频或任务书写入。
         if mode == "dry-run":
-            print("[*] --dry-run：仅解析拓扑并列出分集，不下载音频、不写任务书")
-            for _part in selected_parts:
-                _dur = _part.get("duration")
-                _dur_txt = f"{max(1, int(round(_dur / 60)))} 分钟" if isinstance(_dur, (int, float)) and _dur else "时长未知"
-                print(f"    - P{int(_part.get('page') or 0):02d} {_part.get('title')}（{_dur_txt}）")
+            print("[*] --dry-run：仅解析拓扑，不保存 parts/block_plan，不下载或写任务书")
+            for item in selected_parts:
+                duration = item.get("duration")
+                duration_text = (
+                    f"{max(1, int(round(float(duration) / 60)))} 分钟"
+                    if isinstance(duration, (int, float)) and duration else "时长未知"
+                )
+                print(f"    - P{int(item.get('page') or 0):02d} {item.get('title')}（{duration_text}）")
             print(f"[✓] 工作区: {ws.root_dir}")
-            print("=" * 65)
-            return {"workspace": ws, "manifest": {}, "note_plan": [], "note_results": [], "failed_entries": []}
-
-        # 断点续派过滤：manifest 中 status==success 的 page 跳过（force 时不过滤）
-        if not force:
             try:
-                _done_pages = {
-                    d.get("page") for d in ws.load_manifest(absolute=True).get("details", [])
-                    if d.get("status") == "success"
-                }
+                existing_plan = BlockPlan.load(ws) or {}
             except Exception:
-                _done_pages = set()
-            if _done_pages:
-                kept = []
-                for p in selected_parts:
-                    if p.get("page") in _done_pages:
-                        print(f"[skip] P{p.get('page'):02d} {p.get('title')} 已完成，跳过")
-                    else:
-                        kept.append(p)
-                selected_parts = kept
-                total_episodes = len(selected_parts)
-                print(f"[*] 断点续派后待处理: {total_episodes}")
-        else:
-            print("[*] --force 已指定，不过滤已完成分集")
-
-        prefetch_workers = max(1, int(prefetch_workers or 1))
-        print(f"[*] 并发配置: 音频预取 {prefetch_workers} 线程")
-
-        def _audio_paths(p: Dict[str, Any]):
-            clean_p_title = sanitize_filename(p["title"])
-            return ws.audio_dir / f"P{p['page']:02d}_{clean_p_title}.m4a", clean_p_title
-
-        def _ensure_audio_once(p: Dict[str, Any]) -> Path:
-            # 单次音频收齐尝试，命中缓存直接返回
-            audio_file, _ = _audio_paths(p)
-            if audio_file.exists() and audio_file.stat().st_size >= 10240 and not force:
-                return audio_file
-
-            source_type = info.get("source_type") or ("local" if info.get("is_local") else "bilibili")
-            print(f"    [prefetch] P{p['page']:02d} 获取音频 ({source_type})...")
-
-            from src.core.ingestion import get_coordinator
-            coordinator = get_coordinator()
-            coordinator.fetch_episode_audio(
-                info,
-                p,
-                audio_file,
-                force=force,
-                sessdata=sessdata,
-                quality=quality,
-            )
-            print(f"    [prefetch] P{p['page']:02d} 音频就绪: {audio_file.name}")
-            return audio_file
-
-        def _ensure_audio_with_retry(p: Dict[str, Any]) -> Path:
-            # 单集下载失败退避重试 3 次（共 4 次尝试），退避 1/2/4 秒
-            last_err: Optional[Exception] = None
-            for attempt in range(4):
-                try:
-                    return _ensure_audio_once(p)
-                except Exception as err:
-                    last_err = err
-                    if attempt < 3:
-                        print(f"    [retry] P{p['page']:02d} 第{attempt + 1}次失败，退避重试 ({classify_audio_error(err)}): {str(err)[:120]}")
-                        try:
-                            time.sleep(2 ** attempt)
-                        except Exception:
-                            pass
-            raise last_err  # type: ignore[misc]
-
-        # ===== 阶段一「音频收齐」：并发下载/提取全部选中集音频 =====
-        print("=" * 65)
-        print("[*] 阶段一：音频收齐（全部选中集并发下载/提取）")
-        print("=" * 65)
-        # 非视频作品（抖音图文/图集 note）先在这里预筛掉：它们只有图片卡片+BGM，
-        # 没有任何口播，下载与听音都得不到内容，照常派发只会诱导撰写环节编造。
-        # 预筛放在并发池**之前**，因此它们不会进入重试退避路径、也不产生失败记录。
-        non_video_entries: List[Dict[str, Any]] = [
-            {
-                "page": p.get("page"), "title": p.get("title"), "cid": p.get("cid"),
-                "media_kind": part_kind(p), "skip_reason": "non_video", "status": "skipped",
+                existing_plan = {}
+            return {
+                "workspace": ws,
+                "manifest": {},
+                "plan": existing_plan,
+                "blocks": [dict(b) for b in (existing_plan.get("blocks") or []) if isinstance(b, Mapping)],
+                "note_plan": [],
+                "note_results": [],
+                "failed_entries": [],
+                "dry_run": True,
             }
-            for p in selected_parts if part_kind(p) != KIND_VIDEO
-        ]
-        if non_video_entries:
-            print(f"[*] 检出 {len(non_video_entries)} 集非视频作品（图文作品，无口播）："
-                  "不下载音频、不派发文章任务书")
-            for _nv in non_video_entries:
-                print(f"    - P{_nv['page']:02d} [{_nv['media_kind']}] {_nv['title']}")
-        _prefetch_parts = [p for p in selected_parts if part_kind(p) == KIND_VIDEO]
-        audio_failed: List[Dict[str, Any]] = []
-        audio_ready: Dict[int, Path] = {}
-        with ThreadPoolExecutor(max_workers=prefetch_workers) as prefetch_pool:
-            fut_map = {p["page"]: prefetch_pool.submit(_ensure_audio_with_retry, p) for p in _prefetch_parts}
-            for p in _prefetch_parts:
-                try:
-                    audio_ready[p["page"]] = fut_map[p["page"]].result()
-                except Exception as err:
-                    audio_failed.append({
-                        "page": p["page"], "title": p["title"], "cid": p["cid"],
-                        "error": str(err), "category": classify_audio_error(err), "status": "failed",
-                    })
-        # 阶段一结束后写检查点 parts.json + manifest
-        # 局部运行（--page/--range）只处理选中分集：必须与既有拓扑**合并**而非覆盖，
-        # 否则会把分集拓扑缓存截断成子集（离线自愈与 sync 对账都会据此误判规模）。
-        try:
-            _clean_parts = [{k: v for k, v in p.items() if not k.startswith("_")} for p in selected_parts]
-            ws.save_parts(TaskWorkspace.merge_parts(ws.load_parts(), _clean_parts))
-        except Exception:
-            pass
-        # 统计口径只算真正下载过的集；局部运行若全是图文集（_prefetch_parts 为空），
-        # 不要用 0 覆盖上一次的音频阶段统计。
-        if _prefetch_parts or not non_video_entries:
-            ws.save_manifest({
-                "audio_stage": {"total": len(_prefetch_parts), "ready": len(audio_ready), "failed": len(audio_failed)},
-                "audio_failed_episodes": [dict(d) for d in audio_failed],
-            })
-        skipped_entries: List[Dict[str, Any]] = []
-        if audio_failed:
-            if skip_failed:
-                # 显式 opt-in 豁免：记入 manifest 跳过名单，不进转录
-                skipped_entries = list(audio_failed)
-                audio_failed = []
-                print(f"[*] --skip-failed 已指定，豁免 {len(skipped_entries)} 集（不进转录）")
-                ws.save_manifest({
-                    "skipped_episodes": skipped_entries,
-                    "skipped_pages": [d.get("page") for d in skipped_entries],
-                })
-            else:
-                # 任一集最终失败则严格终止报告（硬切分门禁，未进入转录）
-                print("\n" + "=" * 65, file=sys.stderr)
-                print("[✗] 阶段一终止：音频收齐失败（硬切分门禁，未进入转录）", file=sys.stderr)
-                print(f"失败集清单（共 {len(audio_failed)} 集）：", file=sys.stderr)
-                for f_ep in audio_failed:
-                    print(f"    - P{f_ep['page']:02d} {f_ep['title']} [{f_ep.get('category')}]：{str(f_ep['error'])[:160]}", file=sys.stderr)
-                print("失败分类统计：", file=sys.stderr)
-                _cats: Dict[str, int] = {}
-                for f_ep in audio_failed:
-                    _cats[f_ep.get("category", "其他下载异常")] = _cats.get(f_ep.get("category", "其他下载异常"), 0) + 1
-                for _c, _n in _cats.items():
-                    print(f"    - {_c} × {_n}", file=sys.stderr)
-                print("三选项：①删集重跑（缩小 --range 剔除失败集后重跑）②补--sessdata（浏览器复制 SESSDATA 后重跑）③人工补音频：把该集音频放到 <task>/audio/PXX_<标题>.m4a 后重跑（块会按新音频重装，该集随即进入块级转录队列）", file=sys.stderr)
-                print("=" * 65, file=sys.stderr)
-                raise PipelineGateError(2)
 
-        # ===== 阶段二「模块长文任务书派发」：一块一篇，读块级逐字稿撰写，直接产出 articles/ =====
-        # 排除两类不派发的分集：① 音频下载失败被 --skip-failed 豁免的；
-        # ② 非视频作品（图文/图集 note，本就没有口播，见 references/non-video-works.md）。
-        # 必须在这里排除，否则它们会被阶段二音频门禁当成「音频缺失」而误报，
-        # 并让 _all_success 永远为 False（它们不可能产出长文）。
-        _skip_pages = ({d.get("page") for d in skipped_entries}
-                       | {d.get("page") for d in non_video_entries})
-        effective_parts = [p for p in selected_parts if p.get("page") not in _skip_pages]
-        # 阶段二入口校验音频 100% 就绪，否则拒绝并指去向
-        _missing = []
-        for p in effective_parts:
-            _af, _ = _audio_paths(p)
-            if not (_af.exists() and _af.stat().st_size >= 10240):
-                _missing.append(p)
-        if _missing:
-            print("\n" + "=" * 65, file=sys.stderr)
-            print("[✗] 阶段二拒绝启动：音频未 100% 就绪（请回阶段一排查音频目录）", file=sys.stderr)
-            for _m in _missing:
-                _af, _ = _audio_paths(_m)
-                print(f"    - P{_m['page']:02d} {_m['title']} 缺失/过小：{_af}", file=sys.stderr)
-            print(f"去向：检查 {ws.audio_dir} 与 parts.json，补齐后重跑 pipeline（断点续派自动跳过已完成集）", file=sys.stderr)
-            print("=" * 65, file=sys.stderr)
-            raise PipelineGateError(2)
+        # 4) 完整拓扑先在内存合并。已有计划走 BlockPlan 的安全追加；新工作区必须
+        # 先 ensure 再保存 parts.json，否则 BlockPlan 会把刚创建的分集缓存误判为 legacy。
+        cached_parts = self._clean_parts(ws.load_parts())
+        incoming_parts = self._clean_parts(info_parts or selected_parts)
+        complete_parts = self._clean_parts(
+            TaskWorkspace.merge_parts(cached_parts, incoming_parts)
+        )
+        if not complete_parts:
+            raise PipelineGateError(2, "完整 parts 为空；请检查媒体元数据后重跑 pipeline")
 
-        # ===== 阶段一点五「音频装箱合并」：把连续的几集拼成块（每块 40–60 分钟）=====
-        # 块不只是「少调用几次取音接口」的容器：**块就是知识模块**。转录按块走，长文按块写
-        # （一块一篇模块长文），教材按块整编，笔记按块归并——整条链路的下游都以块为粒度。
-        # 因此装箱是阶段一的**固定步骤**：没有块清单就没有模块边界，写作链路无从谈起。
-        blocks: List[Dict[str, Any]] = []
-        block_by_page: Dict[int, Dict[str, Any]] = {}
-        titles_by_page = {int(p["page"]): sanitize_filename(p["title"]) for p in effective_parts}
-        from src.core.audio_merger import AudioMerger
+        limits = float(block_minutes) if block_minutes and float(block_minutes) > 0 else None
+        plan = BlockPlan.ensure(ws, complete_parts, limits=limits)
+        if not isinstance(plan, Mapping):
+            plan = BlockPlan.load(ws) or {}
+        # ensure 成功后才写分集缓存；连载追加因此始终看到完整、同一份拓扑。
+        ws.save_parts(complete_parts)
+        all_blocks = [dict(b) for b in (plan.get("blocks") or []) if isinstance(b, Mapping)]
+        if not all_blocks:
+            raise PipelineGateError(2, "BlockPlan 没有生成任何块；请检查分集时长/块时长参数后重跑")
 
-        # 装箱宇宙 = **工作区的全部分集**（parts.json ∩ 视频集），不是本次选中的那批：
-        # 块清单是模块边界的全局事实源，--range/--page 局部运行若以选中集重装箱，
-        # 会把范围外的块当成孤儿清场（块音频被删、范围外任务书被作废、已完成页翻回待办）。
-        _pack_pages = [
-            int(p["page"]) for p in (ws.load_parts() or [])
-            if isinstance(p, dict) and p.get("page") is not None and part_kind(p) == KIND_VIDEO
-        ] or [int(p["page"]) for p in effective_parts]
-
-        print("=" * 65)
-        print("[*] 阶段一点五：音频装箱合并（块级转录的前置步骤）")
-        print("=" * 65)
-        Path(ws.subtitles_dir).mkdir(parents=True, exist_ok=True)
-        try:
-            merged = AudioMerger.merge(
-                ws,
-                _pack_pages,
-                target_minutes=(block_minutes or None),
-            )
-        except Exception as err:
-            print("\n" + "=" * 65, file=sys.stderr)
-            print(f"[✗] 音频装箱合并失败，终止任务：{err}", file=sys.stderr)
-            print("去向：确认 ffmpeg/ffprobe 在 PATH、audio/ 可写后重跑本命令；"
-                  "缺音频的集先补齐音频再重跑（块级转录以块音频为唯一取音对象）", file=sys.stderr)
-            print("=" * 65, file=sys.stderr)
-            raise PipelineGateError(3) from err
-
-        for _line in merged["diag"]:
-            print(f"    {_line}")
-        if merged["missing"]:
-            print(f"    [!] 以下集缺音频、未进任何块：{merged['missing']}")
-        blocks = merged["blocks"]
-        for _line in AudioMerger.describe(blocks, merged["limits"]):
-            print(f"    {_line}")
-        for _block in blocks:
-            for _page in _block["episodes"]:
-                block_by_page[int(_page)] = _block
-
-        ws.save_manifest({"audio_blocks": {
-            "target_minutes": merged["limits"]["target"],
-            "ceiling_minutes": merged["limits"]["ceiling"],
-            "block_count": len(blocks),
-            "episode_count": sum(len(b["episodes"]) for b in blocks),
-            "noop": bool(merged["noop"]),
-            "blocks_manifest": merged.get("manifest", ""),
-        }})
-
-        # 块边界随目标时长变化：旧编号的任务书留在盘上就是「可被派发的幽灵任务」
-        _stale = AudioMerger.prune_orphans(ws, blocks)
-        if _stale["removed_tasks"]:
-            print(f"    [i] 已作废 {len(_stale['removed_tasks'])} 份与本次装箱不符的旧转录任务书")
-        if _stale["orphan_audio"]:
-            print(f"    [!] 以下块音频不再属于本次装箱（**未删**，确认无用后可手工清理）："
-                  f"{_stale['orphan_audio']}")
-        if _stale["orphan_transcripts"]:
-            print(f"    [!] 以下块级逐字稿不再属于本次装箱（**未删**，分集逐字稿可能仍引用它）："
-                  f"{_stale['orphan_transcripts']}")
-
-        print(f"[*] 导出块级转录任务书（{len(blocks)} 份）→ {Path(ws.subtitles_dir).name}/")
-        for _block in blocks:
-            _task = export_block_transcribe_task(
-                ws, _block, titles=titles_by_page, course_title=info["title"]
-            )
-            print(f"    [agent] BLK{_block['block_id']:02d} "
-                  f"{AudioMerger.block_span(_block)}: {_task.name}")
-        if merged["noop"]:
-            print("[i] 本次装箱无收益（每块仅一集）：块音频直接指向该集原音频，转录仍按块派发")
-
-        # ===== --audio-only：收齐音频并装箱、导出转录任务书后即返回（取代原 `audio` 子命令）=====
-        if mode == "audio-only":
-            print("[*] --audio-only：音频与块已就绪，未派发长文/笔记任务书")
-            print(f"[✓] 块清单: {AudioMerger.manifest_path(ws)}")
-            print(f"[✓] 下一步：转录角色按 {Path(ws.subtitles_dir).name}/BLK*_转录任务书.md 出块级逐字稿")
-            print("=" * 65)
-            return {"workspace": ws, "manifest": {}, "note_plan": [], "note_results": [], "failed_entries": []}
-
-        print("=" * 65)
-        print("=" * 65)
-        print(f"[*] 阶段二：派发**模块长文**任务书（共 {len(blocks)} 块，一个块一篇，读块逐字稿撰写）")
-        print(f"[*] 长文提示词风格：{article_type or '未指定（将在派发时终止并给出风格菜单）'}")
-        print("=" * 65)
-
-        from src.core.workspace import find_module_article, module_article_path
-
-        manifest_entries: List[Dict[str, Any]] = []
-        page_titles = {
-            int(p["page"]): sanitize_filename(str(p.get("title") or "")) for p in effective_parts
+        selected_pages = {
+            int(part["page"]) for part in selected_parts
+            if part.get("page") is not None
         }
-        for idx, block in enumerate(blocks, 1):
-            block_id = int(block.get("block_id") or 0)
-            span = str(block.get("span") or AudioMerger.block_span(block))
-            block_title = str(block.get("title") or "").strip() or span
-            transcript_path = TaskWorkspace.block_path(ws, block)
-            target_article = module_article_path(ws.articles_dir, block)
-            print(
-                f"\n[{idx:02d}/{len(blocks):02d}] BLK{block_id:02d} {span} {block_title}"
+        blocks, partial_blocks = self._blocks_in_scope(all_blocks, selected_pages)
+        if partial_blocks:
+            names = ", ".join(
+                f"BLK{int(b.get('block_id') or 0):02d}({BlockPlan.span(b)})"
+                for b in partial_blocks
+            )
+            print(f"[*] 跳过 {len(partial_blocks)} 个跨出本次选中范围的块：{names}")
+        if not blocks:
+            raise PipelineGateError(
+                2,
+                "本次选中的分集没有完整覆盖任何块；请扩大 --page/--range 或先建立完整 BlockPlan",
             )
 
-            existing_article = None
-            if not force:
-                # 与队列/对账/门禁同一套宽容定位（find_module_article），不再各写一套 glob
-                existing_article = find_module_article(ws.articles_dir, block)
-            if existing_article is not None:
-                print(f"    [cached] 模块长文已存在，跳过派发: {existing_article.name}")
-                manifest_entries.append({
-                    "page": int((block.get("episodes") or [0])[0]),
-                    "block_id": block_id, "span": span, "block_title": block_title,
-                    "episodes": block.get("episodes") or [], "article": str(existing_article),
-                    "asr_engine": "agent-native", "doc_engine": "agent-native", "status": "success",
-                })
-                continue
+        parts_by_page = self._parts_by_page(complete_parts)
+        video_pages = {
+            page_no for page_no, part in parts_by_page.items()
+            if part_kind(part) == KIND_VIDEO
+        }
+        video_blocks = [
+            block for block in blocks
+            if self._block_is_video(block, video_pages)
+        ]
+        if len(video_blocks) != len(blocks):
+            print(f"[*] 跳过 {len(blocks) - len(video_blocks)} 个非视频块（图文作品无口播）")
 
-            # 长文风格门禁（二次防线）：CLI 层（cmd_pipeline）已在入口前确认风格并 exit 4；
-            # 此处再校验一次，保证直接调用领域服务的调用方也拿不到未命中预设的提示词。
+        # 5) 字幕优先：只有 B 站且确有 SESSDATA 才访问字幕接口；没有登录态时
+        # 直接把所有视频块交给音频兜底，不把字幕-only 分支做成硬门禁。
+        subtitle_state: Dict[str, Any] = {
+            "subtitle_ready": [],
+            "cached": [],
+            "needs_audio": [int(b.get("block_id") or 0) for b in video_blocks],
+            "written": [],
+            "errors": [],
+        }
+        subtitle_plan = dict(plan)
+        subtitle_plan["blocks"] = blocks
+        if video_blocks and self._is_bilibili(info) and sessdata:
             try:
-                _resolved_type = resolve_article_type(article_type)
-            except ArticlePromptTypeError as err:
-                print("\n" + err.report, file=sys.stderr)
-                print("去向：主 Agent 先依课程标题与分集标题判定类型，再用 --article-type 重跑本命令。", file=sys.stderr)
-                raise PipelineGateError(4, f"长文提示词风格门禁终止：{err.reason}") from err
+                raw_state = SubtitleService.run(
+                    ws, info, subtitle_plan, sessdata=sessdata, force=force
+                )
+            except Exception as err:
+                print(f"[!] 字幕阶段异常，缺字幕块将转音频兜底：{err}", file=sys.stderr)
+                subtitle_state["errors"].append({"message": str(err)})
+            else:
+                subtitle_state = self._subtitle_state(raw_state, video_blocks, ws)
+        elif video_blocks and self._is_bilibili(info):
+            print("[*] B 站未配置 SESSDATA：跳过字幕，所有视频块进入音频物化")
+        elif video_blocks:
+            print("[*] 非 B 站来源：跳过字幕，所有视频块进入音频物化")
 
+        # 6) 只物化字幕服务标记为 needs_audio 的块；物化器内部复用既有源音频，
+        # 回调最终只通过 IngestionCoordinator.fetch_episode_audio 获取缺失分集。
+        needs_ids = set(self._block_ids(subtitle_state.get("needs_audio")))
+        if not force:
+            needs_ids = {
+                block_id for block_id in needs_ids
+                if not self._transcript_exists(
+                    ws, next(
+                        (block for block in video_blocks
+                         if int(block.get("block_id") or 0) == block_id),
+                        {},
+                    )
+                )
+            }
+        subtitle_state["needs_audio"] = sorted(needs_ids)
+        blocks_to_materialize = [
+            block for block in video_blocks
+            if int(block.get("block_id") or 0) in needs_ids
+        ]
+        materialized: Dict[int, Any] = {}
+        if blocks_to_materialize:
+            fetch_episode = self._fetch_callback(
+                info, sessdata=sessdata, quality=quality, force=force
+            )
             try:
-                task_file = export_block_article_task(
-                    ws, block, transcript_path,
-                    course_title=info["title"], article_type=article_type, page_titles=page_titles,
+                materialized = AudioMaterializer.materialize(
+                    ws,
+                    info,
+                    blocks_to_materialize,
+                    parts_by_page,
+                    fetch_episode,
+                    force=force,
                 )
             except Exception as err:
                 print("\n" + "=" * 65, file=sys.stderr)
-                print(f"[✗] 模块长文任务书导出失败，终止任务：BLK{block_id:02d}：{err}", file=sys.stderr)
-                print("①排障重跑：检查 articles 目录写权限与磁盘空间后重跑 pipeline", file=sys.stderr)
-                print("②中止：已收齐音频与块清单保留在 audio/ 可稍后重跑", file=sys.stderr)
+                print(f"[✗] 块音频物化失败：{err}", file=sys.stderr)
+                print("去向：确认 ffmpeg/ffprobe 在 PATH、audio/ 可写，并检查失败分集源文件后重跑 pipeline。", file=sys.stderr)
                 print("=" * 65, file=sys.stderr)
-                raise PipelineGateError(3)
+                raise PipelineGateError(3, str(err)) from err
+        if not isinstance(materialized, Mapping):
+            materialized = {}
 
-            print(f"    [agent] 已导出模块长文任务书，待 Agent 读块逐字稿撰写: {task_file.name}")
-            manifest_entries.append({
-                "page": int((block.get("episodes") or [0])[0]),
-                "block_id": block_id, "span": span, "block_title": block_title,
-                "episodes": block.get("episodes") or [],
-                "audio": str(Path(ws.root_dir) / str(block.get("audio") or "")),
-                "task_prompt": str(task_file), "article": str(target_article),
-                "transcript": str(transcript_path),
-                "article_type": _resolved_type["key"],
-                "asr_engine": "agent-native", "doc_engine": "agent-native",
-                "status": "need-agent-article",
-            })
+        audio_ready_ids = {
+            int(block.get("block_id") or 0)
+            for block in video_blocks
+            if BlockPlan.audio_ready(ws, block)
+        }
+        runtime_materialized = {
+            block_id: BlockPlan.audio_path(ws, block)
+            for block_id in audio_ready_ids
+            for block in video_blocks
+            if int(block.get("block_id") or 0) == block_id
+        }
+        if audio_ready_ids != needs_ids:
+            missing_audio = sorted(needs_ids - audio_ready_ids)
+            if missing_audio:
+                print(
+                    f"[!] 暂有 {len(missing_audio)} 个缺字幕块未达到 audio_ready；"
+                    "不会导出无效转录任务书，请排查对应源音频后重跑 pipeline。",
+                    file=sys.stderr,
+                )
 
-        # ===== 阶段三「笔记归并派发」：块清单在手，归并由宿主 Agent 产出后才派发 =====
+        # 7) 转录任务书只给「缺字幕/无逐字稿 + 音频已就绪」的块；--force 只允许
+        # 覆盖已有逐字稿对应的任务书，不触碰计划边界。
+        titles = {
+            page_no: sanitize_filename(str(part.get("title") or f"P{page_no:02d}"))
+            for page_no, part in parts_by_page.items()
+        }
+        course_title = str(info.get("title") or "").strip() or ws.root_dir.name
+        transcribe_blocks = [
+            block for block in video_blocks
+            if int(block.get("block_id") or 0) in needs_ids
+            and int(block.get("block_id") or 0) in audio_ready_ids
+            and (force or not self._transcript_exists(ws, block))
+        ]
+        for block in transcribe_blocks:
+            block_id = int(block.get("block_id") or 0)
+            try:
+                task_file = export_block_transcribe_task(
+                    ws, block, titles=titles, course_title=course_title
+                )
+            except Exception as err:
+                print(f"[✗] BLK{block_id:02d} 转录任务书导出失败：{err}", file=sys.stderr)
+                print("去向：检查 subtitles/ 写权限与磁盘空间后重跑 pipeline。", file=sys.stderr)
+                raise PipelineGateError(3, str(err)) from err
+            print(f"    [agent] BLK{block_id:02d} {BlockPlan.span(block)} 转录任务书: {task_file.name}")
+        if not transcribe_blocks:
+            print("[*] 当前没有需要补转录的块（字幕/逐字稿已就绪，或音频尚未就绪）")
+
+        runtime_manifest = self._save_runtime_manifest(
+            ws,
+            plan,
+            subtitle_state,
+            runtime_materialized,
+            video_blocks,
+            mode=mode,
+        )
+
+        # 8) --audio-only 到此结束：任务书只描述转录输入，不提前派发写作。
+        if mode == "audio-only":
+            print("[*] --audio-only：计划、字幕、按需音频物化与转录任务书已完成")
+            print(f"[✓] BlockPlan: {BlockPlan.path(ws)}")
+            print("[i] 下一步：转录角色读取 subtitles/ 任务书，完成后再运行 pipeline 派发模块长文。")
+            print("=" * 65)
+            return {
+                "workspace": ws,
+                "manifest": runtime_manifest,
+                "plan": dict(plan),
+                "blocks": blocks,
+                "audio": runtime_materialized,
+                "subtitle": subtitle_state,
+                "note_plan": [],
+                "note_results": [],
+                "failed_entries": [],
+                "audio_only": True,
+            }
+
+        # 9) 所有视频块都导出模块长文任务书；任务书不写动态 ready 状态，写作角色
+        # 运行时再按逐字稿文件实际存在性判断。纯图文课程没有可写块，也不触发风格门禁。
+        resolved_type: Optional[Dict[str, str]] = None
+        if video_blocks:
+            try:
+                resolved_type = resolve_article_type(article_type)
+            except ArticlePromptTypeError as err:
+                print("\n" + err.report, file=sys.stderr)
+                print("去向：先确认 learning/legacy 长文风格，再用 --article-type 重跑 pipeline。", file=sys.stderr)
+                raise PipelineGateError(4, f"长文提示词风格门禁终止：{err.reason}") from err
+
+        page_titles = dict(titles)
+        for index, block in enumerate(video_blocks, 1):
+            block_id = int(block.get("block_id") or 0)
+            span = BlockPlan.span(block)
+            transcript_path = TaskWorkspace.block_path(ws, block)
+            try:
+                task_file = export_block_article_task(
+                    ws,
+                    block,
+                    transcript_path,
+                    course_title=course_title,
+                    article_type=article_type,
+                    page_titles=page_titles,
+                )
+            except Exception as err:
+                print(f"[✗] BLK{block_id:02d} 模块长文任务书导出失败：{err}", file=sys.stderr)
+                print("去向：检查 articles/ 写权限与磁盘空间后重跑 pipeline；BlockPlan 与已完成音频会保留。", file=sys.stderr)
+                raise PipelineGateError(3, str(err)) from err
+            print(
+                f"    [agent] BLK{block_id:02d} {span} 模块长文任务书 "
+                f"({index}/{len(video_blocks)}): {task_file.name}"
+            )
+        if video_blocks:
+            print(f"[*] 模块长文任务书已导出 {len(video_blocks)} 份，风格: {resolved_type['key']}")
+        else:
+            print("[*] 本课程没有视频块，跳过模块长文任务书")
+
+        # 10) 阶段三笔记规划逻辑保持原有语义：只有已有模块长文时才归并。
         note_plan: List[Dict[str, Any]] = []
         note_results: List[Dict[str, Any]] = []
         note_dispatched = False
         if process_all:
-            # 集号基准取工作区；再过滤掉非视频作品——它们没有长文，留着会让
-            # 归并的覆盖基准里出现「有集号没内容」的空洞。
-            # 过滤放在**调用点**而不是 resolve_scope_parts 内部：那个函数的契约是
-            # 「集号基准来源」，不是内容筛选（它有多个调用方，语义各不相同）。
-            scope_parts = [p for p in resolve_scope_parts(info, ws) if part_kind(p) == KIND_VIDEO]
-            # 语料就绪门禁：块即模块，模块长文（articles/模块XX_*_精读长文.md）才是笔记的语料。
-            # 一篇都没有就挂起，防止透支生成空壳大笔记；这不是故障，是流水线的正常等料状态。
+            scope_parts = [
+                part for part in resolve_scope_parts(info, ws)
+                if part_kind(part) == KIND_VIDEO
+            ]
             from src.core.workspace import find_module_article
 
             ready_blocks = [
-                b for b in blocks
-                if find_module_article(ws.articles_dir, b) is not None
+                block for block in video_blocks
+                if find_module_article(ws.articles_dir, block) is not None
             ]
             if not ready_blocks:
                 print("\n" + "=" * 65)
                 print("[*] 阶段三后置：模块长文任务书已就绪，但尚无任何模块长文落盘。")
-                print(f"[*] 待宿主 Agent 将长文写入 {ws.articles_dir} 后，重跑 pipeline --all 将自动归并。")
+                print(f"[*] 待宿主 Agent 将长文写入 {ws.articles_dir} 后，重跑 pipeline --all 自动归并。")
                 print("=" * 65)
             else:
                 print("\n" + "=" * 65)
-                print(f"[*] 阶段三：笔记归并（{len(ready_blocks)}/{len(blocks)} 块已有模块长文）")
+                print(f"[*] 阶段三：笔记归并（{len(ready_blocks)}/{len(video_blocks)} 块已有模块长文）")
                 print("=" * 65)
-
-                # 归并 + 笔记派发的唯一实现；缺归并时用「一块一篇」兜底继续，绝不终止
                 outcome = BlockSynthesizer.dispatch_notes(
                     ws,
                     scope_parts,
                     course_title=resolve_course_title(info, ws),
+                    force=force,
                 )
                 note_plan = outcome["notes"]
                 note_results = outcome["results"]
-                # planned/salvaged 才算「归并已成事」：unmerged 只是「一块一篇」的兜底粒度，
-                # 把它当终态会让 pipeline_completed 在归并规划还欠着时就被点亮。
                 note_dispatched = outcome["note_status"] in ("planned", "salvaged") and bool(note_plan)
                 if outcome["note_status"] == "unmerged":
                     print("[*] 阶段三后置：已导出归并任务书，待宿主 Agent 产出 note_plan.json 后重跑。")
-                    print(f"[*] 任务书: {ws.root_dir / 'note_plan_TASK.md'}")
-        elif info["has_multi_pages"]:
+        elif info.get("has_multi_pages"):
             print("[*] 分区间运行：归并后置，待 --all 全量语料齐后统一派发")
 
-        # ===== Manifest 按 page 合并落盘（工作区原生相对路径化） =====
-        _existing = ws.load_manifest(absolute=True)
-        _merged = {d.get("page"): d for d in _existing.get("details", []) if isinstance(d, dict)}
-        for d in manifest_entries:
-            _merged[d.get("page")] = d
-        _failed_merged = {d.get("page"): d for d in _existing.get("failed_episodes", []) if isinstance(d, dict)}
-
-        # 仅当所有有效分集转录成功（且无历史失败分集）时才标记全流程完毕
-        # 说明：本趟的失败集在阶段一/阶段二就以 PipelineGateError 终止，不存在「本趟失败清单」，
-        # 因此此处只继承 manifest 里的历史失败记录。
-        _all_success = (
-            len(_merged) >= len(effective_parts)
-            and all(d.get("status") == "success" for d in _merged.values())
-            and not _failed_merged
-        )
-        _existing["pipeline_completed"] = bool(_all_success and (not process_all or note_dispatched))
-        _existing["processed_episodes"] = sum(1 for d in _merged.values() if d.get("status") == "success")
-        _existing["details"] = [_merged[k] for k in sorted(_merged)]
-        _existing["failed_episodes"] = [_failed_merged[k] for k in sorted(_failed_merged)]
-        # 跳过名单 = 两类之和：① --skip-failed 豁免的音频失败集（故障）② 非视频作品（非故障）。
-        # 合并进 skipped_pages 是有意的：`state_sync` 用 total - len(skipped_pages) 算有效总数，
-        # 非视频集一并扣减，对账才不会把它们当成「待补的欠账」。
-        # 另存 non_video_episodes 以便区分语义（旧工作区无此字段，读取方一律 .get 兜底）。
-        _all_skipped = list(skipped_entries) + list(non_video_entries)
-        _existing["skipped_episodes"] = _all_skipped
-        _existing["skipped_pages"] = [d.get("page") for d in _all_skipped]
-        _existing["non_video_episodes"] = [dict(d) for d in non_video_entries]
-        if process_all and note_dispatched:
-            _existing["note_plan"] = note_plan
-            _existing["note_results"] = note_results
-        ws.save_manifest(_existing)
-        print("\n" + "=" * 65)
-        print(f"[✓] 工具层流水线执行完毕！语料与任务书已归档至: {ws.root_dir}")
-        print("【★ 宿主 Agent 接管指南】：")
-        print(f"  1. 模块长文任务书（一个块一篇，读块级逐字稿撰写）: {ws.articles_dir}/*_TASK.md")
-        if process_all:
-            print(f"  2. 笔记任务书（块归并后的一篇一子智能体）: {ws.notes_dir}/*_TASK.md")
-        print("  3. 请主程序以 5 个并发通道（Task 子代理或并行会话）直接领跑任务书，执行真正的认知写作！")
-        print("=" * 65)
-
-        # ===== 任务书回收：成品已落盘的模块长文/笔记任务书即时清场（每类保留 1 份范本） =====
+        # 11) 收尾只做任务书回收与磁盘对账；不把块定义复制到 pipeline manifest。
         try:
-            from src.core.task_cleanup import cleanup_completed_tasks as _cleanup_tasks
-            _reclaim = _cleanup_tasks(ws, keep_per_category=1)
-            if _reclaim["deleted"]:
-                print(f"[*] 已回收 {len(_reclaim['deleted'])} 份已完成任务书（每类保留 1 份范本供查阅提示词）")
-        except Exception as _reclaim_err:  # 回收失败不得影响主流程
-            print(f"[!] 任务书回收已跳过：{_reclaim_err}", file=sys.stderr)
+            from src.core.task_cleanup import cleanup_completed_tasks as cleanup_tasks
 
-        # ===== 账本对账：以磁盘产成为唯一真相回填 manifest（消除账本与产物脱节） =====
+            reclaim = cleanup_tasks(ws, keep_per_category=1)
+            if reclaim["deleted"]:
+                print(f"[*] 已回收 {len(reclaim['deleted'])} 份已完成任务书（每类保留 1 份范本）")
+        except Exception as err:
+            print(f"[!] 任务书回收已跳过：{err}", file=sys.stderr)
+
         try:
-            from src.core.state_sync import reconcile_workspace_manifest as _reconcile
-            _sync = _reconcile(ws)
-            print(f"[*] 账本对账：分集 {_sync['success']}/{_sync['total']} 集达标 | "
-                  f"待办 {_sync['pending']} | 模块笔记 {_sync['notes']} 份 | "
-                  f"教材 {_sync['textbooks']} 部 | "
-                  f"pipeline_completed={_sync['pipeline_completed']}")
-        except Exception as _sync_err:
-            print(f"[!] 账本对账已跳过：{_sync_err}", file=sys.stderr)
+            from src.core.state_sync import reconcile_workspace_manifest as reconcile_manifest
 
+            sync = reconcile_manifest(ws)
+            print(
+                f"[*] 账本对账：分集 {sync['success']}/{sync['total']} 集达标 | "
+                f"待办 {sync['pending']} | 模块笔记 {sync['notes']} 份 | "
+                f"教材 {sync['textbooks']} 部 | pipeline_completed={sync['pipeline_completed']}"
+            )
+        except Exception as err:
+            print(f"[!] 账本对账已跳过：{err}", file=sys.stderr)
+
+        final_manifest = ws.load_manifest(absolute=True)
         return {
             "workspace": ws,
-            "manifest": _existing,
+            "manifest": final_manifest,
+            "plan": dict(plan),
+            "blocks": blocks,
+            "audio": runtime_materialized,
+            "subtitle": subtitle_state,
             "note_plan": note_plan,
             "note_results": note_results,
-            "failed_entries": list(_failed_merged.values()),
+            "failed_entries": list(final_manifest.get("failed_episodes") or []),
         }

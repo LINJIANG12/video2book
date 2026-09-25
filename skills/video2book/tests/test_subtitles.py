@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import pytest
-from conftest import write_blocks
 
 from src.core import subtitles
 from src.core.subtitles import (
@@ -306,31 +305,4 @@ def test_attempts_default_reads_env(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# CLI 护栏（不发网络请求）
-# ---------------------------------------------------------------------------
-
-def test_cli_requires_login(run_cli, make_workspace, products_root, blocks_factory):
-    ws = make_workspace("字幕测试_BVSUB01")
-    write_blocks(ws, [blocks_factory(1, [1])])
-    result = run_cli("fetch-subtitles", str(ws.root_dir),
-                     env_extra={"BVB_OUTPUT_DIR": str(products_root)})
-    assert result.code == 2
-    assert "需要登录态" in result.out
-
-
-def test_cli_requires_block_manifest(run_cli, make_workspace, products_root):
-    ws = make_workspace("字幕测试_BVSUB02")
-    result = run_cli("fetch-subtitles", str(ws.root_dir), "--sessdata", "FAKE",
-                     env_extra={"BVB_OUTPUT_DIR": str(products_root)})
-    assert result.code == 2
-    assert "没有块清单" in result.out
-
-
-def test_cli_rejects_non_bilibili_course(run_cli, make_workspace, products_root, blocks_factory):
-    ws = make_workspace("字幕测试_LOCAL01")
-    write_blocks(ws, [blocks_factory(1, [1])])
-    ws.save_parts([{"page": 1, "title": "本地集", "cid": 1, "duration": 60, "url": "local://x"}])
-    result = run_cli("fetch-subtitles", str(ws.root_dir), "--sessdata", "FAKE",
-                     env_extra={"BVB_OUTPUT_DIR": str(products_root)})
-    assert result.code == 2
-    assert "没有 B 站稿件号" in result.out
+# CLI 入口已收敛到 pipeline；字幕底层与重试契约由本文件纯函数测试覆盖。

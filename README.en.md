@@ -5,9 +5,9 @@
 <h1>Video2Book</h1>
 
 <p>
-  <strong>Turn Bilibili, YouTube and Douyin long videos, plus local course media, into per-episode deep-dive textbooks, compiled modular books and mindmap review notes.</strong>
+  <strong>Turn Bilibili, YouTube and Douyin long videos, plus local course media, into per-block deep-dive textbooks, compiled modular books and mindmap review notes — transcripts first from subtitles.</strong>
   <br />
-  <em>Two-stage pipeline · Dual listening channels · Three deliverable tracks · Pre-delivery machine gates · Python 3.10+ · Unified multi-platform media engine</em>
+  <em>Two-stage pipeline · Plan-first · Subtitle-first · Listen only for gaps · Three deliverable tracks · Pre-delivery machine gates · Python 3.10+ · Unified multi-platform media engine</em>
 </p>
 
 <p>
@@ -34,7 +34,7 @@
 
 </div>
 
-Give it a course URL or a directory, and it packs the audio into 40–60 minute blocks, transcribes each block, then writes **one module article per block** and compiles them into modular textbooks and review notes.
+Give it a course URL or a directory, and it first cuts the course into 40–60 minute knowledge blocks from episode durations, takes block transcripts from subtitles when available (only blocks without subtitles fall back to audio transcription), then writes **one module article per block** and compiles them into modular textbooks and review notes.
 
 > [!CAUTION]
 > This tool batch-fetches Bilibili video metadata and audio streams, and can store your login credential. Use it only on content you are entitled to access, and comply with Bilibili's terms of service and applicable law. `SESSDATA` grants access to your account: do not copy, upload or share it.
@@ -59,11 +59,11 @@ Give it a course URL or a directory, and it packs the audio into 40–60 minute 
 
 Video2Book is a skill for AI coding assistants that turns a course into a textbook. It accepts a Bilibili collection, a YouTube channel or playlist, a Douyin collection or a local course directory, writes **one deep-dive article per block** (a block covers consecutive episodes), and consolidates those articles into a modular book and mindmap review notes.
 
-The hard part of a long course is that you cannot finish listening to it, let alone remember it. This skill packs the audio into 40–60 minute blocks along episode boundaries (oversized episodes are split into upper/lower halves), has a listening channel transcribe each block, and writer roles read the block transcript to write **one module article per block** — they never touch audio. Per-episode splitting is an optional after-the-fact lookup, not part of the main chain. The number of audio-reading calls therefore drops from "one per episode" to "one per block" (measured: 936 episodes of 9 courses → 381 blocks, a 2.46× reduction).
+The hard part of a long course is that you cannot finish listening to it, let alone remember it. This skill first cuts the course into 40–60 minute knowledge blocks from the course metadata (oversized episodes are split into upper/lower halves); the block plan is written to `block_plan.json` at the workspace root, and **the planning stage downloads no audio at all**. Block transcripts prefer Bilibili Chinese subtitles: a block with complete subtitles never downloads a byte of audio, and only subtitle-less blocks have their audio materialized on the existing plan and handed to a listening channel. Writer roles read the block transcript to write **one module article per block** — they never touch audio. Per-episode splitting is an optional after-the-fact lookup, not part of the main chain. The number of audio-reading calls therefore drops from "one per episode" to "one per block", and to zero when the whole course has subtitles (measured: 936 episodes of 9 courses → 381 blocks, a 2.46× reduction).
 
 Output comes in three tracks, each in its own directory and usable on its own: per-episode articles, compiled modular textbooks, and cross-module review notes. Every deliverable passes a machine gate before delivery — filler prose, hollow headings and per-episode flat headings get caught by scripts rather than by you while reading.
 
-Block transcripts have two legitimate sources — audio transcription or Bilibili Chinese subtitles; blocks without subtitles fall back to listening. When listening is needed, the only thing you must provide is a listening channel, delivered by the companion repository [omni-media][link-omni-media]: use its `read_audio` (zero credentials) when the host has a native audio modality, or its `read_media` (delegated to an external model) when the host is text-only — both are channels of the same package. This channel is a required part of the workflow; without it Stage 1 cannot obtain audio facts and the pipeline stops to ask you to mount one. Once installed, one command runs an entire course.
+Subtitle-first blocks are written directly; blocks without subtitles fall back to listening. A listening channel is only needed when that fallback actually happens, and it is delivered by the companion repository [omni-media][link-omni-media]: use its `read_audio` (zero credentials) when the host has a native audio modality, or its `read_media` (delegated to an external model) when the host is text-only — both are channels of the same package. A course with complete subtitles never touches audio and therefore never needs it; if a block genuinely lacks subtitles and no listening channel is mounted, the pipeline stops to ask you to mount one. Once installed, one command runs an entire course.
 
 <div align="right">
 
@@ -81,6 +81,7 @@ output/<course_workspace>/
 ├── textbooks/     模块01_<topic>_精读全书.md   # textbook (volume = book, chapter = block; named by content)
 ├── notes/         笔记XX_<theme>_笔记.md       # cross-module review note
 ├── subtitles/     BLKxx_*_逐字稿.md           # block transcript (sole source of truth)
+├── block_plan.json                          # v4 logical block plan (sole source of block boundaries)
 ├── audio/         PXX_*.m4a                  # 16 kHz mono audio slices
 ├── parts.json                               # episode topology (Stage 2 numbering basis)
 └── manifest.json                            # ledger (rebuildable from disk via sync)
@@ -127,7 +128,7 @@ ffmpeg -version    # on PATH
 ### Install
 
 > [!IMPORTANT]
-> Step 3, the listening channel, cannot be skipped. Both services come from the companion repository [omni-media][link-omni-media]; pick one. Without it, Stage 1 cannot obtain audio facts and the pipeline stops to ask you to mount one.
+> Step 3, the listening channel, is only needed for the **subtitle-gap fallback**: when a Bilibili course has complete subtitles, Stage 1 downloads no audio and calls no listening channel. Both services come from the companion repository [omni-media][link-omni-media]; pick one. If a block genuinely lacks subtitles and nothing is mounted, the pipeline stops to ask you to mount one.
 
 ```bash
 # 1) The skill itself: copy this one directory
@@ -138,7 +139,7 @@ cp -r skills/video2book ~/.config/opencode/skills/   # OpenCode
 # 2) Optional: install the CLI (then `video2book` replaces `python src/cli.py`)
 pip install -e .
 
-# 3) Listening channel (required, can be substituted by subtitles on Bilibili): both services live in the omni-media repo
+# 3) Listening channel (only required as the fallback for blocks without subtitles): both services live in the omni-media repo
 cd .. && git clone https://github.com/LINJIANG12/omni-media.git
 
 #    Channel A: host has a native audio modality (read_audio in its tool list), zero credentials
@@ -175,14 +176,18 @@ Deliverables land in `<products_root>/<course_workspace>/`: articles in `article
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
 flowchart TD
-    A[Multi-platform ingestion<br/>Bilibili · YouTube · Douyin · local] --> B[FFmpeg 16 kHz mono audio]
-    B --> M[Pack episodes into blocks<br/>audio/_blocks/ + blocks.json]
-    M --> C{Course duration ≤ 60 min}
+    A[Multi-platform ingestion<br/>Bilibili · YouTube · Douyin · local] --> B[Course metadata<br/>episodes + durations → parts.json]
+    B --> M[Plan-first packing<br/>block_plan.json (no audio yet)]
+    M --> S{Bilibili subtitles complete?}
+    S -->|complete block| T[Write the block transcript<br/>no download, no listening]
+    S -->|subtitle-less block| N[Materialize only those blocks<br/>FFmpeg 16 kHz mono]
+    N --> C{Course duration ≤ 60 min}
     C -->|Yes| D[Main agent transcribes serially]
     C -->|No| E[Dispatch transcriber roles<br/>block by block]
-    D --> F[Block transcription<br/>read_audio / read_media]
+    D --> F[Block listening transcription<br/>read_audio / read_media]
     E --> F
-    F --> W[Writer roles read block transcripts<br/>one article per block]
+    T --> W[Writer roles read block transcripts<br/>one article per block]
+    F --> W
     W --> G[Module articles<br/>articles/模块XX_*_精读长文.md]
     G --> H[Stage 2 two-pass aggregation<br/>module plan → note merge]
     H --> I[Modular textbooks textbooks/<br/>review notes notes/]
@@ -193,12 +198,12 @@ flowchart TD
     classDef data fill:#8B5CF6,stroke:#7C3AED,color:#fff,stroke-width:2px
 
     class A start
-    class B,M,D,E,F,S,W,H process
-    class C decision
+    class B,M,T,N,D,E,F,W,H process
+    class S,C decision
     class G,I data
 ```
 
-- **Audio is read only by the transcriber roles, and block by block**: audio is packed into 40–60 minute blocks along episode boundaries (`audio/_blocks/`, target configurable, 50 min by default; oversized episodes are split into upper/lower halves). Each block is titled by semantically combining its episodes' names and transcribed in one pass into high-fidelity pure text; writer roles read the block transcript only and never touch audio.
+- **Audio is read only by the transcriber roles, only for subtitle-less blocks**: The logical block plan is computed from metadata into `block_plan.json`; blocks with complete subtitles produce their transcript directly, and only the remaining blocks fetch audio under `audio/blocks/` on that same locked plan — never re-planned. Writer roles read block transcripts only and never touch audio.
 - **Dispatch thresholds live in `src/core/budget.py`**: under 60 minutes total the main agent handles work serially; over 60 minutes it must dispatch — three transcriber roles consuming the block queue, plus writer roles (one sub-agent per block, one module article per block). The window fallback applies only to transcriber roles on Channel A: a block whose computed audio tokens exceed 60% of the context window must be read in continuation chunks.
 - **Module level needs no plan, and note merging never stalls**: a block *is* the knowledge module (audio is packed into 40–60 minute blocks, each block titled by semantically combining its episodes' names), so textbooks simply compile block articles in block order; notes merge blocks into a number of notes (`note_plan.json`, one note may span several blocks). Unknown or duplicate block claims are rescued in place (first-come-wins, orphan blocks get fallback notes), the command always exits normally, and the on-disk `note_plan.json` is never overwritten by fallback results.
 - **Stage 1 and Stage 2 are decoupled by content boundaries**, so a long course can resume from a breakpoint.
@@ -241,7 +246,7 @@ Five note-quality checks are fatal and fail the delivery outright: **boilerplate
 
 - **Python** — 3.10 or later, from `requires-python` in `pyproject.toml`
 - **Python dependencies** — `yt-dlp >= 2024.0.0`, `requests >= 2.28.0`, see `pyproject.toml`
-- **External program** — `ffmpeg`, on `PATH`, a hard prerequisite for audio extraction and slicing; `ffprobe` is optional (falls back to `ffmpeg -i` for duration parsing)
+- **External program** — `ffmpeg`, on `PATH`, a hard prerequisite only when subtitle-less blocks have to be extracted and sliced (a course with complete subtitles downloads no audio and never needs it); `ffprobe` is optional (falls back to `ffmpeg -i` for duration parsing)
 - **Listening channel** — either `read_audio` or `read_media`, provided by the companion repository [omni-media][link-omni-media] (can be substituted by subtitles on Bilibili)
 - **Operating system** — OS-independent, see the classifiers in `pyproject.toml`
 
@@ -371,7 +376,7 @@ python src/cli.py check --deliver --strict                 # pre-delivery check 
 
 ### Can I use it without omni-media?
 
-No (unless it is a Bilibili course where all blocks have Chinese subtitles, in which case `fetch-subtitles` can generate transcripts directly). Block transcripts have two legitimate sources — audio transcription or Bilibili Chinese subtitles; blocks without subtitles fall back to listening. Both listening channels, `read_audio` and `read_media`, come from [omni-media][link-omni-media], and the workflow treats one as mandatory: when Stage 1 cannot obtain audio facts, the pipeline stops to ask you to mount one.
+No. A Bilibili course with complete subtitles can produce transcripts directly through `pipeline`; blocks without subtitles still need a listening channel. Both `read_audio` and `read_media` come from [omni-media][link-omni-media]; when a subtitle-missing block cannot be materialized, the pipeline stops and asks you to mount one.
 
 ### Which entry should I mount?
 

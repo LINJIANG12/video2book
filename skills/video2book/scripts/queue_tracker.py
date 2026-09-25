@@ -23,6 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.core.block_plan import BlockPlan  # noqa: E402
 from src.core.console import enable_utf8_console  # noqa: E402
 from src.core.constants import DEFAULT_TRANSCRIBE_WORKERS  # noqa: E402
 from src.prompts import (  # noqa: E402
@@ -178,9 +179,9 @@ def load_parts(ws: Path) -> List[Dict]:
         if found:
             candidates.append(found)
 
-    # 4) 块规划分集编号：覆盖全量但无逐集标题，仅作兜底
+    # 4) v4 块计划里的分集编号：覆盖全量但无逐集标题，仅作兜底
     planned = sorted({
-        ep for b in (manifest.get("blocks") or manifest.get("knowledge_blocks_plan") or [])
+        ep for b in _load_blocks(ws)
         for ep in (b.get("episodes") or [])
     })
     if planned:
@@ -195,16 +196,8 @@ def load_parts(ws: Path) -> List[Dict]:
 
 
 def _load_blocks(ws: Path) -> List[Dict]:
-    """读块清单（唯一入口：`AudioMerger.load_manifest`，带版本与条目校验）。
-
-    为什么不再自己读 JSON：曾经放过 v1 旧清单进门（无 span/units/title），而 state_sync/pipeline
-    只认 v2——同一份清单在两边判出相反结论。统一走 `load_manifest` 后，任何「不合规清单」
-    一律按「没有块清单」处理（提示先 merge-audio 重装），绝不再产生第三种判定口径。
-    """
-    from src.core.audio_merger import AudioMerger
-
-    manifest = AudioMerger.load_manifest(ws)
-    return list(manifest.get("blocks") or []) if manifest else []
+    """从工作区根目录的 v4 `block_plan.json` 读取块；旧块清单不参与下游。"""
+    return list(BlockPlan.load_blocks(ws))
 
 
 def _module_article_path(articles_dir: Path, block: Dict) -> Path:
@@ -247,7 +240,7 @@ def scan_status(ws: Path, min_article_bytes: int = 1000) -> Dict:
         if article is not None:
             blocks_done.append({
                 "block_id": block_id,
-                "span": block.get("span") or "",
+                "span": BlockPlan.span(block),
                 "title": block.get("title") or "",
                 "article": str(article),
             })
@@ -300,20 +293,19 @@ def scan_status(ws: Path, min_article_bytes: int = 1000) -> Dict:
 def scan_transcript_status(ws: Path) -> Dict:
     """块级转录与逐字稿进度。
 
-    为什么单独算一份：块清单（`audio/_blocks/blocks.json`）与逐字稿是**块级链路独有**的产物。
-    老工作区（逐集链路）没有它们，这里返回空统计即可，绝不能让它影响 STAGE1_DONE——
+    为什么单独算一份：v4 块计划与块级逐字稿是**块级链路独有**的产物。
+    没有块计划的工作区这里返回空统计即可，绝不能让它影响 STAGE1_DONE——
     那条门禁的语义始终是「长文是否齐备」，混入逐字稿条件会让全部历史工作区一夜之间不再完工。
 
     就绪口径是**块**（`BLKxx_*_逐字稿.md` 存在且非空）：写作按块成文，块稿在即语料在。
     逐字稿只有这一种粒度——它由听音转录或 B 站中文字幕产出，不再是「切的」。
     """
-    from src.core.audio_merger import AudioMerger
     from src.core.workspace import TaskWorkspace
 
     empty = {
-        "has_manifest": False,
-        "target_minutes": 0.0,
-        "ceiling_minutes": 0.0,
+        "has_plan": False,
+        "plan_target_minutes": 0.0,
+        "plan_ceiling_minutes": 0.0,
         "blocks_total": 0,
         "blocks_transcribed": 0,
         "blocks_pending": 0,
@@ -321,31 +313,34 @@ def scan_transcript_status(ws: Path) -> Dict:
     }
     try:
         tws = TaskWorkspace.from_existing(ws)
-        manifest = AudioMerger.load_manifest(tws)
+        plan = BlockPlan.load(tws)
+        blocks = BlockPlan.load_blocks(tws)
     except Exception:
         return empty
-    if not manifest:
+    if not plan and not blocks:
         return empty
 
     blocks_info = []
-    for block in manifest.get("blocks") or []:
+    for block in blocks:
         raw = TaskWorkspace.block_path(tws, block)
         transcribed = raw.exists() and raw.stat().st_size > 0
         blocks_info.append({
             "block_id": int(block.get("block_id") or 0),
             "episodes": [int(p) for p in (block.get("episodes") or [])],
-            "span": AudioMerger.block_span(block),
-            "audio": str(Path(tws.root_dir) / str(block.get("audio") or "")),
+            "span": BlockPlan.span(block),
+            "audio_file": str(BlockPlan.audio_path(tws, block)),
+            "audio_ready": bool(BlockPlan.audio_ready(tws, block)),
             "duration_min": float(block.get("duration_min") or 0.0),
             "block_transcript": str(raw),
             "transcribed": transcribed,
         })
 
+    limits = plan.get("limits") if isinstance(plan.get("limits"), dict) else {}
     transcribed = sum(1 for b in blocks_info if b["transcribed"])
     return {
-        "has_manifest": True,
-        "target_minutes": float(manifest.get("target_minutes") or 0.0),
-        "ceiling_minutes": float(manifest.get("effective_limit_minutes") or 0.0),
+        "has_plan": True,
+        "plan_target_minutes": float(limits.get("target") or 0.0),
+        "plan_ceiling_minutes": float(limits.get("ceiling") or 0.0),
         "blocks_total": len(blocks_info),
         "blocks_transcribed": transcribed,
         "blocks_pending": len(blocks_info) - transcribed,
@@ -360,7 +355,7 @@ def _transcribe_payload(tstatus: Dict, n: int) -> List[Dict]:
     """
     items: List[Dict] = []
     for block in tstatus.get("blocks") or []:
-        if block["transcribed"]:
+        if block["transcribed"] or not block.get("audio_ready"):
             continue
         subtitles_dir = Path(block["block_transcript"]).parent
         task_file = subtitles_dir / f"BLK{block['block_id']:02d}_{block['span']}_转录任务书.md"
@@ -374,8 +369,8 @@ def _transcribe_payload(tstatus: Dict, n: int) -> List[Dict]:
             "span": block["span"],
             "episodes": block["episodes"],
             "duration_min": block["duration_min"],
-            "audio_file": block["audio"],
-            "audio_exists": Path(block["audio"]).exists(),
+            "audio_file": block["audio_file"],
+            "audio_exists": True,
             "task_file": str(task_file),
             "task_file_exists": task_file.exists(),
             "block_transcript": block["block_transcript"],
@@ -395,13 +390,11 @@ def _blocks_by_page(tws) -> Dict[int, Dict]:
     if tws is None:
         return {}
     try:
-        from src.core.audio_merger import AudioMerger
-
-        manifest = AudioMerger.load_manifest(tws) or {}
+        blocks = _load_blocks(tws)
     except Exception:
         return {}
     index: Dict[int, Dict] = {}
-    for block in manifest.get("blocks") or []:
+    for block in blocks:
         for page in block.get("episodes") or []:
             index[int(page)] = block
     return index
@@ -433,15 +426,12 @@ def _module_payload(ws: Path, n: int) -> List[Dict]:
     一个块一篇、读块逐字稿写——这是块级链路对写作角色的全部约束，载荷里给全路径与语料状态，
     主 Agent 不需要自己拼文件名。
     """
-    from src.core.audio_merger import AudioMerger
-
     items: List[Dict] = []
     articles_dir = ws / "articles"
     subtitles_dir = ws / "subtitles"
     for block in _load_blocks(ws):
         block_id = int(block.get("block_id") or 0)
-        # span 兜底走 block_span（units 标签 → 集号区间），手写清单缺 span 时也能对上真实稿名
-        span = str(block.get("span") or AudioMerger.block_span(block))
+        span = BlockPlan.span(block)
         transcript = subtitles_dir / f"BLK{block_id:02d}_{span}_逐字稿.md"
         if not transcript.exists() or transcript.stat().st_size <= 0:
             continue
@@ -457,7 +447,7 @@ def _module_payload(ws: Path, n: int) -> List[Dict]:
             "title": str(block.get("title") or ""),
             "episodes": block.get("episodes") or [],
             "duration_min": float(block.get("duration_min") or 0.0),
-            "block_audio": str(ws / str(block.get("audio") or "")),
+            "block_audio": str(BlockPlan.audio_path(ws, block)),
             "transcript_file": str(transcript),
             "transcript_bytes": transcript.stat().st_size,
             "task_file": str(task_file),
@@ -631,9 +621,9 @@ def main():
             "is_stage1_complete": status["is_stage1_complete"],
             "budget": _budget_summary(status),
             "transcript": {
-                "has_manifest": tstatus["has_manifest"],
-                "target_minutes": tstatus["target_minutes"],
-                "ceiling_minutes": tstatus["ceiling_minutes"],
+                "has_plan": tstatus["has_plan"],
+                "plan_target_minutes": tstatus["plan_target_minutes"],
+                "plan_ceiling_minutes": tstatus["plan_ceiling_minutes"],
                 "blocks_total": tstatus["blocks_total"],
                 "blocks_transcribed": tstatus["blocks_transcribed"],
                 "blocks_pending": tstatus["blocks_pending"],
@@ -652,9 +642,9 @@ def main():
     print(f"[*] 总分集数: {status['total']} | 已完工: {status['completed_count']} | 待处理: {status['pending_count']}")
     pct = (status['completed_count'] / status['total']) * 100 if status['total'] else 0
     print(f"[*] 阶段一单集进度: {pct:.1f}% [{status['completed_count']}/{status['total']}]")
-    if tstatus["has_manifest"]:
+    if tstatus["has_plan"]:
         print(f"[*] 块级转录进度: 块 {tstatus['blocks_transcribed']}/{tstatus['blocks_total']} 已转录"
-              f"（块目标 {tstatus['target_minutes']:g} 分钟 / 上限 {tstatus['ceiling_minutes']:g} 分钟）"
+              f"（块目标 {tstatus['plan_target_minutes']:g} 分钟 / 上限 {tstatus['plan_ceiling_minutes']:g} 分钟）"
               f" | 待转录 {tstatus['blocks_pending']} 块")
     print(f"[*] 阶段二模块资产: 模块全书 {status['textbooks_count']} 部 | 复习笔记 {status['notes_count']} 篇")
     status_label = "【已竣工 - 可放行进入阶段二模块整编】" if status["is_stage1_complete"] else "【阶段一动态滑动流水线进行中】"

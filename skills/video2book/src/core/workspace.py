@@ -67,6 +67,8 @@ class TaskWorkspace:
         self.subtitles_dir = self.root_dir / "subtitles"
         # 分集列表缓存路径
         self.parts_cache_path = self.root_dir / "parts.json"
+        # v4 逻辑块计划：阶段一唯一模块边界来源
+        self.block_plan_path = self.root_dir / "block_plan.json"
         self.manifest_file = self.root_dir / "manifest.json"
 
         self.ensure_dirs()
@@ -270,6 +272,7 @@ class TaskWorkspace:
         实例.articles_dir = 目录 / "articles"
         实例.subtitles_dir = 目录 / "subtitles"
         实例.parts_cache_path = 目录 / "parts.json"
+        实例.block_plan_path = 目录 / "block_plan.json"
         实例.manifest_file = 目录 / "manifest.json"
         return 实例
 
@@ -424,8 +427,8 @@ class TaskWorkspace:
         "audio_file", "filepath", "source_path", "target_path", "chunk_path", "chunk_file",
         # 模块笔记任务书结果里的目标文件；缺了它会把机器绝对路径写进 manifest
         "note_file", "kernel_file",
-        # 块清单路径（audio/_blocks/blocks.json）；不登记会把机器绝对路径留在 manifest 里
-        "blocks_manifest",
+        # v4 逻辑块计划路径；不登记会把机器绝对路径留在 manifest 里
+        "block_plan",
     }
 
     # 列表型路径字段（元素为路径字符串）：textbooks / notes_files / kernels 等

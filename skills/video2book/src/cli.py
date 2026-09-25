@@ -3,10 +3,7 @@
 """Command-Line Interface for Video2Book (multi-platform video & knowledge extraction).
 
 Commands:
-  pipeline         - Stage-1 single entry: parse topology (--dry-run) / gather audio+blocks (--audio-only)
-                     / full run: audio -> blocks -> dispatch task-files -> auto cleanup + sync
-  merge-audio      - (Re)pack per-episode audio into blocks and export block task files
-  fetch-subtitles  - Fetch Bilibili Chinese subtitles to generate block transcripts directly
+  pipeline         - v4 plan-first single entry: topology -> BlockPlan -> subtitles -> audio/task files
   cluster-notes    - Aggregate blocks into review notes (task files), then auto cleanup + sync
   cluster-articles - Consolidate module long-forms into modular textbooks, then auto cleanup + sync
   check            - Unified quality gate: --stage1 (grounding) / --deliver (note+render) / --fix-numbering
@@ -31,8 +28,9 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.core import fsutil
 from src.core import paths as _paths
+from src.core.block_plan import BlockPlan, LegacyWorkspaceError
 from src.core.console import enable_utf8_console
-from src.core.workspace import TaskWorkspace, sanitize_filename
+from src.core.workspace import TaskWorkspace
 from src.core.credentials import (
     DouyinCookieStore,
     SessdataStore,
@@ -46,7 +44,6 @@ from src.pipeline import (
     PipelineCoordinator,
     PipelineGateError,
     _STATUS_FILE,
-    export_block_transcribe_task,
     part_kind,
     resolve_course_title,
     resolve_scope_parts,
@@ -122,17 +119,17 @@ def _confirm_article_prompt_style(args) -> str:
 
 
 def cmd_pipeline(args):
-    """阶段一唯一入口：解析 / 取音 / 装块 / 派发任务书，三段共用同一条编排。
+    """v4 阶段一唯一入口：计划、字幕、按需音频与任务书共用一条编排。
 
-    `--dry-run`（只解析拓扑）与 `--audio-only`（只收音频并装箱）取代了原先独立的
-    `parse` / `audio` 子命令；完整运行时，去重、任务书回收与账本对账自动执行。
+    `--dry-run` 只解析拓扑；`--audio-only` 完成计划、字幕、按需音频和转录任务书后
+    返回，不派发模块长文；完整运行再导出所有模块长文任务书并执行笔记收尾。
     """
     mode = "full"
     if getattr(args, "dry_run", False):
         mode = "dry-run"
     elif getattr(args, "audio_only", False):
         mode = "audio-only"
-    # 只有完整链路才需要长文风格；解析与取音阶段尚未写长文任务书，不必打扰用户。
+    # 只有完整链路才需要长文风格；预演与 audio-only 尚未写长文任务书，不必打扰用户。
     article_type = _confirm_article_prompt_style(args) if mode == "full" else ""
     coordinator = PipelineCoordinator()
     try:
@@ -145,8 +142,6 @@ def cmd_pipeline(args):
             range_str=args.range,
             process_all=args.all,
             force=args.force,
-            prefetch_workers=args.prefetch_workers,
-            skip_failed=args.skip_failed,
             quality=args.quality,
             article_type=article_type,
             block_minutes=getattr(args, "block_minutes", None) or 0.0,
@@ -154,177 +149,14 @@ def cmd_pipeline(args):
         )
     except PipelineGateError as gate:
         sys.exit(gate.exit_code)
-
-
-def _workspace_from_path(raw: str) -> TaskWorkspace:
-    """按目录路径绑定一个**已存在**的工作区（`merge-audio` 使用）。
-
-    为什么用路径而不是 URL：这是**离线重跑**——块清单与音频已经在盘上，再走一次
-    网络解析既慢又可能撞风控。给绝对路径最直接，也让命令与当前工作目录彻底解耦。
-    """
-    path = Path(str(raw)).expanduser()
-    if not path.is_dir():
-        print(f"[✗] 工作区目录不存在：{path}", file=sys.stderr)
-        print("去向：传入 `<产物根>/<课程工作区>` 的绝对路径（目录里应有 parts.json 与 audio/）", file=sys.stderr)
+    except LegacyWorkspaceError as err:
+        print(f"[✗] v4 工作区不可用：{err}", file=sys.stderr)
+        print("去向：先迁移或清理旧工作区，再重跑 pipeline；不要用 force 绕过计划门禁。", file=sys.stderr)
         sys.exit(2)
-    return TaskWorkspace.from_existing(path)
-
-
-def _titles_by_page(ws: TaskWorkspace):
-    """从 parts.json 取「集号 → 清洗后标题」，与音频/长文/逐字稿的命名口径保持一致。"""
-    titles = {}
-    for part in ws.load_parts() or []:
-        page = part.get("page")
-        if page is None:
-            continue
-        titles[int(page)] = sanitize_filename(str(part.get("title") or f"P{int(page):02d}"))
-    return titles
-
-
-def cmd_merge_audio(args):
-    """单独重跑音频装箱合并并导出块级转录任务书（幂等，可反复执行）。"""
-    from src.core.audio_merger import AudioMerger
-
-    ws = _workspace_from_path(args.workspace)
-    titles = _titles_by_page(ws)
-    pages = [
-        int(part["page"]) for part in (ws.load_parts() or [])
-        if part.get("page") is not None and part_kind(part) == KIND_VIDEO
-    ]
-    if not pages:
-        print(f"[✗] {ws.root_dir.name} 里没有可用分集（parts.json 为空或全为非视频作品）", file=sys.stderr)
+    except ValueError as err:
+        print(f"[✗] BlockPlan 更新失败：{err}", file=sys.stderr)
+        print("去向：检查连载分集前缀与块时长限制，修正元数据后重跑 pipeline。", file=sys.stderr)
         sys.exit(2)
-
-    print("=" * 65)
-    print(f"[*] 音频装箱合并：{ws.root_dir.name}")
-    print("=" * 65)
-    result = AudioMerger.merge(
-        ws, pages, target_minutes=(args.block_minutes or None), force=bool(args.force)
-    )
-    for line in result["diag"]:
-        print(f"    {line}")
-    for line in AudioMerger.describe(result["blocks"], result["limits"]):
-        print(f"    {line}")
-    if not result["blocks"]:
-        print("[✗] 没有生成任何块（音频缺失？先跑 pipeline 收音频）", file=sys.stderr)
-        sys.exit(2)
-
-    stale = AudioMerger.prune_orphans(ws, result["blocks"])
-    if stale["removed_tasks"]:
-        print(f"    [i] 已作废 {len(stale['removed_tasks'])} 份与本次装箱不符的旧转录任务书")
-    if stale["orphan_audio"]:
-        print(f"    [!] 以下块音频不再属于本次装箱（**未删**，确认无用后可手工清理）：{stale['orphan_audio']}")
-    if stale["orphan_transcripts"]:
-        print(f"    [!] 以下块级逐字稿不再属于本次装箱（**未删**，分集逐字稿可能仍引用它）："
-              f"{stale['orphan_transcripts']}")
-
-    course_title = ""
-    try:
-        course_title = str((ws.load_manifest() or {}).get("course_title") or "")
-    except Exception:
-        course_title = ""
-    course_title = course_title or ws.root_dir.name
-    for block in result["blocks"]:
-        export_block_transcribe_task(ws, block, titles=titles, course_title=course_title)
-
-    print(f"[✓] 块清单：{AudioMerger.manifest_path(ws)}")
-    print(f"[✓] 块级转录任务书 {len(result['blocks'])} 份 → {Path(ws.subtitles_dir).name}/")
-    print("[i] 下一步：转录角色照任务书出块级逐字稿（优先 read_media，无 ext 时才 read_audio）；写作角色读它写模块长文（一个块一篇）")
-
-
-def cmd_fetch_subtitles(args):
-    """可选链路：用 B 站中文字幕直接生成块级逐字稿（替代听音转录）。
-
-    只取中文字幕、人工字幕优先于 AI；任一成员分集缺中文字幕的块**整块跳过**，留给听音转录
-    兜底（绝不静默漏内容）。已有逐字稿的块默认跳过，`--force` 覆盖。
-    字幕 CDN 会返回残缺正文，覆盖度不足会**退避重试**（`BVB_SUBTITLE_ATTEMPTS`，默认 4 轮），
-    重试用尽才判定为不可用——覆盖度判定与重试都在 `subtitles` 层收口。
-    """
-    from src.core import subtitles as subtitle_core
-    from src.core.audio_merger import AudioMerger
-
-    ws = _workspace_from_path(args.workspace)
-    blocks = AudioMerger.load_blocks(ws)
-    if not blocks:
-        print("[✗] 没有块清单（先跑 pipeline --audio-only 或 merge-audio 装箱）", file=sys.stderr)
-        sys.exit(2)
-    if not args.sessdata:
-        print("[✗] B 站字幕清单需要登录态：先 `python src/cli.py login --sessdata \"<SESSDATA>\"`",
-              file=sys.stderr)
-        sys.exit(2)
-
-    parts_by_page = {}
-    for part in ws.load_parts() or []:
-        page = part.get("page")
-        if page is not None:
-            parts_by_page[int(page)] = part
-    课程bvid = subtitle_core.resolve_course_bvid(list(parts_by_page.values()))
-    if not 课程bvid:
-        print("[✗] 这批分集没有 B 站稿件号（本地课程？）——字幕链路只适用于 B 站课程", file=sys.stderr)
-        sys.exit(2)
-
-    print("=" * 65)
-    print(f"[*] B 站字幕 → 块级逐字稿：{ws.root_dir.name}")
-    print("=" * 65)
-
-    缓存: dict = {}
-
-    def _取字幕(page: int):
-        if page in 缓存:
-            return 缓存[page]
-        条目 = parts_by_page.get(page) or {}
-        bvid = str(条目.get("bvid") or "").strip() or 课程bvid
-        cid = 条目.get("cid")
-        字幕 = None
-        if bvid and cid is not None:
-            try:
-                时长 = float(条目.get("duration") or 0.0)
-            except (TypeError, ValueError):
-                时长 = 0.0
-            诊断: dict = {}
-            # 覆盖度判定与内容级重试都在 subtitles 层：CDN 会返回 200 + 残缺正文，
-            # 在这里判一次就判成"没字幕"会把整块白扔给听音兜底。
-            字幕 = subtitle_core.fetch_episode_subtitle(
-                bvid, int(cid), sessdata=args.sessdata, duration_sec=时长, 诊断=诊断
-            )
-            if 字幕 is None and 诊断.get("reason"):
-                print(f"    [!] P{page:02d} 字幕重试 {诊断.get('attempts', 0)} 次后仍"
-                      f"{诊断['reason']} → 视为不可用")
-        缓存[page] = 字幕
-        return 缓存[page]
-
-    已写: list = []
-    已跳过: list = []
-    缺字幕: list = []
-    for block in blocks:
-        block_id = int(block.get("block_id") or 0)
-        目标 = TaskWorkspace.block_path(ws, block)
-        if 目标.exists() and 目标.stat().st_size > 0 and not args.force:
-            已跳过.append(block_id)
-            print(f"    [=] BLK{block_id:02d} 已有逐字稿，跳过（--force 覆盖）")
-            continue
-        字幕表 = {
-            int(段.get("page") or 0): _取字幕(int(段.get("page") or 0))
-            for 段 in (block.get("segments") or [])
-        }
-        结果 = subtitle_core.assemble_block_transcript(block, 字幕表)
-        if not 结果["ok"]:
-            缺字幕.append((block_id, 结果["missing_pages"]))
-            print(f"    [!] BLK{block_id:02d} 缺中文字幕的分集 {结果['missing_pages']} → 整块留给听音转录")
-            continue
-        路径 = TaskWorkspace.write_block_transcript(ws, block, 结果["text"])
-        已写.append(block_id)
-        print(f"    [✓] BLK{block_id:02d} {AudioMerger.block_span(block)}：{结果['kind_label']}"
-              f"，{路径.name}（{len(结果['text'].encode('utf-8'))} 字节）")
-
-    print("-" * 65)
-    print(f"[✓] 字幕逐字稿 {len(已写)} 块；跳过（已有）{len(已跳过)} 块；缺中文字幕 {len(缺字幕)} 块")
-    for block_id, pages in 缺字幕:
-        print(f"    BLK{block_id:02d}：缺 {'、'.join(f'P{p:02d}' for p in pages)}")
-    if 缺字幕:
-        print("[i] 上述块请照 subtitles/BLK*_转录任务书.md 用听音通道补转录")
-    if 已写:
-        print("[i] 逐字稿抬头已注明来源为 B 站字幕（非听音转录），写作角色可直接据其成文")
 
 
 def cmd_cluster_notes(args):
@@ -380,7 +212,7 @@ def cmd_cluster_notes(args):
 
     print("\n" + "=" * 65)
     if outcome["note_status"] == "no-blocks":
-        print("[✓] 本命令已正常结束（未派发笔记）：块清单缺失，界面已给出装箱命令。")
+        print("[✓] 本命令已正常结束（未派发笔记）：工作区尚无 v4 块计划，请先运行 pipeline。")
     else:
         _gen = sum(1 for r in outcome["results"] if r.get("status") == "generated")
         _cached = len(outcome["results"]) - _gen
@@ -393,7 +225,6 @@ def cmd_cluster_notes(args):
 
 def cmd_cluster_articles(args):
     """把各块的**模块长文**按块序整编成册（textbooks/）：册=书、章=块。"""
-    from src.core.audio_merger import AudioMerger
     from src.generator.integrator import ArticleIntegrator, PlanError
 
     info = resolve_target_info(
@@ -413,12 +244,11 @@ def cmd_cluster_articles(args):
     print(f"[*] 目标教材目录: {ws.root_dir / 'textbooks'}")
     print("=" * 65)
 
-    # 模块边界 = 块边界（`audio/_blocks/blocks.json`）：音频按 40–60 分钟装箱，一块一篇模块长文。
-    # 没有块清单就没有模块可整编——提示先装箱，而不是退回按标题前缀硬分组（那正是被废除的老路）。
-    blocks = (AudioMerger.load_manifest(ws) or {}).get("blocks") or []
+    # 模块边界来自工作区根目录的 v4 BlockPlan；没有计划就没有可整编的模块。
+    blocks = BlockPlan.load_blocks(ws)
     if not blocks:
-        print("[!] 本工作区没有块清单，无法整编教材：模块边界来自音频装箱。")
-        print(f"[*] 请先跑：python src/cli.py merge-audio \"{Path(ws.root_dir).as_posix()}\"")
+        print("[!] 本工作区没有 v4 块计划，无法整编教材：模块边界来自 BlockPlan。")
+        print(f"[*] 请先运行 pipeline 建立计划：python src/cli.py pipeline <目标> --all")
         print("=" * 65)
         sys.exit(2)
 
@@ -595,8 +425,7 @@ def cmd_sync(args):
             print(f"    分集覆盖：{report['success']}/{report['total']} 集被模块长文覆盖 | "
                   f"待办 {report['pending']} | 跳过 {report['skipped']} | 历史失败 {report['failed']}")
         else:
-            print("    老格式工作区（无块清单）：新链路按块对账，"
-                  "请先 `cli.py merge-audio <工作区>` 重装块后再对账")
+            print("    尚无 v4 块计划：请先运行 pipeline 建立 BlockPlan 后再对账")
         print(f"    模块资产：模块笔记 {report['notes']} 份 | 教材 {report['textbooks']} 部")
         print(f"    pipeline_completed = {report['pipeline_completed']}")
 
@@ -814,10 +643,10 @@ def main():
     parser = argparse.ArgumentParser(description="Video2Book Agent Toolkit (multi-platform video & knowledge extraction)")
     subparsers = parser.add_subparsers(dest="subcommand", help="Available subcommands")
 
-    # pipeline：阶段一唯一入口（解析 / 取音 / 装块 / 派发任务书共用一条编排）
+    # pipeline：阶段一唯一入口（元数据 / 块计划 / 字幕 / 按需音频 / 任务书共用一条编排）
     p_pipe = subparsers.add_parser(
         "pipeline",
-        help="Stage-1 single entry: parse topology (--dry-run) / audio+blocks (--audio-only) / full run",
+        help="v4 single entry: topology -> BlockPlan -> subtitles -> audio/task files",
     )
     p_pipe.add_argument("url", help="Bilibili URL/BV ID, local video file, or local course directory")
     p_pipe.add_argument("--page", type=int, default=None, help="Page/Part index (auto-detects ?p=X from URL if omitted)")
@@ -827,8 +656,6 @@ def main():
     p_pipe.add_argument("--task", default=None, help="Custom task workspace folder name")
     p_pipe.add_argument("--base-dir", default=None, help=BASE_DIR_HELP)
     p_pipe.add_argument("--force", action="store_true", help="Force re-transcribing and re-generating even if exists")
-    p_pipe.add_argument("--prefetch-workers", type=int, default=12, help="Parallel audio prefetch (download/extract) threads")
-    p_pipe.add_argument("--skip-failed", action="store_true", default=False, help="Explicit opt-in: exempt failed episodes from transcription gate (recorded in manifest skip list)")
     p_pipe.add_argument(
         "--block-minutes", type=float, default=None,
         help="块级转录的块时长目标（分钟）；缺省取环境变量 BVB_AUDIO_BLOCK_MINUTES，再缺省 50（落 40–60 带中段）。"
@@ -842,31 +669,11 @@ def main():
              "未指定时打印风格菜单并请用户确认，确认不了即终止任务。"
              "另有 consulting/interview/review/livestream 四种形态已登记但提示词未提供，命中即终止。",
     )
-    # 解析 / 取音两个轻量入口收敛进 pipeline（原 `parse` / `audio` 子命令）
+    # 轻量模式也收敛进 pipeline：预演不落盘，audio-only 停在转录任务书
     p_pipe.add_argument("--dry-run", action="store_true", dest="dry_run",
                         help="只解析拓扑并列出将处理的分集，不下载音频、不写任务书")
     p_pipe.add_argument("--audio-only", action="store_true", dest="audio_only",
-                        help="只收齐音频并装箱、导出块级转录任务书后即返回（不派发长文任务书）")
-
-    # merge-audio：块级转录链路的离线入口（单独重跑装箱合并，幂等）
-    p_merge = subparsers.add_parser(
-        "merge-audio", help="Merge per-episode audio into transcription blocks and export block task books"
-    )
-    p_merge.add_argument("workspace", help="Path to an existing course workspace (contains parts.json and audio/)")
-    p_merge.add_argument(
-        "--block-minutes", type=float, default=None,
-        help="块时长目标（分钟）；缺省取 BVB_AUDIO_BLOCK_MINUTES，再缺省 50（落 40–60 带中段）",
-    )
-    p_merge.add_argument("--force", action="store_true", help="Rebuild blocks even if the manifest signature matches")
-
-    # fetch-subtitles：可选链路，用 B 站中文字幕直接生成块级逐字稿（替代听音转录）
-    p_sub = subparsers.add_parser(
-        "fetch-subtitles",
-        help="Optional: build block transcripts from Bilibili Chinese subtitles (instead of audio transcription)",
-    )
-    p_sub.add_argument("workspace", help="Path to an existing course workspace (contains parts.json and audio/_blocks/blocks.json)")
-    p_sub.add_argument("--force", action="store_true", help="Overwrite existing block transcripts")
-    p_sub.add_argument("--sessdata", help="Optional SESSDATA cookie (Bilibili subtitle list requires login)", default=None)
+                        help="完成计划/字幕/按需音频物化与转录任务书后返回（不派发长文任务书）")
 
     # check：交付质量门禁统一入口（阶段一放行 / 交付前体检 / 存量标题去号）
     p_check = subparsers.add_parser(
@@ -1000,8 +807,6 @@ def main():
 
     dispatch = {
         "pipeline": cmd_pipeline,
-        "merge-audio": cmd_merge_audio,
-        "fetch-subtitles": cmd_fetch_subtitles,
         "cluster-notes": cmd_cluster_notes,
         "cluster-articles": cmd_cluster_articles,
         "check": cmd_check,

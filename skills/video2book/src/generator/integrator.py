@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Module Textbook Integrator：按**内容结构**把模块长文整编成册（`textbooks/`）。
 
-模块边界**不需要规划**：音频装箱（`audio/_blocks/blocks.json`，每块 40–60 分钟）就是知识模块，
+模块边界**不需要规划**：v4 根目录 `block_plan.json` 里的块就是知识模块，
 一块一篇模块长文。教材是「块长文按块序整编」出的**书**：**册 = 书，章 = 块**。
 
 ## 分册依据：内容优先，体量兜底
@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from src.core import fsutil
+from src.core.block_plan import BlockPlan
 from src.core.heading_numbers import strip_heading_number
 from src.core.workspace import find_module_article, sanitize_filename
 
@@ -69,13 +70,8 @@ class ArticleIntegrator:
         self.textbooks_dir.mkdir(parents=True, exist_ok=True)
 
     def load_blocks(self) -> List[Dict[str, Any]]:
-        """读块清单——模块的唯一来源（没有块清单就没有教材可整编）。
-
-        归一化逻辑只在 `AudioMerger.load_blocks` 一处（本方法只是它在本类上的名字）。
-        """
-        from src.core.audio_merger import AudioMerger
-
-        return AudioMerger.load_blocks(self.task_dir)
+        """从工作区根目录的 v4 `block_plan.json` 读取块；没有块计划就没有教材可整编。"""
+        return BlockPlan.load_blocks(self.task_dir)
 
     def plan_path(self) -> Path:
         return self.task_dir / self.PLAN_NAME
@@ -84,7 +80,7 @@ class ArticleIntegrator:
     def _chapter_title(cls, block: Dict[str, Any]) -> str:
         """章标题 = 块标题（缺标题时退化为覆盖范围）。"""
         title = str(block.get("title") or "").strip()
-        return title or str(block.get("span") or "").strip() or "未命名模块"
+        return title or BlockPlan.span(block).strip() or "未命名模块"
 
     # ------------------------------------------------------------------
     # 分册一：Agent 规划（首选）
@@ -239,7 +235,7 @@ class ArticleIntegrator:
                 except OSError:
                     theme = ""
             rows.append(
-                f"- 块 {block_id:02d}（{block.get('span') or ''}，"
+                f"- 块 {block_id:02d}（{BlockPlan.span(block)}，"
                 f"{float(block.get('duration_min') or 0.0):.0f} 分钟）：{self._chapter_title(block)}"
                 + (f"　〔长文主题：{theme}〕" if theme else "")
             )
@@ -507,8 +503,8 @@ class ArticleIntegrator:
             print(f"    [i] {out_path.name} 体量 {volume_bytes:,} 字节，超过上限 {cap:,}"
                   f"（该册内含单篇就超过上限的长文，已切无可切）")
 
-        first_span = str(volume[0][1].get("span") or "")
-        last_span = str(volume[-1][1].get("span") or "")
+        first_span = BlockPlan.span(volume[0][1])
+        last_span = BlockPlan.span(volume[-1][1])
         # 讲数按**去重集号**统计：劈分腿会让同一集在两个块里各出现一次，直接相加会虚报
         episodes = {int(p) for _, b, _, _ in volume for p in (b.get("episodes") or [])}
         pages = len(episodes)
@@ -519,7 +515,7 @@ class ArticleIntegrator:
         # 范围后缀只在标题里还没有时才补——消歧已经在标题里加过一次，再加就成「（P06上）（P06上）」。
         toc = []
         for i, (_, block, _, _) in enumerate(volume, 1):
-            span = str(block.get("span") or "")
+            span = BlockPlan.span(block)
             marked = f"（{span}）" if span else ""
             toc.append(f"{i}. {titles[i - 1]}" + ("" if marked and marked in titles[i - 1] else marked))
 
@@ -549,7 +545,7 @@ class ArticleIntegrator:
 
         for i, (module_idx, block, article, _size) in enumerate(volume, 1):
             title = titles[i - 1]
-            span = str(block.get("span") or "")
+            span = BlockPlan.span(block)
             lines.append(f"## {title}")
             block_title = self._chapter_title(block)
             trace = f"> 对应块：BLK{module_idx:02d} | 覆盖分集：{span}"
@@ -615,7 +611,7 @@ class ArticleIntegrator:
         out: List[str] = []
         for title, (_, block, _, _) in zip(raw, volume):
             if counts[title] > 1:
-                span = str(block.get("span") or "").strip()
+                span = BlockPlan.span(block).strip()
                 out.append(f"{title}（{span}）" if span else title)
             else:
                 out.append(title)

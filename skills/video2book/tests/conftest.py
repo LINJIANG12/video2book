@@ -205,23 +205,23 @@ def make_parts(make_workspace):
 
 
 def write_blocks(ws, blocks: Sequence[Dict[str, Any]], **meta: Any) -> Path:
-    """写一份 v2 块清单。只补 `load_manifest` 会校验的字段，其余按调用方给的来。"""
+    """写一份 v4 根块计划；下游只认这个文件。"""
     payload: Dict[str, Any] = {
-        "version": 2,
-        "target_minutes": 50.0,
-        "min_minutes": 40.0,
-        "max_minutes": 60.0,
-        "effective_limit_minutes": 75.0,
-        "course_short": ws.root_dir.name,
-        "noop": False,
-        "input_signature": "test-signature",
+        "version": 1,
+        "plan_source": "metadata",
+        "limits": {
+            "target": 50.0,
+            "ceiling": 75.0,
+            "min": 40.0,
+            "max": 60.0,
+        },
+        "parts_signature": "test-signature",
         "blocks": list(blocks),
     }
     payload.update(meta)
-    path = ws.audio_dir / "_blocks" / "blocks.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    return path
+    from src.core.block_plan import BlockPlan
+
+    return BlockPlan.save(ws, payload)
 
 
 @pytest.fixture
@@ -229,29 +229,24 @@ def blocks_factory():
     """造块条目的工厂：`make_block(1, [1], "第1讲")`。"""
 
     def _make(block_id: int, episodes: Sequence[int], title: str = "", span: str = "",
-              audio: str = "", duration_min: float = 30.0, **extra: Any) -> Dict[str, Any]:
+              duration_min: float = 30.0, **extra: Any) -> Dict[str, Any]:
         eps = [int(e) for e in episodes]
         span = span or (f"P{eps[0]:02d}" if len(eps) == 1 else f"P{eps[0]:02d}-P{eps[-1]:02d}")
+        labels = [span] if len(eps) == 1 else [f"P{page:02d}" for page in eps]
         block: Dict[str, Any] = {
             "block_id": int(block_id),
             "title": title or f"第{eps[0]}讲 测试单元",
             "span": span,
-            "course_short": "test",
             "episodes": eps,
             "units": [
-                {"page": p, "label": f"P{p:02d}", "split": False, "source_offset_sec": 0.0,
-                 "source_file": f"audio/P{p:02d}.m4a"}
-                for p in eps
+                {"page": page, "label": label, "split": False, "source_offset_sec": 0.0}
+                for page, label in zip(eps, labels)
             ],
             "episode_split": False,
-            "audio": audio or f"audio/_blocks/blk{block_id:02d}.m4a",
             "duration_sec": duration_min * 60,
             "duration_min": duration_min,
             "segments": [],
             "single_episode": len(eps) == 1,
-            "reencoded": False,
-            "oversized": False,
-            "undersized": False,
         }
         block.update(extra)
         return block

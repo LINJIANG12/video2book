@@ -462,8 +462,8 @@ def test_resolve_notes_adopts_valid_plan(make_workspace):
     assert notes[0]["episodes"] == [1, 2, 3]
 
 
-def test_load_blocks_is_empty_without_block_manifest(make_workspace):
-    """块清单是模块的唯一来源：没有 blocks.json 就没有模块，不得退回按集号硬切。"""
+def test_load_blocks_is_empty_without_block_plan(make_workspace):
+    """根块计划是模块的唯一来源：没有 `block_plan.json` 就不得按集号硬切。"""
     ws = make_workspace("no_blocks")
     assert P.load_blocks(ws) == []
 

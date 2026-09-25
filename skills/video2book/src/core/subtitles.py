@@ -44,7 +44,7 @@ SUBTITLE_RETRY_BACKOFF_SEC = 1.5
 
 
 def _重试次数() -> int:
-    """字幕取回的重试轮数；环境变量写坏时退回默认（与 audio_merger 同口径）。"""
+    """字幕取回的重试轮数；环境变量写坏时退回默认（与音频物化层的失败重试口径一致）。"""
     原始 = str(os.environ.get(ENV_SUBTITLE_ATTEMPTS, "") or "").strip()
     try:
         return max(1, int(原始))

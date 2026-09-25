@@ -5,12 +5,11 @@
 账本与仓库脱节，任何依赖清单的自动判断都会误判。
 
 本模块做一件事：**数硬盘，然后改账本**。
-- 阶段一完成度：**按块**统计——块清单（`audio/_blocks/blocks.json`）里每块是否已有模块长文
+- 阶段一完成度：**按块**统计——v4 `block_plan.json` 里每块是否已有模块长文
   （`articles/模块XX_*_精读长文.md`，≥ `min_article_bytes`）。集号只作为「块覆盖了哪些集」的
   派生视图写进 `details`，不再是完成单位；
 - 模块资产：以 `notes/`、`textbooks/` 实际文件为准（排除任务书）；
-- 老格式工作区（没有块清单，即块级链路之前建的）：**不做阶段一判定**，返回 `stage1_unit="none"`
-  与提示语——新链路按块对账，这类工作区要先用 `merge-audio` 重装块才能纳入统一会计。
+- 没有 v4 块计划的工作区：**不做阶段一判定**，返回 `stage1_unit="none"`，等待块计划落盘。
 """
 
 from datetime import datetime
@@ -18,7 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from . import fsutil
-from .audio_merger import AudioMerger
+from .block_plan import BlockPlan
 from .workspace import find_module_article, module_article_path
 
 MIN_ARTICLE_BYTES = fsutil.PRODUCT_MIN_BYTES
@@ -47,7 +46,7 @@ def reconcile_workspace_manifest(
 
     manifest = ws.load_manifest(absolute=True)
     parts = ws.load_parts() or []
-    blocks = (AudioMerger.load_manifest(ws) or {}).get("blocks") or []
+    blocks = BlockPlan.load_blocks(ws)
 
     details: Dict[Any, Dict[str, Any]] = {}
     for entry in manifest.get("details", []):
@@ -71,7 +70,7 @@ def reconcile_workspace_manifest(
         pages = [int(p) for p in (block.get("episodes") or [])]
         block_entries.append({
             "block_id": int(block.get("block_id") or 0),
-            "span": str(block.get("span") or ""),
+            "span": BlockPlan.span(block),
             "title": str(block.get("title") or ""),
             "episodes": pages,
             "duration_min": float(block.get("duration_min") or 0.0),

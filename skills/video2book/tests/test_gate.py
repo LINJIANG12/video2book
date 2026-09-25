@@ -74,19 +74,21 @@ def test_export_task_without_transcript_still_writes_task(make_workspace, blocks
     assert task.name == TASK_NAME, f"模块长文任务书命名漂移: {task.name}"
 
 
-def test_export_task_without_transcript_marks_not_ready(make_workspace, blocks_factory):
-    """未就绪必须写在任务书上：执行者凭这一行才会停下回报，而不是编内容。"""
+def test_export_task_without_transcript_declares_stop(make_workspace, blocks_factory):
+    """v4 任务书不缓存就绪状态，但必须明确缺失逐字稿时停止。"""
     from src.core.taskbook import export_block_article_task
 
     ws = make_workspace("自检_未就绪态")
     task = export_block_article_task(
         ws, _block(blocks_factory), None, course_title="测试课程", article_type="学习"
     )
-    assert "**未就绪**" in task.read_text(encoding="utf-8"), "未就绪态未在任务书上写明"
+    text = task.read_text(encoding="utf-8")
+    assert "逐字稿未就绪" in text
+    assert "语料状态由派发队列" in text
 
 
-def test_export_task_with_transcript_marks_ready(make_workspace, blocks_factory):
-    """逐字稿落盘后任务书必须改口成「已就绪」，否则执行者永远不敢动笔。"""
+def test_export_task_with_transcript_names_source(make_workspace, blocks_factory):
+    """逐字稿落盘后任务书钉住该文件为唯一事实来源。"""
     from src.core.taskbook import export_block_article_task
 
     ws = make_workspace("自检_就绪态")
@@ -95,7 +97,9 @@ def test_export_task_with_transcript_marks_ready(make_workspace, blocks_factory)
     task = export_block_article_task(
         ws, _block(blocks_factory), transcript, course_title="测试课程", article_type="学习"
     )
-    assert "已就绪" in task.read_text(encoding="utf-8"), "就绪态未在任务书上写明"
+    text = task.read_text(encoding="utf-8")
+    assert "唯一事实来源" in text and str(transcript) in text
+    assert "语料状态由派发队列" in text
 
 
 def test_find_module_article_is_none_when_no_article(make_workspace, blocks_factory):
