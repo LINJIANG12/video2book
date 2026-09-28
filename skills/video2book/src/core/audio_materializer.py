@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
@@ -167,6 +168,153 @@ class AudioMaterializer:
             cls._concat(target, source_files)
             result[block_id] = target
         return result
+
+    # -- 交付后回收 ----------------------------------------------------------
+    #
+    # 音频是**唯一大体积的中间产物**：一套 145 集的课约 476 MB（分集源音频与
+    # 块级拼接各占一半，而块音频本就是分集音频的 concat 副本）。而逐字稿正文
+    # 一个字节都没提音频路径——写完长文/笔记/教材后，音频就是纯可再生资源。
+    #
+    # 判定从严：四条件全过才删。缺任一条就一片不动并说清缺什么。
+    # 尤其是「逐字稿齐备」这条——`queue_tracker --next-transcribe` 的派发门禁
+    # 读的是 `BlockPlan.audio_ready()`（见 block_plan.audio_ready），音频没了
+    # 未转录块会**静默地不再派发**。所以这里宁可漏删，绝不误删。
+
+    #: 回收作用域：分集源音频、块级拼接、超长集劈腿切片。
+    PURGE_GLOB = "**/*.m4a"
+    PURGE_SCOPE = "audio/P*.m4a + audio/blocks/*.m4a + audio/blocks/_parts/*.m4a"
+
+    @classmethod
+    def audio_exists(cls, ws: Any) -> bool:
+        """audio/ 下是否还有任何音频产物。"""
+        audio_dir = Path(ws.audio_dir)
+        return audio_dir.is_dir() and any(audio_dir.rglob("*.m4a"))
+
+    @classmethod
+    def _missing_completion_reasons(
+        cls, ws: Any, blocks: Sequence[Mapping[str, Any]]
+    ) -> List[str]:
+        """返回未满足的完工条件清单；空列表表示四条件全过。"""
+        missing: List[str] = []
+        if not blocks:
+            missing.append("块清单为空")
+            return missing
+
+        from .workspace import TaskWorkspace
+
+        # 1) 每块逐字稿存在且非空——写作与派发的唯一事实来源，缺了不能删输入。
+        缺稿 = [
+            int(b.get("block_id") or 0) for b in blocks
+            if not (lambda p: p.is_file() and p.stat().st_size > 0)(
+                TaskWorkspace.block_path(ws, dict(b))
+            )
+        ]
+        if 缺稿:
+            missing.append(
+                "逐字稿未齐（缺 BLK"
+                + "、BLK".join(f"{i:02d}" for i in 缺稿)
+                + "）"
+            )
+
+        # 2) 模块长文齐备：块数与计划一致，而不是「有一个就算」。
+        块数 = len(blocks)
+        长文数 = len([
+            p for p in Path(ws.articles_dir).glob("*_精读长文.md") if p.is_file()
+        ]) if Path(ws.articles_dir).is_dir() else 0
+        if 长文数 < 块数:
+            missing.append(f"模块长文未齐（{长文数}/{块数} 篇）")
+
+        # 3) 笔记已归并（notes/ 至少一篇成品）。
+        笔记目录 = Path(ws.notes_dir)
+        笔记数 = len([p for p in 笔记目录.glob("*_笔记.md") if p.is_file()]) \
+            if 笔记目录.is_dir() else 0
+        if 笔记数 < 1:
+            missing.append("复习笔记未产出")
+
+        # 4) 教材已整编（textbooks/ 至少一册）。
+        教材目录 = Path(ws.root_dir) / "textbooks"
+        教材数 = len([p for p in 教材目录.glob("*.md") if p.is_file()]) \
+            if 教材目录.is_dir() else 0
+        if 教材数 < 1:
+            missing.append("精读全书未整编")
+
+        return missing
+
+    @classmethod
+    def purge_audio(
+        cls, ws: Any, blocks: Sequence[Mapping[str, Any]], *, dry_run: bool = False
+    ) -> Dict[str, Any]:
+        """完工后回收物理音频，返回统计与判定理由。
+
+        返回 ``{"purged", "deleted", "bytes", "failed", "dry_run", "reason"}``。
+        ``purged`` 表示条件成立且已（或本可）执行；条件不成立时为 ``False`` 且
+        ``reason`` 点名缺哪几项——删除不可逆，报告必须能让人自己判断。
+        """
+        audio_dir = Path(ws.audio_dir)
+        if not audio_dir.is_dir():
+            return {
+                "purged": True, "deleted": 0, "bytes": 0, "failed": [],
+                "dry_run": bool(dry_run), "reason": "audio/ 目录不存在，无需回收",
+            }
+
+        未满足 = cls._missing_completion_reasons(ws, blocks)
+        if 未满足:
+            return {
+                "purged": False, "deleted": 0, "bytes": 0, "failed": [],
+                "dry_run": bool(dry_run), "reason": "；".join(未满足),
+            }
+
+        # 只按类型精确匹配，绝不递归删目录：块目录里可能混有 ffmpeg 清单文本，
+        # 工作区里可能有嵌套的 x/ 子工作区，都不是回收对象。
+        targets = sorted(
+            (p for p in audio_dir.rglob("*.m4a") if p.is_file()),
+            key=lambda p: len(p.parts),
+            reverse=True,          # 先删深层（_parts），再删上层
+        )
+        total = sum(p.stat().st_size for p in targets)
+        if not targets:
+            return {
+                "purged": True, "deleted": 0, "bytes": 0, "failed": [],
+                "dry_run": bool(dry_run), "reason": "音频已回收，无重复清理",
+            }
+
+        deleted = 0
+        freed = 0
+        failed: List[Dict[str, Any]] = []
+        for path in targets:
+            size = path.stat().st_size
+            if dry_run:
+                deleted += 1
+                freed += size
+                continue
+            try:
+                path.unlink()
+            except OSError as err:
+                # 失败与「无事可做」分开记：混在一起会把真实故障说成已清理。
+                failed.append({"file": str(path), "error": str(err)})
+                continue
+            deleted += 1
+            freed += size
+
+        return {
+            "purged": True,
+            "deleted": deleted,
+            "bytes": freed,
+            "failed": failed,
+            "dry_run": bool(dry_run),
+            "reason": "四条件齐备（逐字稿/长文/笔记/教材）",
+        }
+
+    @staticmethod
+    def purge_record(result: Mapping[str, Any]) -> Dict[str, Any]:
+        """把 ``purge_audio`` 的结果压成可写入 manifest.json 的小记录。"""
+        return {
+            "deleted": int(result.get("deleted") or 0),
+            "bytes": int(result.get("bytes") or 0),
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "scope": AudioMaterializer.PURGE_SCOPE,
+            "dry_run": bool(result.get("dry_run")),
+        }
 
     @staticmethod
     def _slice_unit(source: Path, dest: Path, start_sec: float, duration_sec: float) -> None:

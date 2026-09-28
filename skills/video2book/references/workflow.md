@@ -232,6 +232,11 @@ python src/cli.py sync                          # 按磁盘对账回填 manifest
   模块长文任务书（`articles/模块XX_*_TASK.md` ↔ `articles/模块XX_*_精读长文.md`）、
   笔记任务书（`notes/笔记XX_*_TASK.md` ↔ `notes/笔记XX_*_笔记.md`）；`note_plan_TASK.md` 属课程级规划任务书，永不回收。
 
+- **物理音频在全部交付物产出后自动回收**：分集源音频 `audio/Pxx_*.m4a`、块级拼接 `audio/blocks/BLKxx_*.m4a` 与劈腿切片 `audio/blocks/_parts/` 是唯一大体积的中间产物（145 集的课约 476 MB，且块音频本就是分集音频的 concat 副本），而逐字稿正文不引用音频路径。`pipeline` 收尾在**四条件全过**时自动删净：每块逐字稿齐备、模块长文齐篇、笔记已归并、教材已整编。缺任一条只跳过并打印缺什么，绝不部分删除。
+  - 判定从严的原因：`queue_tracker --next-transcribe` 的派发门禁读的是 `BlockPlan.audio_ready()`，音频没了**未转录块会静默地不再派发**（既不报错也不提示）。所以判定必须盖在「逐字稿已齐」这一前置条件上，而不是「pipeline 命令返回了」。
+  - 后悔药：`pipeline --keep-audio` 豁免回收。重跑同一条命令即可。
+  - 记账：`manifest.json` 记 `audio_purge`（`deleted` / `bytes` / `at` / `scope`），并把 `pipeline.status` 显式写成 `purged`——否则下一轮 `_save_runtime_manifest` 会因音频已不在而把它算成 `partial`，看起来像音频物化出了问题。
+
 > `check` **不在流水线上拦人**：它是交付前由主 Agent 手动跑的体检，只有 `--strict` 的致命项才返回非零退出码。
 
 ---

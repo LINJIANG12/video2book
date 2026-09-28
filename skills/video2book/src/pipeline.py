@@ -466,11 +466,26 @@ class PipelineCoordinator:
             int(block.get("block_id") or 0) for block in video_blocks
             if BlockPlan.audio_ready(ws, block)
         ]
+        # 已回收的工作区：音频自然不在盘，`len(audio_ready) == len(block_ids)`
+        # 永远不成立，若照常算会把成功回收的证据改写成 `partial`——看起来像
+        # 音频物化出了问题。所以先认「回收过」这个既有事实。
+        曾回收 = isinstance(manifest.get("audio_purge"), dict)
+        if 曾回收 and not audio_ready:
+            status = "purged"
+        else:
+            status = "ready" if not block_ids or len(audio_ready) == len(block_ids) else "partial"
+        materialization: Dict[str, Any] = {
+            "requested": list(subtitle_state.get("needs_audio") or []),
+            "ready": audio_ready,
+        }
+        if 曾回收:
+            # 保留回收发生过的事实：清空 ready 会让重跑看不出曾经回收过多少。
+            materialization["purged"] = True
         manifest.update({
             "block_plan": str(BlockPlan.path(ws)),
             "pipeline": {
                 "mode": str(mode),
-                "status": "ready" if not block_ids or len(audio_ready) == len(block_ids) else "partial",
+                "status": status,
                 "subtitle": {
                     "ready": list(subtitle_state.get("subtitle_ready") or []),
                     "cached": list(subtitle_state.get("cached") or []),
@@ -497,14 +512,84 @@ class PipelineCoordinator:
                         for k, v in (subtitle_state.get("page_sources") or {}).items()
                     },
                 },
-                "materialization": {
-                    "requested": list(subtitle_state.get("needs_audio") or []),
-                    "ready": audio_ready,
-                },
+                "materialization": materialization,
             },
         })
         ws.save_manifest(manifest)
         return manifest
+
+    @staticmethod
+    def _mark_audio_purged(ws: Any, purge_result: Mapping[str, Any]) -> Dict[str, Any]:
+        """把回收结果写进 manifest，并把 status 显式标成 purged。
+
+        不这么做的话，`_save_runtime_manifest` 下一次会把 status 算成
+        ``partial``（音频已不在 → audio_ready 少一块），看起来像"音频物化
+        出了问题"，而它恰恰是成功回收的标志。
+        """
+        try:
+            manifest = ws.load_manifest(absolute=True)
+        except Exception:
+            manifest = {}
+        if not isinstance(manifest, dict):
+            manifest = {}
+        pipeline_state = manifest.get("pipeline")
+        if not isinstance(pipeline_state, dict):
+            pipeline_state = {}
+        materialization = pipeline_state.get("materialization")
+        if not isinstance(materialization, dict):
+            materialization = {}
+        materialization["purged"] = True
+        materialization["ready"] = []
+        pipeline_state["status"] = "purged"
+        pipeline_state["materialization"] = materialization
+        manifest["pipeline"] = pipeline_state
+        manifest["audio_purge"] = AudioMaterializer.purge_record(purge_result)
+        ws.save_manifest(manifest)
+        return manifest
+
+    @classmethod
+    def _purge_audio_if_complete(
+        cls,
+        ws: Any,
+        blocks: Sequence[Mapping[str, Any]],
+        *,
+        keep_audio: bool = False,
+        dry_run: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        """收尾回收物理音频；豁免、未完工或出错时返回 ``None``（不打扰主流程）。
+
+        判定与删除细节见 :meth:`AudioMaterializer.purge_audio`——四条件全过才删。
+        这里只负责**编排**：打印人话、记账、兜住异常。回收是为了省磁盘，不是
+        交付物，所以它失败绝不能掀翻流水线。
+        """
+        if keep_audio:
+            print("[*] 已指定 --keep-audio：保留音频产物")
+            return None
+        if not AudioMaterializer.audio_exists(ws):
+            return None
+        try:
+            结论 = AudioMaterializer.purge_audio(ws, blocks, dry_run=dry_run)
+        except Exception as err:
+            print(f"[!] 音频回收已跳过（不影响交付）：{err}", file=sys.stderr)
+            return None
+
+        if not 结论.get("purged"):
+            print(f"[*] 音频未回收：{结论.get('reason') or '未满足回收条件'}")
+            return 结论
+
+        if dry_run:
+            print(f"[*] [预演] 将回收 {结论['deleted']} 个音频文件，释放 "
+                  f"{结论['bytes'] / 1048576:.1f} MB（加 --keep-audio 可豁免）")
+            return 结论
+
+        if 结论.get("failed"):
+            print(f"[!] 音频回收部分失败 {len(结论['failed'])} 个文件，详见 manifest",
+                  file=sys.stderr)
+        else:
+            print(f"[*] 已回收 {结论['deleted']} 个音频文件，释放 "
+                  f"{结论['bytes'] / 1048576:.1f} MB（逐字稿不受影响）")
+        cls._mark_audio_purged(ws, 结论)
+        return 结论
 
     def run(
         self,
@@ -521,6 +606,7 @@ class PipelineCoordinator:
         article_type: str = "",
         block_minutes: float = 0.0,
         mode: str = "full",
+        keep_audio: bool = False,
     ) -> Dict[str, Any]:
         """按 v4 计划优先顺序执行完整流水线。
 
@@ -533,6 +619,10 @@ class PipelineCoordinator:
         都执行**的（不受 force 控制），已锁定的旧块原样保留、只为新分集追加新块；手工裁短
         `source.parts` 会被 `ensure` 的 digest 自校验拒绝（见 `BlockPlan._assert_source_intact`）。
         要排除某些分集，正确做法是**保留 source.parts 全长、只裁 blocks**。
+
+        ``--keep-audio`` 豁免收尾回收：缺省在**长文/笔记/教材全部产出后**自动删除
+        物理音频（分集源音频 + 块级拼接 + 劈腿切片，145 集的课约 476 MB），因为
+        逐字稿正文不引用音频路径。判定为四条件全过才删，缺任一条只跳过并说明。
         """
         # 1) 元数据解析与工作区绑定在任何磁盘状态变更之前完成。
         info = resolve_target_info(url, sessdata=sessdata, custom_task=task, base_dir=base_dir)
@@ -922,6 +1012,11 @@ class PipelineCoordinator:
             )
         except Exception as err:
             print(f"[!] 账本对账已跳过：{err}", file=sys.stderr)
+
+        # 12) 全部交付物齐备后回收音频：它是唯一大体积的中间产物（145 集的课
+        # 约 476 MB），而逐字稿正文不引用音频路径。放在对账之后，所以账本先按
+        # 「音频在盘」算完，再回收——`--keep-audio` 可豁免。
+        self._purge_audio_if_complete(ws, video_blocks, keep_audio=keep_audio)
 
         final_manifest = ws.load_manifest(absolute=True)
         return {

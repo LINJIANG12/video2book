@@ -147,6 +147,7 @@ def cmd_pipeline(args):
             article_type=article_type,
             block_minutes=getattr(args, "block_minutes", None) or 0.0,
             mode=mode,
+            keep_audio=getattr(args, "keep_audio", False),
         )
     except PipelineGateError as gate:
         sys.exit(gate.exit_code)
@@ -695,6 +696,12 @@ def main():
                         help="只解析拓扑并列出将处理的分集，不下载音频、不写任务书")
     p_pipe.add_argument("--audio-only", action="store_true", dest="audio_only",
                         help="完成计划/字幕/按需音频物化与转录任务书后返回（不派发长文任务书）")
+    p_pipe.add_argument(
+        "--keep-audio", action="store_true", dest="keep_audio",
+        help="保留已下载的音频。缺省在长文/笔记/教材全部产出后自动回收 audio/ 下的"
+             "分集源音频与块级拼接（145 集的课约 476 MB）——逐字稿是唯一事实来源且不引用"
+             "音频路径，所以那之后音频纯属占用磁盘",
+    )
 
     # check：交付质量门禁统一入口（阶段一放行 / 交付前体检 / 存量标题去号）
     p_check = subparsers.add_parser(

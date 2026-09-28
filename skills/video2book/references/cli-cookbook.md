@@ -125,7 +125,7 @@ python src/cli.py audit-names          # 专名复核清单（只报告，可随
 
 | 入口 | 参数 | 用途 |
 | :--- | :--- | :--- |
-| `pipeline` | `--all` `--range X-Y` `--page N` `--quality <档>` `--block-minutes N` `--force` `--article-type <风格>` `--dry-run` `--audio-only` `--task NAME` `--base-dir DIR` | 阶段一主入口；`--force` 只重取物理音频/逐字稿/任务书，不改变已有计划 |
+| `pipeline` | `--all` `--range X-Y` `--page N` `--quality <档>` `--block-minutes N` `--force` `--article-type <风格>` `--dry-run` `--audio-only` `--keep-audio` `--task NAME` `--base-dir DIR` | 阶段一主入口；`--force` 只重取物理音频/逐字稿/任务书，不改变已有计划；`--keep-audio` 豁免收尾的音频自动回收 |
 | `cluster-notes` | `--force` `--block-id N` `--start-block N` `--end-block N` | 笔记归并派发；后三者按笔记序号筛选 |
 | `cluster-articles` | `--force` | 默认复用已有教材，`--force` 按最新计划重编 |
 | `check` | `--stage1` `--deliver` `--fix-numbering` `--strict` `--dir` `--task` `--base-dir` `--json` `--min-freq N` `--min-coverage F` `--max-truncated N` `--require-structure` `--require-lang` `--require-no-numbering` `--only` `--dry-run` `--max-samples N` `--hash-nonheading` | 质量门禁与存量标题清理 |
