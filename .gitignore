@@ -65,4 +65,14 @@ temp_bilinote/
 # 内部实现说明：写给维护者看（含内部结构推导与取舍记录），不随发布分发
 sikll实现文档.md
 
+# 外部独立仓库（有自己的 remote 与发布节奏；且 config.json 含真实凭证，
+# 与 skill/、产物根平级，不随本仓库分发）
+omni-media/
+
+# 运行时状态文件（正常落在产物根 output/ 内，此处作安全网：
+# 一旦产物目录被搬回仓库内，这些凭证与状态文件就不会漏网）
+.wbi_keys.json
+.cli_status.json
+.subtitle_cache.json
+
 
