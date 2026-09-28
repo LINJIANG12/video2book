@@ -40,7 +40,9 @@ def enable_utf8_console() -> None:
         try:
             if user_encoding:
                 # 编码归使用者，容错归我们：宁可个别符号降级为 `?`，也不许命令崩。
-                reconfigure(errors="replace")
+                # 缓冲策略仍由本项目决定：设了 PYTHONIOENCODING 不该顺带把行缓冲关掉，
+                # 否则长跑命令在管道下退回块缓冲，宿主读不到中间进度。
+                reconfigure(errors="replace", line_buffering=True)
             else:
                 # line_buffering 与拆分前 cli.py 的行为一致：逐行 flush，便于宿主实时读到进度。
                 reconfigure(encoding="utf-8", errors="replace", line_buffering=True)

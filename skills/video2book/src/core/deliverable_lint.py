@@ -16,7 +16,7 @@
 import re
 from typing import Any, Dict, List
 
-from src.core.heading_numbers import is_numbered_heading
+from src.core.heading_numbers import plan_heading_cleanup
 from src.core.heading_numbers import iter_lines as _heading_lines
 
 # ── 套话黑名单：无信息量的填充句（每条陈述都必须携带具体信息，否则不许写） ────────────
@@ -47,18 +47,85 @@ HOLLOW_HEADINGS = (
 # ── 分集平铺标题：任何级别的标题都不得以分集编号 / 分集序号开口 ─────────────────────
 EPISODE_HEADING_PATTERNS = (
     re.compile(r"^#{1,6}\s*P\d{1,3}\b"),
-    re.compile(r"^#{1,6}\s*第\s*\d{1,3}\s*[讲集课节]\b"),
+    re.compile(r"^#{1,6}\s*第\s*[0-9一二三四五六七八九十百零]{1,4}\s*[讲集课节]\b"),
     re.compile(r"^#{1,6}\s*Part\s*\d+", re.IGNORECASE),
-    re.compile(r"^#{1,6}\s*\d+\.\d+\s*第\s*\d{1,3}\s*[讲集]"),
+    re.compile(r"^#{1,6}\s*\d+\.\d+\s*第\s*[0-9一二三四五六七八九十百零]{1,4}\s*[讲集]"),
 )
 
 # ── 分集口吻：正文里以「本集 / 上一讲 / 视频中提到」叙述 ───────────────────────────
+# 「本讲」的裸用（不带「中/里/我们/将/主要」）也要拦——笔记按知识主题成篇后一篇可能跨多个块，
+# 「本讲题目」「本讲最核心的考点」里的「本讲」已指代不明。
+# 但 `本课程共十二讲` 说的是课程整体、不是某一集，必须放过；`文本讲了什么`/`课本讲` 也要放过。
+# 故只在「本讲/集/节/课」后紧跟分集指代词时才判定。
+_本讲_RE = re.compile(
+    r"(?<![语文耳口看听说写读练复])"
+    r"本[节讲集课]"
+    r"(?=(题目|重点|最|的|中|里|我们|将|主要|讨论|提到|方法|讲的是|是|有|不|两|三|几))"
+)
+
 EPISODE_VOICE_PATTERNS = (
     re.compile(r"本(节|讲|集|课)(中|里|我们|将|主要)"),
     re.compile(r"上一(讲|节|集)"),
     re.compile(r"(视频|课程|讲师|老师)(中|里)(说|讲|提到|指出)"),
     re.compile(r"P\d{1,3}\s*(中|里)(提到|讲到|介绍)"),
+    _本讲_RE,
 )
+
+# ── 笔记标题元数据：标题必须是纯知识主题名 ────────────────────────────────────────
+# 讲师姓名无法通用识别（需按工作区传入），此处只拦可通用判定的形态。
+NOTE_TITLE_PATTERNS = (
+    # 课次序号：阿拉伯数字与中文数字都算（`第2节` / `第一节课` / `第五讲`）
+    (re.compile(r"第\s*[0-9一二三四五六七八九十百零]{1,4}\s*[讲集课节]"), "课次序号"),
+    (re.compile(r"【\s*中文配音版\s*】|中文配音版|原声版|精讲版|高清字幕版"), "配音/版本元数据"),
+    (re.compile(r"赠\s*纸质|讲义赠|送讲义|购买|下单|退款|售后"), "赠品/促销元数据"),
+    # 集号/块号开口：数字串必须完整（后面不再跟数字）且后面有分隔符或空格。
+    # 这样 `2025年国考…` 不会因为 `\d{1,3}` 只吃掉 `202` 而误判，
+    # 而 `01 什么是智能体` / `43. 感觉器` / `01｜智能体` 这类真序号会命中。
+    (re.compile(r"^\s*\d{1,3}(?!\d)\s*(?:[.、|｜]\s*|\s)\S"), "标题以集号/块号开口"),
+    # 双编号：文件名 `笔记01_01解剖学绪论` 里 `笔记NN_` 之后又紧跟一段块号。
+    (re.compile(r"^\d{1,3}(?!\d)\s*(?:[.、|｜]\s*|\s)\S"), "文件名双编号（笔记号后又跟块号）"),
+    (re.compile(r"[（(]\s*讲师\s*[）)]|讲师原话|作者认为|作者以前"), "第三人称元话语"),
+)
+
+
+def lint_note_title(title: str) -> List[str]:
+    """检查一个笔记标题是否混入了不该有的元数据。返回问题描述列表。"""
+    问题: List[str] = []
+    for pattern, label in NOTE_TITLE_PATTERNS:
+        if pattern.search(title):
+            问题.append(label)
+    return 问题
+
+
+def note_semantic_name(filename: str) -> str:
+    """从笔记文件名里剥掉序号前缀与后缀，得到用于查重的语义标题。"""
+    stem = filename[:-3] if filename.endswith(".md") else filename
+    for suffix in ("_笔记", "_精读长文"):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+    return re.sub(r"^笔记\d{1,3}_", "", stem)
+
+
+# 笔记文件名必须是 `笔记NN_<主题>_笔记.md`：`笔记NN_` 之后直接跟主题。
+# 出现第二段序号（`笔记01_01解剖学绪论`）即双编号——笔记号与块号并列且数值不等，
+# 读者会误认成同一套编号体系。文件名里的空格同样判不合格。
+NOTE_FILENAME_RE = re.compile(r"^笔记\d{1,3}_(?P<topic>.+?)_笔记\.md$")
+
+
+def lint_note_filename(filename: str) -> List[str]:
+    """检查笔记文件名格式。返回问题描述列表。"""
+    问题: List[str] = []
+    if " " in filename:
+        问题.append("文件名含空格")
+    match = NOTE_FILENAME_RE.match(filename)
+    if not match:
+        问题.append("文件名不符合 笔记NN_<主题>_笔记.md")
+        return 问题
+    topic = match.group("topic")
+    for pattern, label in NOTE_TITLE_PATTERNS:
+        if pattern.search(topic):
+            问题.append(label)
+    return 问题
 
 # 允许的「来源标注」形态（不算分集口吻）
 SOURCE_LINE_RE = re.compile(r"^\s*[*\-+]?\s*>\s*来源\s*[:：]")
@@ -139,6 +206,8 @@ def lint_note(text: str) -> Dict[str, Any]:
     inline_quote: List[Dict[str, Any]] = []
     truncated: List[Dict[str, Any]] = []
     episode_voice: List[Dict[str, Any]] = []
+    title_meta: List[Dict[str, Any]] = []
+    h1_seen = False
 
     for line_no, line, in_fence, is_fence in _iter_lines(text):
         if is_fence:
@@ -146,6 +215,11 @@ def lint_note(text: str) -> Dict[str, Any]:
         stripped = line.strip()
         if not stripped:
             continue
+
+        if not h1_seen and line.startswith("# "):
+            h1_seen = True
+            for label in lint_note_title(line[2:].strip()):
+                title_meta.append({"line": line_no, "text": stripped[:120], "kind": label})
 
         for phrase in BOILERPLATE_PHRASES:
             if phrase in line:
@@ -171,6 +245,10 @@ def lint_note(text: str) -> Dict[str, Any]:
                 inline_quote.append({"line": line_no, "text": stripped[:120]})
             if _looks_truncated(body):
                 truncated.append({"line": line_no, "text": stripped[:120]})
+            # 笔记正文几乎全是列表项，分集口吻必须同样在列表项上判定，
+            # 否则「本讲题目」「本讲最核心的考点」这类写法在真实笔记里形同虚设。
+            if any(p.search(body) for p in EPISODE_VOICE_PATTERNS):
+                episode_voice.append({"line": line_no, "text": stripped[:120]})
         else:
             if _looks_truncated(stripped) and not stripped.startswith("|"):
                 truncated.append({"line": line_no, "text": stripped[:120]})
@@ -184,6 +262,7 @@ def lint_note(text: str) -> Dict[str, Any]:
         "inline_quote": inline_quote,
         "truncated": truncated,
         "episode_voice": episode_voice,
+        "title_meta": title_meta,
         "structure": check_note_structure(text),
     }
 
@@ -205,14 +284,13 @@ def check_note_structure(text: str) -> Dict[str, Any]:
     h1 = 0
     h2 = 0
     deep_headings = 0        # `#####` / `######`：超出「最多到 `####`」的上限
-    numbered = 0             # 手写序号（判定规则与去号共用 src/core/heading_numbers）
+    # 手写序号：走文档级计划（与去号、与渲染体检共用同一份判定），只有 auto 档算违规。
+    numbered = len(lint_heading_numbers(text))
     for _line_no, line, in_fence in _heading_lines(text):
         if in_fence:
             continue
         if re.match(r"^#{5,6}\s+\S", line):
             deep_headings += 1
-        if is_numbered_heading(line):
-            numbered += 1
         matched = HEADING_RE.match(line)
         if not matched:
             continue
@@ -242,12 +320,30 @@ def lint_heading_numbers(text: str) -> List[Dict[str, Any]]:
 
     长文与教材同样适用：它们曾经带 `## 第 N 章：…` 与继承自长文的 `## 2.1 …`，
     与阅读器的自动编号叠成双号。教材整编现已幂等去号，这里给出可复算的抽查口径。
+
+    **走文档级计划**（`plan_heading_cleanup`）：只有 `auto` 档——形态过关且成序——才算违规。
+    `report` 档（孤立数字、被计量单位/计数词救下、剥完剩残句）只提示不计入，
+    否则 `## 80 小时和 60 小时的两道坎` 这类内容型标题会被永久误报。
     """
-    hits: List[Dict[str, Any]] = []
-    for line_no, line, in_fence in _heading_lines(text):
-        if not in_fence and is_numbered_heading(line):
-            hits.append({"line": line_no, "text": line.strip()[:120]})
-    return hits
+    plan = plan_heading_cleanup(text)
+    return [{"line": item["line"], "text": item["before"][:120]} for item in plan["auto"]]
+
+
+def lint_reported_headings(text: str) -> List[Dict[str, Any]]:
+    """`report` 档标题：像序号但判定为「只报不改」，附理由与处置建议。
+
+    与 `lint_heading_numbers` 共用同一份计划，所以两者永远不会给出互相矛盾的口径。
+    """
+    return [
+        {
+            "line": item["line"],
+            "text": item["before"][:120],
+            "number": item.get("number") or "",
+            "reason": item.get("reason", ""),
+            "hint": item.get("hint", ""),
+        }
+        for item in plan_heading_cleanup(text)["report"]
+    ]
 
 
 def lint_render(text: str) -> Dict[str, Any]:
@@ -292,6 +388,8 @@ def lint_render(text: str) -> Dict[str, Any]:
 
 # 致命项：两套合格语料均为 0，坏样本大量命中 → 作为门禁
 FATAL_NOTE_KEYS = ("boilerplate", "hollow_headings", "episode_headings", "inline_quote", "episode_voice")
+# 标题元数据同样致命：标题是笔记的检索入口，混入讲师名/课次/配音标记后无法成篇使用。
+TITLE_META_KEY = "title_meta"
 # 结构缺件同样只提示（换版前的笔记按旧规范生成，必然缺新构件，不回溯达标）
 STRUCTURE_KEYS = (
     "has_h1",
@@ -313,6 +411,7 @@ def summarize_note(lint: Dict[str, Any]) -> Dict[str, int]:
         "inline_quote": len(lint["inline_quote"]),
         "truncated": len(lint["truncated"]),
         "episode_voice": len(lint["episode_voice"]),
+        "title_meta": len(lint.get("title_meta", [])),
         "structure_missing": sum(1 for k in STRUCTURE_KEYS if not lint["structure"].get(k)),
     }
 
@@ -327,7 +426,7 @@ def summarize_render(lint: Dict[str, Any]) -> Dict[str, int]:
 
 
 def fatal_note_total(summary: Dict[str, int]) -> int:
-    return sum(summary.get(k, 0) for k in FATAL_NOTE_KEYS)
+    return sum(summary.get(k, 0) for k in FATAL_NOTE_KEYS) + summary.get(TITLE_META_KEY, 0)
 
 
 def fatal_render_total(summary: Dict[str, int]) -> int:

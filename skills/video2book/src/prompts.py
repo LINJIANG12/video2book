@@ -11,7 +11,7 @@ Defines:
 """
 
 import re
-from typing import Dict
+from typing import Dict, List
 
 # 交付物默认在 Typora 中阅读：渲染写法硬约束的唯一文案来源。
 # 讲义提示词在本文件内注入；模块笔记提示词由 BlockSynthesizer 统一注入，避免多处各写一遍而走样。
@@ -411,10 +411,43 @@ def build_transcribe_dispatch_prompt(
         f"调用听音工具转录（**优先 read_media**：它能 output_file 直写落盘、全文 0 Token 进上下文；"
         f"工具列表里没有 read_media 时才用 read_audio 的 output_mode=\"file\" 取切片自行聆听），"
         f"严格按照任务书 2.1 节的要求进行纯文本忠实转录（无需时间戳），"
+        f"**首行写来源抬头** `> 来源：**听音转录**——非平台字幕，由讲师原声转录`"
+        f"（下游据它拒绝字幕稿降级覆盖），"
         f"将完整逐字稿直接写入目标文件：\n"
         f"`{block_transcript}`\n"
         f"落盘后仅在最后汇报单行：\n"
         f"BLK{block_id:02d} | {block_transcript} | 字节数 | 执行者\n"
+        f"（严禁在对话中回传逐字稿正文）"
+    )
+
+
+def build_page_transcribe_dispatch_prompt(
+    task_file: str,
+    block_id: int,
+    pages: List[int],
+    targets: List[str],
+) -> str:
+    """按集补录的转录派发提示词（SSOT）。
+
+    与块级派发的关键差别：目标不是块级逐字稿，而是**若干集的补录稿**。子智能体必须
+    逐集转录、逐集落盘——只转第一集会让其余缺集永远等不到补录，块级稿就一直合并不齐。
+    """
+    清单 = "\n".join(f"  - P{int(p):02d} → {t}" for p, t in zip(pages, targets))
+    return (
+        f"【执行规范（单任务直达）】：本任务输入与输出路径均已完全指定。直接读取指定输入文件，"
+        f"完成转录并保存到目标路径；无需也不要检索、扫描项目其他文件或仓库代码。\n\n"
+        f"请阅读转录任务书文件：\n"
+        f"`{task_file}`\n"
+        f"该块其余分集已用 B 站字幕拼好，**只有下列 {len(pages)} 个分集**取不到可用字幕，"
+        f"需要你逐集听音补录：\n{清单}\n\n"
+        f"调用听音工具转录（**优先 read_media**：它能 output_file 直写落盘、全文 0 Token 进上下文；"
+        f"工具列表里没有 read_media 时才用 read_audio 的 output_mode=\"file\" 取切片自行聆听），"
+        f"对**每一集各调一次**，音频路径与落盘路径见任务书第 1 节的表；"
+        f"严格按照任务书 2.1 节的要求进行纯文本忠实转录（无需时间戳），"
+        f"**首行写来源抬头** `> 来源：**听音转录**——非平台字幕，由讲师原声转录`，"
+        f"**逐集**写入各自的补录稿路径。\n"
+        f"落盘后仅在最后汇报单行（列出全部补录稿路径）：\n"
+        f"BLK{block_id:02d} | " + " | ".join(targets) + " | 字节数 | 执行者\n"
         f"（严禁在对话中回传逐字稿正文）"
     )
 

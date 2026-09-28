@@ -12,6 +12,7 @@
 - 物理音频永远不进入 BlockPlan，所有路径与范围由 v4 API 推导。
 """
 
+import json
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set
@@ -75,6 +76,7 @@ from src.core.taskbook import (
     TRANSCRIBE_INSTRUCTION,
     export_block_article_task,
     export_block_transcribe_task,
+    export_page_transcribe_task,
     resolve_article_type,
 )
 
@@ -82,6 +84,7 @@ __all__ = [
     "TRANSCRIBE_INSTRUCTION",
     "export_block_article_task",
     "export_block_transcribe_task",
+    "export_page_transcribe_task",
     "resolve_article_type",
     "PipelineCoordinator",
     "part_kind",
@@ -303,6 +306,75 @@ class PipelineCoordinator:
         except (OSError, TypeError, ValueError):
             return False
 
+    def _page_transcript_exists(ws: Any, block: Mapping[str, Any], page: int) -> bool:
+        """块内某一集的**补录稿**是否已落盘。"""
+        try:
+            path = TaskWorkspace.page_transcript_path(ws, dict(block), int(page))
+            return path.is_file() and path.stat().st_size > 0
+        except (OSError, TypeError, ValueError):
+            return False
+
+    @classmethod
+    def _merge_completed_blocks(
+        cls, ws: Any, blocks: Sequence[Mapping[str, Any]], 缺页表: Mapping[int, Sequence[int]]
+    ) -> List[Dict[str, Any]]:
+        """把「字幕部分稿 + 缺的各集补录稿」合并成最终块级逐字稿。
+
+        只处理**补录稿已齐**的块；缺任一集就整块不动——半成品落到最终名会让下游
+        （写作派发、阶段一门禁、queue_tracker）误以为该块语料已完工。
+
+        合并所需的两份原料从 sidecar 状态与部分稿重建：部分稿里已含各集拼好的正文，
+        这里按 `segments` 顺序把「字幕集正文 + 听音集正文」拼回去。
+        """
+        from src.core import subtitles as subtitle_core
+
+        产出: List[Dict[str, Any]] = []
+        for block in blocks:
+            block_id = int(block.get("block_id") or 0)
+            缺集 = [int(p) for p in (缺页表.get(block_id) or [])]
+            if not 缺集:
+                continue
+            if cls._transcript_exists(ws, block):
+                continue
+            if not all(cls._page_transcript_exists(ws, block, p) for p in 缺集):
+                continue
+            state_path = TaskWorkspace.partial_state_path(ws, dict(block))
+            if not state_path.is_file():
+                continue
+            try:
+                状态 = json.loads(state_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            ready = {int(p) for p in (状态.get("ready_pages") or [])}
+            听音稿: Dict[int, str] = {}
+            for p in 缺集:
+                try:
+                    听音稿[p] = TaskWorkspace.page_transcript_path(ws, dict(block), p).read_text(
+                        encoding="utf-8", errors="ignore")
+                except OSError:
+                    pass
+            合并 = subtitle_core.merge_block_transcript(dict(block), {
+                "page_sources": {p: "subtitle" for p in ready} | {p: "missing" for p in 缺集},
+                "missing_pages": 缺集,
+                "segment_text": _读部分稿片段(ws, block, state_path),
+            }, 听音稿)
+            if not 合并.get("ok"):
+                continue
+            path = TaskWorkspace.write_block_transcript(ws, dict(block), 合并["text"])
+            for p in 缺集:
+                try:
+                    TaskWorkspace.page_transcript_path(ws, dict(block), p).unlink()
+                except OSError:
+                    pass
+            try:
+                state_path.unlink()
+            except OSError:
+                pass
+            产出.append({"block_id": block_id, "path": str(path),
+                          "audio_pages": 缺集, "page_sources": 合并.get("page_sources") or {}})
+        return 产出
+
+
     @staticmethod
     def _block_is_video(block: Mapping[str, Any], video_pages: Set[int]) -> bool:
         pages = {
@@ -405,6 +477,25 @@ class PipelineCoordinator:
                     "needs_audio": list(subtitle_state.get("needs_audio") or []),
                     "written": list(subtitle_state.get("written") or []),
                     "errors": list(subtitle_state.get("errors") or []),
+                    # 判不可用的分集与原因（串台 / 本来没有字幕 / 重试后仍不完整）
+                    "unavailable": list(subtitle_state.get("unavailable") or []),
+                    # 块级丢页：`unavailable` 是**页级**的，只说「P07 判不可用」；
+                    # 这里补上「因此 BLK03 整块转了音频」这条因果链——否则判断某块为何
+                    # 掉进听音兜底只能重新去平台上抽样取证。每项含 block_id / missing_pages
+                    # / reason / details（逐页原因）。
+                    "missing": [
+                        项 for 项 in (subtitle_state.get("missing") or [])
+                        if int((项 or {}).get("block_id") or 0)
+                        not in set(subtitle_state.get("cached") or [])
+                        | set(subtitle_state.get("subtitle_ready") or [])
+                    ],
+                    # 因已有听音稿而拒绝用字幕稿覆盖的块（`_print_kept_audio` 会指到这里）
+                    "kept_audio": list(subtitle_state.get("kept_audio") or []),
+                    # 逐集来源：块号 → {集号: "subtitle"|"missing"}，供排查「哪一集走的哪条路」
+                    "page_sources": {
+                        int(k): {int(p): s for p, s in (v or {}).items()}
+                        for k, v in (subtitle_state.get("page_sources") or {}).items()
+                    },
                 },
                 "materialization": {
                     "requested": list(subtitle_state.get("needs_audio") or []),
@@ -425,6 +516,7 @@ class PipelineCoordinator:
         range_str: Optional[str] = None,
         process_all: bool = False,
         force: bool = False,
+        allow_downgrade: bool = False,
         quality: str = "low",
         article_type: str = "",
         block_minutes: float = 0.0,
@@ -434,7 +526,13 @@ class PipelineCoordinator:
 
         ``dry-run`` 在解析拓扑后立即返回，不保存 parts、计划、manifest 或任务书。
         ``audio-only`` 完成计划、字幕、按需音频物化和转录任务书后返回，不派发模块
-        长文任务书。``--force`` 只影响物理音频、逐字稿和任务书重建，不改变已锁定计划。
+        长文任务书。
+
+        ``--force`` 只影响物理音频、逐字稿与任务书的重建（跳过"已存在即复用"的缓存短路），
+        **它不参与计划更新**。注意别把这句话读成"计划不会变"：`BlockPlan.ensure` 是**每次调用
+        都执行**的（不受 force 控制），已锁定的旧块原样保留、只为新分集追加新块；手工裁短
+        `source.parts` 会被 `ensure` 的 digest 自校验拒绝（见 `BlockPlan._assert_source_intact`）。
+        要排除某些分集，正确做法是**保留 source.parts 全长、只裁 blocks**。
         """
         # 1) 元数据解析与工作区绑定在任何磁盘状态变更之前完成。
         info = resolve_target_info(url, sessdata=sessdata, custom_task=task, base_dir=base_dir)
@@ -569,7 +667,8 @@ class PipelineCoordinator:
         if video_blocks and self._is_bilibili(info) and sessdata:
             try:
                 raw_state = SubtitleService.run(
-                    ws, info, subtitle_plan, sessdata=sessdata, force=force
+                    ws, info, subtitle_plan, sessdata=sessdata, force=force,
+                    allow_downgrade=allow_downgrade,
                 )
             except Exception as err:
                 print(f"[!] 字幕阶段异常，缺字幕块将转音频兜底：{err}", file=sys.stderr)
@@ -656,9 +755,26 @@ class PipelineCoordinator:
             and int(block.get("block_id") or 0) in audio_ready_ids
             and (force or not self._transcript_exists(ws, block))
         ]
+        missing_by_block: Dict[int, List[int]] = {}
+        for entry in (subtitle_state.get("missing") or []):
+            try:
+                missing_by_block[int(entry.get("block_id") or 0)] = [
+                    int(p) for p in (entry.get("missing_pages") or [])]
+            except (TypeError, ValueError):
+                continue
         for block in transcribe_blocks:
             block_id = int(block.get("block_id") or 0)
+            # 按集兜底：只把**缺的**那几集写进任务书，音频给分集音频、目标给补录稿。
+            # 缺页清单来自刚跑完的字幕阶段；若为空（老工作区/无部分稿）则退回整块任务书。
+            待补 = [p for p in missing_by_block.get(block_id, []) if not self._page_transcript_exists(ws, block, p)]
             try:
+                if 待补:
+                    task_file = export_page_transcribe_task(
+                        ws, block, 待补, course_title=course_title
+                    )
+                    print(f"    [agent] BLK{block_id:02d} {BlockPlan.span(block)} "
+                          f"按集补录任务书（缺 {'、'.join(f'P{p:02d}' for p in 待补)}）: {task_file.name}")
+                    continue
                 task_file = export_block_transcribe_task(
                     ws, block, titles=titles, course_title=course_title
                 )
@@ -669,6 +785,17 @@ class PipelineCoordinator:
             print(f"    [agent] BLK{block_id:02d} {BlockPlan.span(block)} 转录任务书: {task_file.name}")
         if not transcribe_blocks:
             print("[*] 当前没有需要补转录的块（字幕/逐字稿已就绪，或音频尚未就绪）")
+
+        # 7.5) 合并：补录稿齐了的块，把「字幕部分稿 + 补录稿」合成最终块级逐字稿。
+        # 合并前**不写最终名**——最终名一出现，`_transcript_exists` / queue_tracker 就会
+        # 认定该块已转录完成，所以这一步只在真的凑齐时才落。
+        merged = self._merge_completed_blocks(ws, video_blocks, missing_by_block)
+        for 项 in merged:
+            print(f"    [merge] BLK{int(项.get('block_id') or 0):02d} "
+                  f"合并完成（听音补录 {'、'.join(f'P{p:02d}' for p in (项.get('audio_pages') or []))}）"
+                  f" -> {Path(str(项.get('path'))).name}")
+        if missing_by_block and not merged:
+            print("[*] 补录稿尚未齐备，最终块级逐字稿暂不生成")
 
         runtime_manifest = self._save_runtime_manifest(
             ws,
@@ -808,3 +935,59 @@ class PipelineCoordinator:
             "note_results": note_results,
             "failed_entries": list(final_manifest.get("failed_episodes") or []),
         }
+
+
+def _读部分稿片段(ws: Any, block: Mapping[str, Any], state_path: Any) -> Dict[str, str]:
+    """从已落盘的**字幕部分稿**还原「按段的正文」，供合并时按原顺序拼回去。
+
+    部分稿的行首是块内相对时间戳 `[MM:SS] 文本`，段与段在块内时间轴上首尾相接，
+    所以把每一行按时间戳归到它所属的段即可复原，不必在 sidecar 里再存一份正文。
+    读不出来时返回空表——合并层会因此拿不到字幕段，此时宁可不合，也不要产出缺段的稿。
+    """
+    from src.core.workspace import TaskWorkspace as _TW
+
+    try:
+        文本 = _TW.partial_transcript_path(ws, dict(block)).read_text(encoding="utf-8", errors="ignore")
+    except (OSError, TypeError, ValueError):
+        return {}
+    段表 = []
+    for 段 in (block.get("segments") or []):
+        if not isinstance(段, dict):
+            continue
+        段表.append((
+            int(段.get("page") or 0),
+            str(段.get("label") or f"P{int(段.get('page') or 0):02d}"),
+            float(段.get("start_sec") or 0.0),
+            float(段.get("duration_sec") or 0.0),
+        ))
+    if not 段表:
+        return {}
+    分段: Dict[str, List[str]] = {label: [] for _, label, _, _ in 段表}
+    正文起 = False
+    for 行 in 文本.split("\n"):
+        if not 正文起:
+            # 抬头是首个空行之前的内容；正文从空行之后开始
+            正文起 = 行.strip() == ""
+            continue
+        if not 行.strip():
+            continue
+        时刻 = _时刻秒(行)
+        if 时刻 is None:
+            continue
+        for page, label, 起, 长 in 段表:
+            if 起 - 0.5 <= 时刻 < 起 + 长:
+                分段[label].append(行)
+                break
+    return {label: "\n".join(行) for label, 行 in 分段.items() if 行}
+
+
+def _时刻秒(行: str) -> Optional[float]:
+    """把行首 `[MM:SS] ` / `[HH:MM:SS] ` 解析成秒；不是时间戳行返回 None。"""
+    import re as _re
+
+    m = _re.match(r"^\s*\[(\d{1,3}):(\d{2})(?::(\d{2}))?\]", 行)
+    if not m:
+        return None
+    if m.group(3) is not None:
+        return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+    return int(m.group(1)) * 60 + int(m.group(2))

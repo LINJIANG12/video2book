@@ -373,6 +373,11 @@ class TaskWorkspace:
 
     # 逐字稿的正式后缀。门禁、回收、派发与 `_populated` 都以它认稿。
     TRANSCRIPT_SUFFIX = "_逐字稿.md"
+    # 部分稿后缀：已取到字幕的那些集先落它，缺集等听音补录齐了再合并成最终稿。
+    # 刻意不含 `TRANSCRIPT_SUFFIX` 后缀——否则会被「最终稿存在即整块完成」误判。
+    PARTIAL_SUFFIX = "_字幕部分稿.md"
+    # 单集补录稿后缀：缺集听音转录的落地文件，合并成最终稿的原料。
+    PAGE_TRANSCRIPT_SUFFIX = "_补录逐字稿.md"
 
     @classmethod
     def is_reusable_transcript(cls, path: Path) -> bool:
@@ -412,6 +417,38 @@ class TaskWorkspace:
             return Path(ws.subtitles_dir) / f"BLK{block_id:02d}_{span}{cls.TRANSCRIPT_SUFFIX}"
         stem = Path(str(block.get("audio") or "")).stem or f"BLK{block_id:02d}"
         return Path(ws.subtitles_dir) / f"{stem}{cls.TRANSCRIPT_SUFFIX}"
+
+    @classmethod
+    def partial_transcript_path(cls, ws: Any, block: Dict[str, Any]) -> Path:
+        """块级**部分稿**（已取到字幕的那些集）的路径。
+
+        与 `block_path` 只差后缀：`_字幕部分稿.md` **不带** `TRANSCRIPT_SUFFIX`，所以
+        `block_path` / `_transcript_exists` / `queue_tracker` 的「最终稿存在即整块完成」
+        三处判定都不受它影响——最终名只在补录齐备、合并之后才出现。
+        """
+        最终 = cls.block_path(ws, block)
+        return 最终.with_name(最终.name.replace(cls.TRANSCRIPT_SUFFIX, cls.PARTIAL_SUFFIX))
+
+    @classmethod
+    def partial_state_path(cls, ws: Any, block: Dict[str, Any]) -> Path:
+        """部分稿的**机器可读状态**（`BLK03_P18-P22_字幕部分稿.json`）。
+
+        记 `{ready_pages, missing_pages}`。它存在的意义是给「哪几集要补录」一个权威
+        来源——不靠解析暂存稿抬头（人类可读但不该被机器依赖），也不靠 manifest
+        （可能早于最新一轮转录而过期）。
+        """
+        部分 = cls.partial_transcript_path(ws, block)
+        return 部分.with_suffix(".json")
+
+    @classmethod
+    def page_transcript_path(cls, ws: Any, block: Dict[str, Any], page: int) -> Path:
+        """块内**单集补录稿**的路径（`subtitles/BLK03_P05_补录逐字稿.md`）。
+
+        同样**不带** `TRANSCRIPT_SUFFIX`：补录稿只是合并的原料，不能让下游误以为
+        该块已经转录完成。
+        """
+        block_id = int(block.get("block_id") or 0)
+        return Path(ws.subtitles_dir) / f"BLK{block_id:02d}_P{int(page):02d}{cls.PAGE_TRANSCRIPT_SUFFIX}"
 
     @classmethod
     def write_block_transcript(cls, ws: Any, block: Dict[str, Any], text: str) -> Path:

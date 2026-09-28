@@ -30,6 +30,7 @@ from src.prompts import (  # noqa: E402
     build_article_dispatch_prompt,
     build_note_dispatch_prompt,
     build_transcribe_dispatch_prompt,
+    build_page_transcribe_dispatch_prompt,
 )
 
 # 控制台硬化：输出含 `•`/中文，管道捕获时若按 locale(cp936) 编码会崩。
@@ -324,6 +325,20 @@ def scan_transcript_status(ws: Path) -> Dict:
     for block in blocks:
         raw = TaskWorkspace.block_path(tws, block)
         transcribed = raw.exists() and raw.stat().st_size > 0
+        # 按集兜底模式：块有**部分稿**（`_字幕部分稿.md` + 同名 `.json`）说明该块已用字幕
+        # 拼好一部分分集，缺的只剩这几集。此时「还差什么」的口径从"等一个整块稿"改成
+        # "等这几集的补录稿"——否则子智能体会被派去重听整个 40~60 分钟的块。
+        partial_state = TaskWorkspace.partial_state_path(tws, block)
+        pending_pages: List[int] = []
+        if not transcribed and partial_state.exists():
+            try:
+                状态 = json.loads(partial_state.read_text(encoding="utf-8"))
+                pending_pages = [
+                    int(p) for p in (状态.get("missing_pages") or [])
+                    if not TaskWorkspace.page_transcript_path(tws, block, int(p)).exists()
+                ]
+            except Exception:
+                pending_pages = []
         blocks_info.append({
             "block_id": int(block.get("block_id") or 0),
             "episodes": [int(p) for p in (block.get("episodes") or [])],
@@ -333,6 +348,8 @@ def scan_transcript_status(ws: Path) -> Dict:
             "duration_min": float(block.get("duration_min") or 0.0),
             "block_transcript": str(raw),
             "transcribed": transcribed,
+            "partial": partial_state.exists(),
+            "pending_pages": pending_pages,
         })
 
     limits = plan.get("limits") if isinstance(plan.get("limits"), dict) else {}
@@ -349,31 +366,47 @@ def scan_transcript_status(ws: Path) -> Dict:
 
 
 def _transcribe_payload(tstatus: Dict, n: int) -> List[Dict]:
-    """转录角色的取载荷入口：尚未转录的块（含时间表与逐字稿目标路径）。
+    """转录角色的取载荷入口。
 
-    只返回**没转录过**的块，因此重跑不会让同一个块被两个转录角色各转录一遍（那是纯烧钱）。
+    两种形态：
+    - **按集兜底**（块有部分稿）：只派**缺的**那几集，音频是分集音频、目标是补录稿。
+      这是「只对失败分集转录」的入口——整块 40~60 分钟不再被重听一遍。
+    - **整块**（无部分稿，历史工作区）：保持原样，派整块音频。
+
+    两种形态都只返回**没转录过**的块，因此重跑不会让同一个块被两个转录角色各转一遍。
     """
     items: List[Dict] = []
     for block in tstatus.get("blocks") or []:
         if block["transcribed"] or not block.get("audio_ready"):
             continue
-        subtitles_dir = Path(block["block_transcript"]).parent
-        task_file = subtitles_dir / f"BLK{block['block_id']:02d}_{block['span']}_转录任务书.md"
-        block_transcript = block["block_transcript"]
         block_id = int(block["block_id"])
-        dispatch_prompt = build_transcribe_dispatch_prompt(str(task_file), block_transcript, block_id)
+        subtitles_dir = Path(block["block_transcript"]).parent
+        task_file = subtitles_dir / f"BLK{block_id:02d}_{block['span']}_转录任务书.md"
+        pending = [int(p) for p in (block.get("pending_pages") or [])]
+        targets = [str(subtitles_dir / f"BLK{block_id:02d}_P{p:02d}_补录逐字稿.md") for p in pending]
+        按集 = bool(block.get("partial")) and bool(pending)
+        block_transcript = block["block_transcript"]
+        if 按集:
+            dispatch_prompt = build_page_transcribe_dispatch_prompt(
+                str(task_file), block_id, pending, targets)
+        else:
+            targets = [block_transcript]
+            dispatch_prompt = build_transcribe_dispatch_prompt(
+                str(task_file), block_transcript, block_id)
 
         items.append({
-
-            "block_id": block["block_id"],
+            "block_id": block_id,
             "span": block["span"],
             "episodes": block["episodes"],
+            "mode": "page" if 按集 else "block",
+            "pages": pending if 按集 else [],
+            "targets": targets,
             "duration_min": block["duration_min"],
             "audio_file": block["audio_file"],
             "audio_exists": True,
             "task_file": str(task_file),
             "task_file_exists": task_file.exists(),
-            "block_transcript": block["block_transcript"],
+            "block_transcript": block_transcript,
             "dispatch_prompt": dispatch_prompt,
         })
         if len(items) >= n:

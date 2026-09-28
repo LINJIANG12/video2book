@@ -741,12 +741,38 @@ class BlockPlan:
                 raise ValueError("block_plan.plan_source 必须是 metadata")
             if not isinstance(plan.get("source"), Mapping) or not isinstance(plan["source"].get("parts"), list):
                 raise ValueError("block_plan 缺少 source.parts，无法安全追加")
+            cls._assert_source_intact(plan["source"])
             if not isinstance(plan.get("limits"), Mapping):
                 raise ValueError("block_plan 缺少 limits，无法安全追加")
             for index, block in enumerate(blocks):
                 missing = _REQUIRED_BLOCK_KEYS - set(block)
                 if missing:
                     raise ValueError(f"block_plan.blocks[{index}] 缺少字段：{', '.join(sorted(missing))}")
+
+    @classmethod
+    def _assert_source_intact(cls, source: Mapping[str, Any]) -> None:
+        """`source.digest` 自校验：`source.parts` 被手改过就报错。
+
+        这个字段一直算着、却从没人校验。它防的是一个**实测踩过的破坏向量**：
+        `append` 只追加 `current[旧 parts 数:]`（尾部新增），所以「保留 source.parts 全长、
+        只裁 blocks」这个手工状态是稳定的；但一旦有人手工把 `source.parts` 也裁短，
+        下一次 `pipeline` 就会把这些集当"新增"重新规划成块——实测 9 块变 24 块，
+        产物与块号整体错位。
+
+        校验放在 strict 档（`append`/`ensure` 走这里），所以 `load()` 仍能读旧计划、
+        只读工具优雅降级；但任何**写计划**的路径都会先撞上它。
+        """
+        parts = source.get("parts")
+        stored = source.get("digest")
+        if not isinstance(parts, list) or not stored:
+            return
+        actual = cls._digest(parts)
+        if str(stored) != actual:
+            raise ValueError(
+                "block_plan.source.digest 与 source.parts 不符——source.parts 被手工改过。"
+                "连载课程只允许**追加**新 parts；要排除某些集请只裁 blocks 并保留 source.parts 全长"
+                "（否则这些集会被当新增重新规划成块）"
+            )
 
     @classmethod
     def load(cls, ws: Any) -> Optional[Dict[str, Any]]:

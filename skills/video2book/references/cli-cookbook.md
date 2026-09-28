@@ -47,7 +47,7 @@ python src/cli.py pipeline "<链接>" --all --audio-only --article-type learning
 4. 覆盖度不足的块进入音频兜底；
 5. 只下载缺字幕块涉及的分集音频，并按既有 `units`/`segments` 物化块音频。
 
-字幕 CDN 返回残缺正文时，字幕服务按 `BVB_SUBTITLE_ATTEMPTS`（默认 4 轮）退避重试；确实没有中文字幕的块不会被伪造或静默跳过，而是进入音频兜底。
+字幕取回按 `BVB_SUBTITLE_ATTEMPTS` 退避重试（**默认 10 轮、上限 10 轮**，环境变量只能调低）。平台对**同一 cid 每次返回的内容都不同**（实测单次抽中正确轨约 28%：正确字幕 / 别的视频的字幕 / 空 URL），所以重试是「重新抽」而不是「等故障恢复」。接受判据三条：**URL 身份锚点**（AI 字幕文件名内嵌 `aid+cid`，对不上即串台；实测 21 样本零误判，且能拦住时长贴合的错件）、时长覆盖下界 90%、ai 轨越界上界 110%。取不到的分集**只对该集走听音兜底**——块内其余分集继续用字幕，转录任务书只覆盖缺的那几集。
 
 ## 场景五：取派发载荷
 
@@ -101,6 +101,7 @@ python src/cli.py check --fix-numbering
 python src/cli.py cleanup --dry-run
 python src/cli.py cleanup
 python src/cli.py sync
+python src/cli.py audit-names          # 专名复核清单（只报告，可随时重跑）
 ```
 
 `pipeline`、`cluster-notes`、`cluster-articles` 会自动收尾；独立命令用于复算或补做。
@@ -112,7 +113,8 @@ python src/cli.py sync
 | `pipeline` | 阶段一唯一入口：元数据、BlockPlan、字幕、按需音频与任务书 |
 | `cluster-notes` | 块 → 笔记归并，导出笔记任务书 |
 | `cluster-articles` | 按块序把模块长文整编成册 |
-| `check` | 质量门禁：阶段一放行、交付体检、标题去号 |
+| `check` | 质量门禁：阶段一放行、交付体检、标题去号（默认只报不改） |
+| `audit-names` | 专名核对：长文里逐字稿查不到的英文专名 → 每课程一份复核清单 |
 | `cleanup` | 回收已完成任务书，每类保留 1 份范本 |
 | `sync` | 以磁盘产物回填 `manifest.json` |
 | `info` | 环境、工具链与凭证状态 |

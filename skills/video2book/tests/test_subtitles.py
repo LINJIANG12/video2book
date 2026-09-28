@@ -1,24 +1,42 @@
 # -*- coding: utf-8 -*-
-"""B 站字幕 → 块级逐字稿：字幕类型判定 + 中文筛选 + 块内拼装。
+"""B 站字幕 → 块级逐字稿：字幕类型判定 + 中文筛选 + 内容身份校验 + 块内拼装。
 
-本模块**完全离线**：只测纯函数（`_is_ai` / `pick_chinese_subtitle` / `assemble_block_transcript`）
-与两条 CLI 护栏（无登录态、无块清单）。不发任何网络请求，也不依赖开发机的产物目录。
+本模块**完全离线**：只测纯函数（`_is_ai` / `pick_chinese_subtitle` / `subtitle_identity` /
+`subtitle_time_band` / `assemble_block_transcript`）与重试预算（打桩，不发网络请求）。
+串台样本取自工作区真实逐字稿的页面切片，见 `fixtures/subtitle_pages.json`。
 """
 
 from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
 
 import pytest
 
 from src.core import subtitles
 from src.core.subtitles import (
+    IDENTITY_RETRY_MAX,
     SUBTITLE_COVERAGE_MIN,
+    SUBTITLE_OVERRUN_MAX,
     _is_ai,
     _is_chinese,
     assemble_block_transcript,
+    merge_block_transcript,
     pick_chinese_subtitle,
     resolve_course_bvid,
     subtitle_coverage,
+    subtitle_identity,
+    subtitle_time_band,
 )
+
+FIXTURE = json.loads(
+    (Path(__file__).parent / "fixtures" / "subtitle_pages.json").read_text(encoding="utf-8")
+)
+
+
+def _cue_list(entry: dict) -> list:
+    return [{"from": f, "to": t, "content": c} for f, t, c in entry["cues"]]
 
 # 实测两种字幕的真实形态：人工 zh-Hans/type=0，AI ai-zh/type=1；两者的 ai_type/ai_status 都是 0。
 HUMAN_ZH = {
@@ -225,7 +243,7 @@ def test_subtitle_coverage_unknown_duration_does_not_block():
 
 def _假取(序列, 记录):
     """构造 `_取字幕一次` 替身：按序返回 (字幕 or None, 瞬时原因)。"""
-    def _取(bvid, cid, sessdata, keys_file, duration_sec):
+    def _取(bvid, cid, sessdata, keys_file, duration_sec, title="", 课程术语=None):
         记录.append(1)
         return 序列[min(len(记录) - 1, len(序列) - 1)]
     return _取
@@ -268,14 +286,53 @@ def test_retry_gives_up_after_configured_attempts(monkeypatch):
     assert 诊断["attempts"] == 3
 
 
-def test_no_chinese_subtitle_is_not_retried(monkeypatch):
-    """确实没有中文字幕（瞬时原因为空）→ 一次即返回，不烧重试轮次。"""
+def test_empty_transient_reason_is_definitive(monkeypatch):
+    """瞬时原因为空 = 调用方替身表达的"定论性无字幕"→ 一次即返回，不烧重试轮次。
+
+    生产路径不再产生空原因（零轨改走 `REASON_NO_TRACK`，见下一条），
+    这条只锁"空原因仍按定论处理"的契约，供替身与未来调用方使用。
+    """
     记录: list = []
     _monkeypatch_attempt(monkeypatch, [(None, "")], 记录)
 
     诊断: dict = {}
     assert subtitles.fetch_episode_subtitle("BV1x", 1, 次数=4, 诊断=诊断) is None
     assert len(记录) == 1
+    assert 诊断["reason"] == ""
+
+
+def test_zero_track_response_is_retried_with_small_budget(monkeypatch):
+    """零中文轨是**坏抽签**，不是定论：实测 1.4% 的抽次返回零轨，而同集别次正常给轨。
+
+    原先它一次即判死，把有字幕的集误判成"无字幕"。改后可重试，但只给
+    `NO_TRACK_RETRY_MAX` 轮——足够逃出坏抽签，又不会让"整门课没字幕"白等满额退避。
+    """
+    记录: list = []
+    _monkeypatch_attempt(monkeypatch, [(None, subtitles.REASON_NO_TRACK)], 记录)
+
+    诊断: dict = {}
+    assert subtitles.fetch_episode_subtitle("BV1x", 1, 次数=8, 诊断=诊断) is None
+    assert len(记录) == subtitles.NO_TRACK_RETRY_MAX
+    assert len(记录) < 8                                  # 子预算确实比总预算小
+    assert 诊断["reason"].startswith(subtitles.REASON_NO_TRACK)
+    assert 诊断["kind"] == "transient"                     # 不是身份族，不该吃身份预算
+
+
+def test_zero_track_recovers_on_a_later_draw(monkeypatch):
+    """坏抽签之后抽到正常轨 → 必须被接受，这才是"正确字幕不遗漏"。"""
+    正确 = ({"is_ai": True, "lan": "ai-zh", "lan_doc": "", "coverage": 0.99,
+             "trustworthy": True, "audit": {"band": "ok", "url_identity": True},
+             "cues": [{"from": 0.0, "to": 2.0, "content": "正文"}]}, "")
+    记录: list = []
+    _monkeypatch_attempt(monkeypatch, [
+        (None, subtitles.REASON_NO_TRACK),
+        (None, subtitles.REASON_NO_TRACK),
+        正确,
+    ], 记录)
+
+    诊断: dict = {}
+    结果 = subtitles.fetch_episode_subtitle("BV1x", 1, 诊断=诊断)
+    assert 结果 is not None and 结果["attempts"] == 3 and len(记录) == 3
     assert 诊断["reason"] == ""
 
 
@@ -294,15 +351,832 @@ def test_retry_backoff_is_linear_and_only_between_attempts(monkeypatch):
 
 
 def test_attempts_default_reads_env(monkeypatch):
-    monkeypatch.setenv(subtitles.ENV_SUBTITLE_ATTEMPTS, "7")
-    assert subtitles._重试次数() == 7
+    # 上限保护：环境变量只能调低轮数，不能突破 MAX_SUBTITLE_ATTEMPTS
+    monkeypatch.setenv(subtitles.ENV_SUBTITLE_ATTEMPTS, "99")
+    assert subtitles._重试次数() == subtitles.MAX_SUBTITLE_ATTEMPTS
+    monkeypatch.setenv(subtitles.ENV_SUBTITLE_ATTEMPTS, "2")
+    assert subtitles._重试次数() == 2                 # 调低是允许的
     monkeypatch.setenv(subtitles.ENV_SUBTITLE_ATTEMPTS, "0")
-    assert subtitles._重试次数() == 1              # 下限保护，不允许 0 轮
+    assert subtitles._重试次数() == 1                 # 下限保护，不允许 0 轮
     monkeypatch.setenv(subtitles.ENV_SUBTITLE_ATTEMPTS, "abc")
     assert subtitles._重试次数() == subtitles.DEFAULT_SUBTITLE_ATTEMPTS
     monkeypatch.delenv(subtitles.ENV_SUBTITLE_ATTEMPTS, raising=False)
     assert subtitles._重试次数() == subtitles.DEFAULT_SUBTITLE_ATTEMPTS
 
 
+def test_retry_budget_matches_the_measured_hit_rate():
+    """重取轮数按实测命中率定：单次抽中正确轨约 28%，每次抽签独立。
+
+    3 轮只覆盖 63%（37% 的分集会被误判成"无字幕"并白烧听音兜底）；8 轮覆盖 93%。
+    两类故障共用同一上限——URL 失配（约 45% 的坏抽签）属身份族，若给它更小的预算，
+    它就会成为覆盖率的短板。
+    """
+    assert subtitles.MAX_SUBTITLE_ATTEMPTS == 10
+    assert subtitles.DEFAULT_SUBTITLE_ATTEMPTS == 10
+    assert subtitles.IDENTITY_RETRY_MAX == subtitles.MAX_SUBTITLE_ATTEMPTS
+    # 最坏退避 0.5×(1+…+9) = 22.5 秒（末轮不睡，相比原先 67.5s 提速 3 倍）
+    assert subtitles.SUBTITLE_RETRY_BACKOFF_SEC * sum(range(1, 10)) == 22.5
+    p = 0.28
+    cover3 = 1 - (1 - p) ** 3
+    cover10 = 1 - (1 - p) ** 10
+    assert cover3 == pytest.approx(0.627, abs=0.005)   # 3 轮 ≈ 62.7%
+    assert cover10 == pytest.approx(0.963, abs=0.005)  # 10 轮 ≈ 96.3%
+    assert cover10 - cover3 > 0.3
+
+
+# ---------------------------------------------------------------------------
+# URL 身份锚点：B 站 AI 字幕文件名内嵌 `aid+cid`，对不上即服务端串台
+# ---------------------------------------------------------------------------
+
+# 实测抓到的真实样本（2026-09-28）
+_真AID, _真CID = 55114968, 96352452
+_正确URL = "https://aisubtitle.hdslb.com/bfs/ai_subtitle/prod/5511496896352452c86ff134b890/?auth_key=x"
+_串台URL = "https://aisubtitle.hdslb.com/bfs/ai_subtitle/prod/113272330197069262031278346582/?auth_key=x"
+
+
+def test_url_identity_accepts_matching_ai_subtitle_file():
+    assert subtitles.url_identity(_正确URL, _真AID, _真CID) is True
+
+
+def test_url_identity_rejects_cross_video_file():
+    """这是唯一能拦住"时长贴合"串台的判据——两条时长判据会放行这种错件。"""
+    assert subtitles.url_identity(_串台URL, _真AID, _真CID) is False
+
+
+def test_url_identity_requires_both_aid_and_cid():
+    """只比 aid 会漏：aid 为 `55114968x` 的视频产生同前缀碰撞，拼上 cid 才唯一。"""
+    assert subtitles.url_identity(_正确URL, _真AID, 99999999) is False
+
+
+def test_url_identity_is_inconclusive_for_human_tracks_and_missing_aid():
+    """人工 CC 不走 `/prod/`、拿不到 aid 时判据不适用——必须放行，不能拦。"""
+    assert subtitles.url_identity("https://i0.hdslb.com/bfs/subtitle/abc.json", _真AID, _真CID) is None
+    assert subtitles.url_identity(_正确URL, None, _真CID) is None
+    assert subtitles.url_identity(_正确URL, "", _真CID) is None
+
+
+def test_url_mismatch_is_classified_as_identity_failure():
+    """URL 失配要进身份族，才能复用重试预算与 kind 分类。"""
+    assert subtitles._身份故障(f"{subtitles.REASON_URL_MISMATCH}（文件名 11327233…）") is True
+
+
+# ---------------------------------------------------------------------------
+# 接受路径接线：锚点必须真的挂在 `_取字幕一次` 上，而不是只当一个纯函数存在
+# ---------------------------------------------------------------------------
+
+_本集时长 = 568.0
+
+
+def _假播放器(monkeypatch, *, aid=_真AID, cid=_真CID, bvid="BV1H4411N7oD", url=_正确URL,
+              lan="ai-zh", 轨类型=1):
+    """替身到接口层：让 `_取字幕一次` 的接受路径真实跑一遍。
+
+    `轨类型` 默认 1（实测 AI 轨的 `type`），人工轨传 0——`_is_ai` 的三条判据之一是
+    `type == 1`，人工轨给它 1 会被判成 AI 并被套上越界上界。
+    """
+    monkeypatch.setattr(subtitles, "_取播放器数据", lambda *a, **k: {
+        "code": 0,
+        "data": {
+            "aid": aid, "cid": cid, "bvid": bvid,
+            "subtitle": {"subtitles": [
+                {"lan": lan, "lan_doc": "中文", "subtitle_url": url, "type": 轨类型},
+            ]},
+        },
+    })
+
+
+def _假正文(monkeypatch, 末条秒, 首句="正文"):
+    monkeypatch.setattr(subtitles, "_请求元数据", lambda *a, **k: {
+        "body": [{"from": 0.0, "to": 2.0, "content": 首句},
+                 {"from": max(0.0, 末条秒 - 2), "to": 末条秒, "content": "末句"}],
+    })
+
+
+def test_accept_path_rejects_duration_fitted_cross_video_file(monkeypatch):
+    """**核心回归**：串台文件时长贴合本集时，两条时长判据都会放行它。
+
+    实测样本：某次抽到的错件覆盖率 98.3%（476.62s/485s），落在 [0.9, 1.1] 内——
+    只有 URL 锚点能拦住。这条测试锁死"锚点必须挂在接受路径上"。
+    """
+    _假播放器(monkeypatch, url=_串台URL)
+    _假正文(monkeypatch, 末条秒=_本集时长 * 0.98, 首句="good good li加me")
+    字幕, 原因 = subtitles._取字幕一次("BV1H4411N7oD", _真CID, None, None, _本集时长, "P01")
+    assert 字幕 is None
+    assert 原因.startswith(subtitles.REASON_URL_MISMATCH)
+    # 前提校验：这份错件的时长确实在时长判据的放行带内，否则本测试证明不了锚点的必要性
+    assert subtitles.SUBTITLE_COVERAGE_MIN <= 0.98 <= subtitles.SUBTITLE_OVERRUN_MAX
+
+
+def test_accept_path_takes_matching_file(monkeypatch):
+    _假播放器(monkeypatch, url=_正确URL)
+    _假正文(monkeypatch, 末条秒=_本集时长 * 0.997, 首句="我们这门课的名字呢叫做数据结构基础")
+    字幕, 原因 = subtitles._取字幕一次("BV1H4411N7oD", _真CID, None, None, _本集时长, "P01")
+    assert 原因 == ""
+    assert 字幕 is not None and 字幕["audit"]["url_identity"] is True
+
+
+def test_accept_path_leaves_human_track_to_time_checks(monkeypatch):
+    """人工 CC 不走 `/prod/`，锚点不适用 → 必须靠时长判据放行，不能被误杀。"""
+    _假播放器(monkeypatch, url="https://i0.hdslb.com/bfs/subtitle/abc.json", lan="zh-CN", 轨类型=0)
+    _假正文(monkeypatch, 末条秒=_本集时长 * 0.99)
+    字幕, 原因 = subtitles._取字幕一次("BV1H4411N7oD", _真CID, None, None, _本集时长, "P01")
+    assert 原因 == "" and 字幕 is not None
+    assert 字幕["audit"]["url_identity"] is None
+    assert 字幕["is_ai"] is False
+
+
+def test_accept_path_still_rejects_overrun_and_truncated(monkeypatch):
+    """锚点上线的同时，原有两条时长判据不能被绕过。"""
+    _假播放器(monkeypatch, url=_正确URL)
+    _假正文(monkeypatch, 末条秒=_本集时长 * 3.02)
+    字幕, 原因 = subtitles._取字幕一次("BV1H4411N7oD", _真CID, None, None, _本集时长, "P01")
+    assert 字幕 is None and 原因.startswith(subtitles.REASON_TIME_OVERRUN)
+
+    _假正文(monkeypatch, 末条秒=_本集时长 * 0.5)
+    字幕, 原因 = subtitles._取字幕一次("BV1H4411N7oD", _真CID, None, None, _本集时长, "P01")
+    assert 字幕 is None and 原因.startswith("覆盖不足")
+
+
+def test_accept_path_fails_open_without_aid(monkeypatch):
+    """响应缺 aid 时锚点判据不适用 → 放行给时长判据，不能被字段缺失阻塞。"""
+    _假播放器(monkeypatch, aid=None, url=_串台URL)
+    _假正文(monkeypatch, 末条秒=_本集时长 * 0.98)
+    字幕, 原因 = subtitles._取字幕一次("BV1H4411N7oD", _真CID, None, None, _本集时长, "P01")
+    assert 字幕 is not None and 字幕["audit"]["url_identity"] is None
+
+
+def test_wbi_auto_sticky_downgrade_on_first_failure(monkeypatch):
+    """**粘性降级**：auto 模式下首集若遇 412，必须一次性降级并记忆，后续分集直连老端点。
+
+    避免 145 集每集都在 WBI 上白白重试 14 秒（全课程立省 33+ 分钟）。
+    """
+    subtitles.reset_wbi_degraded()
+    monkeypatch.delenv(subtitles.ENV_SUBTITLE_ENDPOINT, raising=False)
+    请求记录 = []
+
+    def _假请求元数据(url, headers, 超时=15, 重试=True):
+        请求记录.append({"url": url, "重试": 重试})
+        if "wbi" in url:
+            raise RuntimeError("[风控]元数据接口被风控拦截（412）")
+        return {"code": 0, "data": {"cid": 1, "bvid": "BV1", "subtitle": {"subtitles": []}}}
+
+    monkeypatch.setattr(subtitles, "_请求元数据", _假请求元数据)
+    # 第 1 集：探测 WBI，瞬间捕获 412，降级并记入粘性标记
+    subtitles._取播放器数据("BV1", 1, None, None)
+    assert len(请求记录) == 2
+    assert "wbi" in 请求记录[0]["url"] and 请求记录[0]["重试"] is False  # 探测禁用重试
+    assert "player/v2" in 请求记录[1]["url"]
+
+    # 第 2 集：粘性标记生效，直接打老端点，不再尝试 WBI
+    请求记录.clear()
+    subtitles._取播放器数据("BV1", 2, None, None)
+    assert len(请求记录) == 1
+    assert "player/v2" in 请求记录[0]["url"]
+    assert "wbi" not in 请求记录[0]["url"]
+    subtitles.reset_wbi_degraded()
+
+
+# ---------------------------------------------------------------------------
+# 内容身份：字幕正文必须对得上本集（实测串台样本见 fixtures/subtitle_pages.json）
+# ---------------------------------------------------------------------------
+
+def test_cross_talk_samples_pass_length_gate_but_fail_identity():
+    """这批坏页就是被"覆盖率 ≥ 90%"放行的：串台文件长度铺满整集，长度判据永远抓不到。"""
+    for entry in FIXTURE["cross_talk"]:
+        cues = _cue_list(entry)
+        覆盖 = subtitle_coverage(cues, entry["duration"])
+        assert 覆盖 >= SUBTITLE_COVERAGE_MIN, f"P{entry['page']} 应当被长度判据放行（复现原故障）"
+        对得上, 原因 = subtitle_identity(cues, entry["title"])
+        assert 对得上 is False, f"P{entry['page']}（{entry['source']}）必须判为不是本集"
+        assert "标题" in 原因
+
+
+def test_term_ranking_cannot_separate_same_course_drift():
+    """**负结果固化**：术语排名分不开同课程串台，所以它不能当门禁。
+
+    实测（224 块真实字幕稿全量跑）：
+        合法（本集标题）   排名≤1 34.1% | ≤2 51.2% | ≤5 70.1%
+        注入同课程漂移     排名≤1 16.5% | ≤2 33.5% | ≤5 51.0%
+    两条分布几乎重合，没有可用工作点：取 ≤1 误杀 66% 合法块，取 ≤5 仍误杀 30% 却只抓到
+    49%。原因是真实课程里相邻集本来就互相提及，标题术语又只有 2~4 字且大量重叠。
+
+    这个测试存在是为了**挡住"再加一张区分票"的复发**：它断言 fixture 里那两条同课程串台
+    的 own_rate 与最优他集 rate 与"用词差异"的正常页处在同一量级——即判据在原理上不成立，
+    不是阈值没调好。真要解决同课程串台，得靠内容级对齐（本集课纲关键词），或继续用
+    时长越界这一唯一实测有效的信号。
+    """
+    data = FIXTURE
+    titles = data["course_titles"]
+    terms = data["course_top_terms"]
+
+    def cues(entry):
+        return [{"from": c[0], "to": c[1], "content": c[2]} for c in entry["cues"]]
+
+    drift = [subtitles.distinctive_title(cues(e), e["title"], titles, terms)[2]
+             for e in data["same_course_cross_talk"]]
+    variant = [subtitles.distinctive_title(cues(e), e["title"], titles, terms)[2]
+               for e in data["title_variant"] + data["variant_windows"]]
+
+    assert drift and variant, "fixture 缺少同课程串台或正常页样本"
+    # 串台页的"最优他集"强度落在正常页的区间内 → 无阈值可分离
+    for d, v in zip(drift, variant):
+        assert (d.get("best_rate") or 0) <= max((x.get("best_rate") or 0) for x in variant), (
+            f"出现可分离信号，请重新评估区分票：drift={d} variant_best_max="
+            f"{max((x.get('best_rate') or 0) for x in variant)}"
+        )
+
+
+@pytest.mark.parametrize("entry", FIXTURE["legit"], ids=lambda e: f"P{e['page']}")
+def test_identity_accepts_normal_pages(entry):
+    """正常页零误伤：标题术语在正文里出现若干次（实测命中 12~117 次）。"""
+    对得上, 原因 = subtitle_identity(_cue_list(entry), entry["title"])
+    assert 对得上 is True and 原因 == ""
+
+
+def test_identity_rejects_single_short_term_hit():
+    """实测形态：串台短剧里恰好冒出一次「罪名」（标题「普通罪名」的第二术语）——
+    单次两字词命中不算数，否则整页串台照常放行。"""
+    短剧 = [{"from": 0.0, "to": 2.0, "content": "女人刑满释放20年的牢狱"},
+           {"from": 1900.0, "to": 1902.0, "content": "一辈子都摆脱不了这个罪名"}]
+    对得上, 原因 = subtitle_identity(短剧, "第23讲：渎职罪 第02节：普通罪名")
+    assert 对得上 is False and "罪名 1 次" in 原因
+    # 同样的两字词，命中 ≥2 次即算真的在讲本集
+    assert subtitle_identity([{"from": 0.0, "to": 2.0, "content": "罪名的分类与罪名的认定"}],
+                             "第23讲：渎职罪 第02节：普通罪名")[0] is True
+    # 长术语（≥3 字）命中一次即算数
+    assert subtitle_identity([{"from": 0.0, "to": 2.0, "content": "渎职罪的构成"}],
+                             "第23讲：渎职罪 第02节：普通罪名")[0] is True
+
+
+def test_course_vote_rescues_title_wording_variants():
+    """标题用词与讲师说法不同的正常页（实测 3 例）：只有标题票会误判成串台，
+    补上课程术语票后必须放行——否则每次跑都要白烧一次音频兜底。"""
+    术语 = set(FIXTURE["course_top_terms"])
+    assert 术语, "fixture 应带课程高频术语表"
+    for entry in FIXTURE["title_variant"]:
+        重叠 = len(set(entry["page_top_terms"]) & 术语)
+        assert 重叠 >= subtitles.COURSE_OVERLAP_MIN, \
+            f"P{entry['page']}（{entry['source']}）课程票应通过，实测重叠 {重叠}"
+    for entry in FIXTURE["variant_windows"]:
+        cues = _cue_list(entry)
+        assert subtitle_identity(cues, entry["title"])[0] is False, f"P{entry['page']} 只有标题票时应判不可用"
+        assert subtitle_identity(cues, entry["title"], FIXTURE["course_top_terms"])[0] is True, \
+            f"P{entry['page']} 有课程票时应放行"
+
+
+def test_course_vote_rejects_cross_talk_on_real_page_profiles():
+    """串台页的页高频术语与课程骨架几乎不重叠（实测 0~1），补上课程票也照样判不可用。"""
+    术语 = set(FIXTURE["course_top_terms"])
+    for entry in FIXTURE["cross_talk"] + FIXTURE["cross_talk_extra"]:
+        重叠 = len(set(entry["page_top_terms"]) & 术语)
+        assert 重叠 < subtitles.COURSE_OVERLAP_MIN, \
+            f"P{entry['page']}（{entry['source']}）课程票不该通过，实测重叠 {重叠}"
+
+
+def test_course_terms_and_overlap_second_vote():
+    """第二票：标题用词与讲师说法不同（实测「枪支类犯罪」→ 讲师说「枪支犯罪」）时，
+    只要内容还落在这门课的词频骨架上就不该判串台；真串台则两票都不过。"""
+    课程 = ["狗蛋构成故意杀人罪，既遂与未遂的判断", "犯罪构成要件与客观归责，狗蛋儿",
+            "小芳与铁牛的共同犯罪，责任形式", "盗窃罪的既遂标准与数额认定",
+            "主观故意与客观行为的对应关系，狗蛋"]
+    术语 = subtitles.course_terms(课程)          # 默认 top=30，与生产一致
+    assert {"狗蛋", "既遂"} & set(术语), f"课程高频术语应含课程骨架词：{术语}"
+
+    # 标题写「枪支类犯罪」、讲师说「枪支犯罪」——标题票不中，课程票中 → 放行
+    正常页 = [{"from": 0.0, "to": 2.0, "content": "接下来就是第五节枪支犯罪"},
+            {"from": 300.0, "to": 302.0, "content": "枪支犯罪的既遂与故意认定，狗蛋这个案件"}]
+    assert subtitles.course_overlap(正常页, 术语) >= subtitles.COURSE_OVERLAP_MIN
+    assert subtitle_identity(正常页, "第19讲 第05节：枪支类犯罪", 术语)[0] is True
+    # 同一个页面若无课程参照（只有标题一票），会被判不可用——这正是需要第二票的原因
+    assert subtitle_identity(正常页, "第19讲 第05节：枪支类犯罪")[0] is False
+
+    # 真串台：标题票不中 + 与课程术语零重叠 → 两票都不过
+    串台页 = [{"from": 0.0, "to": 2.0, "content": "大家好，今年 iPhone 16 的续航实测"},
+            {"from": 100.0, "to": 102.0, "content": "屏幕刷新率和充电功率都没什么变化"}]
+    assert subtitles.course_overlap(串台页, 术语) < subtitles.COURSE_OVERLAP_MIN
+    assert subtitle_identity(串台页, "第19讲 第05节：枪支类犯罪", 术语)[0] is False
+
+
+def test_course_terms_empty_when_no_reference():
+    assert subtitles.course_terms([]) == []
+    assert subtitles.course_overlap([{"from": 0.0, "content": "狗蛋"}], []) == 0
+
+
+def test_identity_lets_through_empty_body():
+    """没有正文时不做身份判据（空正文由调用方按"正文为空"的瞬时故障处理）。"""
+    assert subtitle_identity([], "第20讲 第02节：走私犯罪") == (True, "")
+
+
+def test_identity_accepts_page_with_in_lecture_music():
+    """页内含英文歌词是合法素材（课间音乐），不得误判成串台。"""
+    entry = FIXTURE["in_lecture_media"][0]
+    assert any("♪" in c[2] or re.search(r"[A-Za-z]{3,}", c[2]) for c in entry["cues"]), "样本里应含外文行"
+    assert subtitle_identity(_cue_list(entry), entry["title"])[0] is True
+
+
+def test_identity_lets_through_titles_without_terms():
+    """标题没有实词（纯「第01节」一类）→ 判据让路，只保留原有长度判据，不误伤。"""
+    cues = [{"from": 0.0, "to": 3.0, "content": "随便什么正文"}]
+    assert subtitle_identity(cues, "第01节") == (True, "")
+    assert subtitle_identity(cues, "") == (True, "")
+
+
+def test_identity_tolerates_word_boundary_variance():
+    """标题「法律拟定」而讲师全程说「法律拟制」：按"任一术语/子窗命中"判定，不因单个词失配误拒。"""
+    cues = [{"from": 0.0, "to": 3.0, "content": "注意规定与法律拟制的区分"}]
+    assert subtitle_identity(cues, "第16讲 第02节：注意规定与法律拟定")[0] is True
+    # 子窗容忍：标题 7 字长术语，正文只念出后半截
+    assert subtitle_identity([{"from": 0.0, "to": 3.0, "content": "国家安全罪的构成"}],
+                             "第24讲：危害国家安全罪")[0] is True
+
+
+# ---------------------------------------------------------------------------
+# 时长带：截断（下限）与越界（上限，仅 ai 轨）
+# ---------------------------------------------------------------------------
+
+def test_time_band_marks_truncation_and_overrun():
+    assert subtitle_time_band(0.5, True) == "short"
+    assert subtitle_time_band(0.99, True) == "ok"
+    assert subtitle_time_band(1.05, True) == "warn"       # 轻微越界：采用但标注不可信
+    assert subtitle_time_band(1.5, True) == "overrun"     # 判串台
+    # 时长未知时覆盖度返回 1.0（无法判断就不拦）
+    assert subtitle_time_band(subtitle_coverage([{"from": 3.0}], 0.0), True) == "ok"
+
+
+def test_time_band_upper_bound_is_ai_only():
+    """上界只对 ai 轨生效：人工 CC 可能有片尾冗余，不因此判串台。"""
+    assert subtitle_time_band(1.5, False) == "ok"
+    assert subtitle_time_band(0.5, False) == "short"
+
+
+@pytest.mark.parametrize("entry", FIXTURE["overrun"], ids=lambda e: f"P{e['page']}")
+def test_overrun_samples_are_rejected_by_upper_bound(entry):
+    """实测越界样本：「分体水冷」2937/973、「惠普维修」357/248。"""
+    覆盖 = subtitle_coverage(_cue_list(entry), entry["duration"])
+    assert 覆盖 > SUBTITLE_OVERRUN_MAX
+    assert subtitle_time_band(覆盖, True) == "overrun"
+
+
+def test_coverage_prefers_to_over_from():
+    """末端以 to 为准：只有 from 的旧正文仍按 from 兜底。"""
+    assert subtitle_coverage([{"from": 10.0, "to": 12.0}], 20.0) == pytest.approx(0.6)
+    assert subtitle_coverage([{"from": 10.0, "to": 0.0}], 20.0) == pytest.approx(0.5)
+
+
+# ---------------------------------------------------------------------------
+# 身份类故障的重试预算（实测：同一 cid 重取会随机拿到正确内容，重试有实效）
+# ---------------------------------------------------------------------------
+
+def test_identity_failure_uses_its_own_retry_budget(monkeypatch):
+    记录: list = []
+    # 用「时长越界」：标题术语身份判据已删除，它是接受路径上**仅存**的身份类原因。
+    # 轮数按常量推导而非写死数字——常量从 3 抬到 12 后，固定写 8 会让封顶不再生效。
+    _monkeypatch_attempt(monkeypatch, [(None, "时长越界（末条 2937s / 时长 973s = 302%）")], 记录)
+    诊断: dict = {}
+    assert subtitles.fetch_episode_subtitle("BV1x", 1, 次数=IDENTITY_RETRY_MAX + 5, 诊断=诊断) is None
+    assert len(记录) == IDENTITY_RETRY_MAX      # 身份类按自己的预算收手，早于总轮数
+    assert 诊断["reason"].startswith("时长越界")
+    assert 诊断["kind"] == "identity"
+
+
+def test_retry_accepts_correct_content_from_a_later_round(monkeypatch):
+    """实测 P91：三次里有一次拿回正确字幕（课程片头+正文）。后一轮的成功要被接受。"""
+    正确 = ({"is_ai": True, "lan": "ai-zh", "lan_doc": "", "coverage": 1.0,
+             "cues": [{"from": 0.0, "to": 2.0, "content": "应试还得技术流"}], "trustworthy": True,
+             "audit": {"title_hits": 3}}, "")
+    记录: list = []
+    _monkeypatch_attempt(monkeypatch, [
+        (None, "内容与分集标题不符（走私犯罪 命中 0 次）"),
+        (None, "时长越界（末条 2937s / 时长 973s = 302%）"),
+        正确,
+    ], 记录)
+
+    诊断: dict = {}
+    结果 = subtitles.fetch_episode_subtitle("BV1x", 1, 次数=4, 诊断=诊断)
+    assert 结果 is not None and 结果["attempts"] == 3 and len(记录) == 3
+    assert 诊断["reason"] == "" and 诊断["coverage"] == 1.0
+
+
+def test_time_band_overrun_reason_is_classified_as_identity():
+    assert subtitles._身份故障("时长越界（末条 2937s / 时长 973s = 302%）") is True
+    assert subtitles._身份故障("内容与分集标题不符（走私犯罪 命中 0 次）") is True
+    assert subtitles._身份故障("覆盖不足（82%）") is False
+    assert subtitles._身份故障("地址为空") is False
+    assert subtitles._身份故障("") is False
+
+
+def test_chinese_candidates_keep_preference_order():
+    """候选轨逐个验身份：人工优先、简体优先的顺序不变。"""
+    繁体 = {**HUMAN_ZH, "lan": "zh-Hant", "lan_doc": "中文（繁體）"}
+    assert [c["lan"] for c in subtitles.chinese_subtitle_candidates([EN_US, AI_ZH, 繁体, HUMAN_ZH])] == \
+        ["zh-Hans", "zh-Hant", "ai-zh"]
+    assert subtitles.chinese_subtitle_candidates([EN_US]) == []
+
+
+# ---------------------------------------------------------------------------
+# 抬头核验行（取回结论要写在产物里，人工复核才有据可查）
+# ---------------------------------------------------------------------------
+
+def _带核验(is_ai: bool, coverage: float, trustworthy: bool, attempts: int) -> dict:
+    return {**_sub(is_ai, [(1.0, "正文")]), "coverage": coverage, "trustworthy": trustworthy,
+            "attempts": attempts, "audit": {"band": "ok"}}
+
+
+def _双页块() -> dict:
+    return {
+        "block_id": 5, "span": "P90-P91", "episodes": [90, 91],
+        "units": [_unit(90, "P90"), _unit(91, "P91")],
+        "segments": [_seg(90, "P90", 0.0, 100.0), _seg(91, "P91", 100.0, 100.0)],
+    }
+
+
+def test_assemble_verification_line_reports_coverage_and_rounds():
+    text = assemble_block_transcript(_双页块(), {
+        90: _带核验(True, 0.99, True, 2),
+        91: _带核验(True, 0.97, True, 1),
+    })["text"]
+    assert "核验：时间轴判据通过（覆盖 97.0%–99.0%）" in text
+    assert "取回 1–2 轮" in text
+    # 标题术语身份判据已删除，抬头不得再出现"标题身份通过"
+    assert "标题身份" not in text and "术语命中" not in text
+
+
+def test_assemble_verification_line_flags_untrustworthy_page():
+    text = assemble_block_transcript(_双页块(), {
+        90: _带核验(True, 0.99, True, 1),
+        91: _带核验(True, 1.05, False, 3),
+    })["text"]
+    assert "⚠ 核验" in text and "P91" in text and "不可信来源" in text
+
+
+# ---------------------------------------------------------------------------
+# 按集兜底：部分成功装配 + 与听音补录稿合并
+# ---------------------------------------------------------------------------
+
+def test_partial_assembly_keeps_available_pages():
+    """`allow_partial=True`：取到字幕的集照常拼装，缺的集只记账、不整块作废。
+
+    这是「只对失败分集转录」的地基——历史上任缺一集就整块 `ok=False`、`text=""`。
+    """
+    结果 = assemble_block_transcript(_双页块(), {90: _带核验(True, 0.99, True, 1), 91: None},
+                                    allow_partial=True)
+    assert 结果["ok"] is True
+    assert 结果["missing_pages"] == [91]
+    assert 结果["page_sources"] == {90: "subtitle", 91: "missing"}
+    assert "正文" in 结果["text"]                 # P90 的内容在
+    assert "不完整" in 结果["text"] and "P91" in 结果["text"]   # 抬头如实声明缺口
+
+
+def test_partial_assembly_is_opt_in():
+    """默认仍是整块语义：任缺一集就 ok=False、text=""（历史行为不能悄悄变）。"""
+    结果 = assemble_block_transcript(_双页块(), {90: _带核验(True, 0.99, True, 1), 91: None})
+    assert 结果["ok"] is False and 结果["text"] == "" and 结果["missing_pages"] == [91]
+
+
+def test_merge_orders_pages_and_declares_per_page_sources():
+    """合并稿按块内顺序排列，抬头逐集声明来源——这是"只转录失败集"的成品。"""
+    部分 = assemble_block_transcript(_双页块(), {90: _带核验(True, 0.99, True, 1), 91: None},
+                                     allow_partial=True)
+    合并 = merge_block_transcript(_双页块(), 部分, {91: "第九十一集的听音转录正文"})
+    assert 合并["ok"] is True and 合并["missing_pages"] == []
+    assert 合并["page_sources"] == {90: "subtitle", 91: "audio"}
+    # 顺序：P90 的字幕在先，P91 的听音在后
+    assert 合并["text"].index("正文") < 合并["text"].index("第九十一集")
+    assert "混合（B 站字幕 + 听音转录）" in 合并["text"]
+    assert "P91" in 合并["text"]
+
+
+def test_merge_is_incomplete_until_every_missing_page_arrives():
+    """补录还没回来时，合并稿必须标为不完整，不能冒充成品。"""
+    部分 = assemble_block_transcript(_双页块(), {90: _带核验(True, 0.99, True, 1), 91: None},
+                                     allow_partial=True)
+    合并 = merge_block_transcript(_双页块(), 部分, {})
+    assert 合并["ok"] is False and 合并["missing_pages"] == [91]
+    assert "仍缺分集" in 合并["text"]
+
+
+def test_merged_transcript_is_classified_as_mixed(tmp_path):
+    """混合稿必须被判成 `mixed`：`--force` 时它的听音段无法用字幕重建，不能被覆盖。"""
+    部分 = assemble_block_transcript(_双页块(), {90: _带核验(True, 0.99, True, 1), 91: None},
+                                     allow_partial=True)
+    合并 = merge_block_transcript(_双页块(), 部分, {91: "听音正文"})
+    路径 = tmp_path / "BLK05_P90-P91_逐字稿.md"
+    路径.write_text(合并["text"], encoding="utf-8")
+    assert subtitles.transcript_source(路径) == "mixed"
+
+
+def test_single_source_headers_still_classify_as_before(tmp_path):
+    """混合判定不能把原有的两种单一来源判反。"""
+    纯字幕 = tmp_path / "sub.md"
+    纯字幕.write_text("# x\n\n> 来源：**B 站字幕（中文·AI 自动生成）**——非听音转录，由平台字幕直接拼装。\n",
+                      encoding="utf-8")
+    assert subtitles.transcript_source(纯字幕) == "subtitle"
+    纯听音 = tmp_path / "aud.md"
+    纯听音.write_text("# x\n\n> 来源：**听音转录**——非平台字幕，由讲师原声转录\n", encoding="utf-8")
+    assert subtitles.transcript_source(纯听音) == "audio"
+
+
+
+
+
+# ---------------------------------------------------------------------------
+# 字幕阶段服务：被判不可用的分集留原因、整块转音频、标题照传
+# ---------------------------------------------------------------------------
+
+def _服务块() -> dict:
+    return {
+        "block_id": 1, "span": "P01-P02", "episodes": [1, 2], "title": "测试块",
+        "units": [_unit(1, "P01"), _unit(2, "P02")],
+        "segments": [_seg(1, "P01", 0.0, 100.0), _seg(2, "P02", 100.0, 100.0)],
+    }
+
+
+def test_subtitle_service_records_reason_and_routes_block_to_audio(tmp_path, monkeypatch):
+    from src.core.subtitle_service import SubtitleService
+    from src.core.workspace import TaskWorkspace
+
+    ws = TaskWorkspace("t-case", base_dir=tmp_path)
+    plan = {
+        "source": {"parts": [
+            {"page": 1, "cid": 11, "duration": 100.0, "bvid": "BV1r8mxYNECZ",
+             "title": "第01讲 第01节：刑法的解释"},
+            {"page": 2, "cid": 22, "duration": 100.0, "bvid": "BV1r8mxYNECZ",
+             "title": "第01讲 第02节：走私犯罪"},
+        ]},
+        "blocks": [_服务块()],
+    }
+    调用: list = []
+
+    def _假取(bvid, cid, sessdata=None, keys_file=None, duration_sec=0.0, title="", 课程术语=None, 诊断=None):
+        调用.append({"cid": cid, "title": title, "duration": duration_sec})
+        if cid == 11:
+            return {"is_ai": True, "lan": "ai-zh", "lan_doc": "", "coverage": 0.99, "trustworthy": True,
+                    "audit": {"title_hits": 9, "band": "ok"}, "cues": [{"from": 0.0, "to": 2.0, "content": "甲"}]}
+        if 诊断 is not None:
+            诊断.update(reason="内容与分集标题不符（走私犯罪 0 次）", attempts=3, coverage=0.0, kind="identity")
+        return None
+
+    monkeypatch.setattr(subtitles, "fetch_episode_subtitle", _假取)
+    结果 = SubtitleService.run(ws, {}, plan, sessdata="x", force=True)
+
+    assert [c["title"] for c in 调用] == ["第01讲 第01节：刑法的解释", "第01讲 第02节：走私犯罪"]
+    assert 结果["needs_audio"] == [1] and 结果["subtitle_ready"] == []
+    assert 结果["unavailable"] == [{"page": 2, "title": "第01讲 第02节：走私犯罪",
+                                    "reason": "内容与分集标题不符（走私犯罪 0 次）",
+                                    "kind": "identity", "attempts": 3}]
+    assert not (ws.subtitles_dir / "BLK01_P01-P02_逐字稿.md").exists()   # 有页判不可用 → 整块不落盘
+
+
+def test_subtitle_service_writes_transcript_when_all_pages_pass(tmp_path, monkeypatch):
+    from src.core.subtitle_service import SubtitleService
+    from src.core.workspace import TaskWorkspace
+
+    ws = TaskWorkspace("t-case2", base_dir=tmp_path)
+    plan = {
+        "source": {"parts": [
+            {"page": 1, "cid": 11, "duration": 100.0, "bvid": "BV1r8mxYNECZ",
+             "title": "第01讲 第01节：刑法的解释"},
+            {"page": 2, "cid": 22, "duration": 100.0, "bvid": "BV1r8mxYNECZ",
+             "title": "第01讲 第02节：走私犯罪"},
+        ]},
+        "blocks": [_服务块()],
+    }
+
+    def _假取(bvid, cid, sessdata=None, keys_file=None, duration_sec=0.0, title="", 课程术语=None, 诊断=None):
+        return {"is_ai": True, "lan": "ai-zh", "lan_doc": "", "coverage": 0.99, "trustworthy": True,
+                "attempts": 1, "audit": {"band": "ok"},
+                "cues": [{"from": 0.0, "to": 2.0, "content": "正文"}]}
+
+    monkeypatch.setattr(subtitles, "fetch_episode_subtitle", _假取)
+    结果 = SubtitleService.run(ws, {}, plan, sessdata="x", force=True)
+
+    assert 结果["subtitle_ready"] == [1] and 结果["needs_audio"] == []
+    正文 = (ws.subtitles_dir / "BLK01_P01-P02_逐字稿.md").read_text(encoding="utf-8")
+    assert "核验：时间轴判据通过（覆盖 99.0%–99.0%）" in 正文 and "取回 1–1 轮" in 正文
+
+
 # ---------------------------------------------------------------------------
 # CLI 入口已收敛到 pipeline；字幕底层与重试契约由本文件纯函数测试覆盖。
+
+# 换行常量：测试正文里要拼多行文本，直接用 chr(10) 免得反斜杠被各层转义吃掉。
+NL = chr(10)
+NL2 = chr(10) * 2
+
+# ---------------------------------------------------------------------------
+# 来源方向性：`--force` 不得把听音稿降级成字幕稿
+# ---------------------------------------------------------------------------
+
+AUDIO_TRANSCRIPT = (
+    "好，今天我要講的是用於編程和軟件開發的 agent。" + NL2 +
+    "在座各位應該很多人，甚至所有人都在用 coding agent。它們底層的功能是什麼，"
+    "我基本不用多講。但我想聊聊我們怎麼構建 coding agent。" + NL
+)
+
+SUBTITLE_TRANSCRIPT = (
+    "# BLK01 P01-P02 块级逐字稿" + NL2 +
+    "> 来源：**B 站字幕（中文·AI 自动生成）**——非听音转录，由平台字幕直接拼装。" + NL +
+    "> 字幕由平台生成或上传，可能存在识别错误、断句与专业术语偏差。" + NL2 +
+    "[00:00] 好今天我要讲的是用于编程和软件开发的agent" + NL +
+    "[00:05] 在座各位应该很多人都用coding agent" + NL
+)
+
+
+@pytest.mark.parametrize("text, expected", [
+    (AUDIO_TRANSCRIPT, "audio"),                      # 无抬头、无时间戳 → 听音稿
+    (SUBTITLE_TRANSCRIPT, "subtitle"),                # 有来源抬头 + 时间戳 → 字幕稿
+    ("# BLK01 P01 块级逐字稿" + NL2 + "[00:01] 只有时间戳也能认出字幕稿" + NL, "subtitle"),
+    ("> 来源：**听音转录**——非平台字幕" + NL2 + "正文。" + NL, "audio"),
+    ("", "unknown"),
+])
+def test_transcript_source_detection(tmp_path, text, expected):
+    """来源判定是防降级的前提：判错了要么白拦、要么放过降级。"""
+    path = tmp_path / "t.md"
+    path.write_text(text, encoding="utf-8")
+    assert subtitles.transcript_source(path) == expected
+
+
+def test_transcript_source_missing_file_is_unknown(tmp_path):
+    assert subtitles.transcript_source(tmp_path / "nope.md") == "unknown"
+
+
+def _降级用例(tmp_path, monkeypatch, 已有: str, **run_kw):
+    from src.core.subtitle_service import SubtitleService
+    from src.core.workspace import TaskWorkspace
+
+    ws = TaskWorkspace("t-downgrade", base_dir=tmp_path)
+    plan = {
+        "source": {"parts": [
+            {"page": 1, "cid": 11, "duration": 100.0, "bvid": "BV1r8mxYNECZ",
+             "title": "第01讲 第01节：刑法的解释"},
+            {"page": 2, "cid": 22, "duration": 100.0, "bvid": "BV1r8mxYNECZ",
+             "title": "第01讲 第02节：走私犯罪"},
+        ]},
+        "blocks": [_服务块()],
+    }
+    target = ws.subtitles_dir / "BLK01_P01-P02_逐字稿.md"
+    ws.subtitles_dir.mkdir(parents=True, exist_ok=True)
+    target.write_text(已有, encoding="utf-8")
+
+    def _假取(bvid, cid, sessdata=None, keys_file=None, duration_sec=0.0, title="", 课程术语=None, 诊断=None):
+        return {"is_ai": True, "lan": "ai-zh", "lan_doc": "", "coverage": 0.99, "trustworthy": True,
+                "attempts": 1, "audit": {"title_hits": 9, "band": "ok", "title_terms": 1},
+                "cues": [{"from": 0.0, "to": 2.0, "content": "字幕正文"}]}
+
+    monkeypatch.setattr(subtitles, "fetch_episode_subtitle", _假取)
+    结果 = SubtitleService.run(ws, {}, plan, sessdata="x", force=True, **run_kw)
+    return 结果, target
+
+
+def test_force_refuses_to_downgrade_audio_transcript(tmp_path, monkeypatch):
+    """`--force` 遇到听音稿必须拒绝覆盖——实测发生过不可逆降级（45721 → 53923 字节，
+    繁体成段变成简体逐句时间戳）。"""
+    结果, target = _降级用例(tmp_path, monkeypatch, AUDIO_TRANSCRIPT)
+    assert target.read_text(encoding="utf-8") == AUDIO_TRANSCRIPT, "听音稿被字幕稿覆盖了"
+    assert [项["block_id"] for 项 in 结果["kept_audio"]] == [1]
+    assert "allow_downgrade" not in 结果["kept_audio"][0]["reason"].replace("--allow-downgrade", "")
+    assert 结果["subtitle_ready"] == [1]
+
+
+def test_force_overwrites_when_downgrade_explicitly_allowed(tmp_path, monkeypatch):
+    """显式 `--allow-downgrade` 才放手——这是唯一的逃生门。"""
+    结果, target = _降级用例(tmp_path, monkeypatch, AUDIO_TRANSCRIPT, allow_downgrade=True)
+    assert "字幕正文" in target.read_text(encoding="utf-8"), "显式授权后仍未覆盖"
+    assert 结果["kept_audio"] == []
+    assert 结果["written"], "显式授权后应正常写入"
+
+
+def test_force_replaces_subtitle_transcript_without_asking(tmp_path, monkeypatch):
+    """反方向不受限：已有的是**字幕稿**时，重取照常覆盖——那是同质替换，不是降级。
+    否则重取（修串台的主要手段）就被这条护栏堵死了。"""
+    结果, target = _降级用例(tmp_path, monkeypatch, SUBTITLE_TRANSCRIPT)
+    assert "字幕正文" in target.read_text(encoding="utf-8")
+    assert 结果["kept_audio"] == []
+
+
+# ---------------------------------------------------------------------------
+# 端到端：部分字幕稿 → 按集补录 → 合并成最终块级逐字稿
+#   （这是「只对失败分集转录」的完整链路，必须整体跑通而不只是各函数单测）
+# ---------------------------------------------------------------------------
+
+def _e2e_plan() -> dict:
+    return {
+        "source": {"parts": [
+            {"page": 1, "cid": 11, "duration": 100.0, "bvid": "BV1x", "title": "第01讲 开场"},
+            {"page": 2, "cid": 22, "duration": 100.0, "bvid": "BV1x", "title": "第02讲 缺字幕集"},
+        ]},
+        "blocks": [_服务块()],
+    }
+
+
+def _e2e_取字幕(monkeypatch, cid_to_ok=(11,)):
+    def _假取(bvid, cid, sessdata=None, keys_file=None, duration_sec=0.0, title="", 课程术语=None, 诊断=None):
+        if int(cid) in cid_to_ok:
+            return {"is_ai": True, "lan": "ai-zh", "lan_doc": "", "coverage": 0.99,
+                    "trustworthy": True, "audit": {"band": "ok", "url_identity": True},
+                    "cues": [{"from": 0.0, "to": 2.0, "content": f"字幕内容{cid}"}]}
+        return None
+    monkeypatch.setattr(subtitles, "fetch_episode_subtitle", _假取)
+
+
+def test_end_to_end_only_missing_episode_gets_transcribed(tmp_path, monkeypatch):
+    """一集有字幕、一集没有 → 只给**缺的那一集**派补录稿，而不是整块重听。"""
+    from src.core.subtitle_service import SubtitleService
+    from src.core.workspace import TaskWorkspace
+
+    ws = TaskWorkspace("t-e2e", base_dir=tmp_path)
+    _e2e_取字幕(monkeypatch, cid_to_ok=(11,))
+    结果 = SubtitleService.run(ws, {}, _e2e_plan(), sessdata="x", force=True)
+
+    # 块未完成，但已产出可用的部分稿 + 缺页状态
+    最终 = TaskWorkspace.block_path(ws, _服务块())
+    assert not 最终.exists(), "部分稿不得写到最终名——否则下游会误判该块已完工"
+    部分 = TaskWorkspace.partial_transcript_path(ws, _服务块())
+    assert 部分.exists() and "字幕内容11" in 部分.read_text(encoding="utf-8")
+    assert 结果["partial"][0]["missing_pages"] == [2]
+    assert 结果["partial"][0]["ready_pages"] == [1]
+
+    # 缺页状态是「哪几集待补录」的权威来源
+    状态 = TaskWorkspace.partial_state_path(ws, _服务块())
+    assert json.loads(状态.read_text(encoding="utf-8"))["missing_pages"] == [2]
+
+    # 补录稿未落盘前不合并
+    from src.pipeline import PipelineCoordinator
+    assert PipelineCoordinator._merge_completed_blocks(ws, [_服务块()], {1: [2]}) == []
+
+    # 补录稿落盘后合并：最终稿出现，且被判为 mixed
+    补录 = TaskWorkspace.page_transcript_path(ws, _服务块(), 2)
+    补录.write_text("> 来源：**听音转录**——非平台字幕\n缺集的原声转录正文", encoding="utf-8")
+    产出 = PipelineCoordinator._merge_completed_blocks(ws, [_服务块()], {1: [2]})
+    assert len(产出) == 1 and 产出[0]["audio_pages"] == [2]
+    assert 最终.exists()
+    正文 = 最终.read_text(encoding="utf-8")
+    assert "字幕内容11" in 正文 and "缺集的原声转录正文" in 正文
+    assert subtitles.transcript_source(最终) == "mixed"
+    # 原料清理：补录稿与状态文件移除，避免下一轮重复派发
+    assert not 补录.exists() and not 状态.exists()
+
+
+def test_partial_is_not_rescanned_as_block_transcript(tmp_path, monkeypatch):
+    """部分稿/补录稿都不该被「最终稿存在即整块完成」判定为已转录。"""
+    from src.core.workspace import TaskWorkspace
+    ws = TaskWorkspace("t-e2e2", base_dir=tmp_path)
+    TaskWorkspace.partial_transcript_path(ws, _服务块()).parent.mkdir(parents=True, exist_ok=True)
+    TaskWorkspace.partial_transcript_path(ws, _服务块()).write_text("部分稿", encoding="utf-8")
+    TaskWorkspace.page_transcript_path(ws, _服务块(), 2).write_text("补录稿", encoding="utf-8")
+    assert not TaskWorkspace.block_path(ws, _服务块()).exists()
+
+
+def test_rerun_reuses_already_fetched_subtitles(tmp_path, monkeypatch):
+    """**续跑**：第二遍跑只重取缺的那几集，已取到的不再抽签。
+
+    没有这条时，每次重跑都要把块内全部分集重新向 B站 取一遍（10 轮重试 + 最坏
+    67.5s 退避），一中止就是二十多分钟。sidecar 里存着原始 cues，所以能直接复用。
+    """
+    from src.core.subtitle_service import SubtitleService
+    from src.core.workspace import TaskWorkspace
+
+    ws = TaskWorkspace("t-resume", base_dir=tmp_path)
+    取过: list = []
+
+    def _假取(bvid, cid, sessdata=None, keys_file=None, duration_sec=0.0, title="", 课程术语=None, 诊断=None):
+        取过.append(int(cid))
+        if int(cid) == 11:
+            return {"is_ai": True, "lan": "ai-zh", "lan_doc": "", "coverage": 0.99,
+                    "trustworthy": True, "audit": {"band": "ok", "url_identity": True},
+                    "cues": [{"from": 0.0, "to": 2.0, "content": "甲集字幕"}]}
+        return None
+
+    monkeypatch.setattr(subtitles, "fetch_episode_subtitle", _假取)
+    plan = _e2e_plan()
+    SubtitleService.run(ws, {}, plan, sessdata="x", force=True)
+    assert sorted(取过) == [11, 22], "第一遍应两集都取"
+
+    取过.clear()
+    SubtitleService.run(ws, {}, plan, sessdata="x")
+    assert 取过 == [22], f"第二遍只应重取缺的那一集，实际取了 {取过}"
+    # 复用后部分稿仍应完整保留已取到的那集
+    部分 = TaskWorkspace.partial_transcript_path(ws, _服务块()).read_text(encoding="utf-8")
+    assert "甲集字幕" in 部分
+
+
+def test_force_still_refetches_everything(tmp_path, monkeypatch):
+    """`--force` 的语义不变：sidecar 不得被当成缓存把重取短路掉。"""
+    from src.core.subtitle_service import SubtitleService
+    from src.core.workspace import TaskWorkspace
+
+    ws = TaskWorkspace("t-force", base_dir=tmp_path)
+    取过: list = []
+
+    def _假取(bvid, cid, **kw):
+        取过.append(int(cid))
+        return {"is_ai": True, "lan": "ai-zh", "lan_doc": "", "coverage": 0.99,
+                "trustworthy": True, "audit": {"band": "ok", "url_identity": True},
+                "cues": [{"from": 0.0, "to": 2.0, "content": "甲集字幕"}]}
+
+    monkeypatch.setattr(subtitles, "fetch_episode_subtitle", _假取)
+    plan = _e2e_plan()
+    SubtitleService.run(ws, {}, plan, sessdata="x", force=True)
+    assert TaskWorkspace.block_path(ws, _服务块()).exists()
+    取过.clear()
+    SubtitleService.run(ws, {}, plan, sessdata="x", force=True)
+    assert sorted(取过) == [11, 22], "force=True 时应重取块内全部分集"

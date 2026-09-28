@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from src.core import fsutil
 from src.core.block_plan import BlockPlan
-from src.core.heading_numbers import strip_heading_number
+from src.core.heading_numbers import plan_heading_cleanup
 from src.core.workspace import find_module_article, sanitize_filename
 
 # 一册的「块号 + 块 + 长文路径 + 字节数」四元组
@@ -675,15 +675,20 @@ class ArticleIntegrator:
 
         # 先剥号、再降级（##→###、###→####）：存量长文标题带 `## 2.1 …` 这类手写序号，
         # 不剥会与阅读器的自动编号叠成双号；新长文已由提示词要求不写序号，所以这一步幂等。
+        # 剥号走**文档级计划**：只有成序的标题才剥，孤立数字（`## 80 小时…`）动都不动。
         # 围栏判定与上面的归一化循环保持同一口径（strip 后判定）：列表项内缩进的围栏
         # 也是围栏，漏认会让围栏内的 `##` 被误降级、状态在两循环间失步。
+        chunk = body.strip()
+        strip_targets = {
+            item["line"]: item["after"] for item in plan_heading_cleanup(chunk)["auto"]
+        }
         demoted = []
         in_code = False
-        for line in body.strip().splitlines():
+        for line_no, line in enumerate(chunk.splitlines(), 1):
             if line.strip().startswith("```"):
                 in_code = not in_code
             if not in_code:
-                line = strip_heading_number(line)
+                line = strip_targets.get(line_no, line)
                 if line.startswith("#### "):
                     line = "#" + line  # becomes #####
                 elif line.startswith("### "):

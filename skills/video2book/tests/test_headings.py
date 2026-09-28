@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import List
 
 import pytest
 
@@ -27,7 +28,11 @@ from conftest import pad_to  # noqa: E402
 
 from src.core import heading_cleanup  # noqa: E402
 from src.core.deliverable_lint import lint_heading_numbers  # noqa: E402
-from src.core.heading_numbers import is_numbered_heading, strip_heading_number  # noqa: E402
+from src.core.heading_numbers import (  # noqa: E402
+    is_numbered_heading,
+    plan_heading_cleanup,
+    strip_heading_number,
+)
 
 # (原始标题行, 去号后) —— 实测语料里的常见形态，含章号前缀与多级序号
 STRIP_CASES = (
@@ -89,6 +94,109 @@ def test_numbered_heading_is_flagged():
     line = "## 1. 带序号的标题"
     assert is_numbered_heading(line), "带序号的标题未被判定为手写序号"
     assert strip_heading_number(line) == "## 带序号的标题"
+
+
+# ---------------------------------------------------------------------------
+# 文档级判定：同一形态在不同文档里结论不同
+# ---------------------------------------------------------------------------
+# 实测教训：行级形态分不出「该剥」与「不该剥」，因为
+#   `## 2 类属性`（该剥，作者原意）与 `### 4 厘米的钥匙扣案`（不该剥）
+# 形态完全一致。换轴到「是否成序」之后两者才分得开。
+
+# 必须**自动剥**：(整篇文本, 期望被剥掉的行)
+AUTO_CASES = (
+    # 成序的题号——但剥掉会剩 `题：…` 残句，所以其实进报告档（见 REPORT_CASES）
+    # 这里是干净的成序数字 + 汉字：作者原本要清的「数字 + 汉字」标题族
+    ("# 篇\n\n## 1 概念\n\n## 2 类属性\n\n## 3 方法\n", ["## 概念", "## 类属性", "## 方法"]),
+    # 分隔符形态是强证据，不要求成序
+    ("# 篇\n\n## 1. 列表标签的三大分类\n", ["## 列表标签的三大分类"]),
+    ("# 篇\n\n### 2.1 无序列表的语义\n", ["### 无序列表的语义"]),
+    ("# 篇\n\n## 3、工程定位\n", ["## 工程定位"]),
+    # 章号前缀带边界
+    ("# 篇\n\n## 第 3 章：关系模型\n", ["## 关系模型"]),
+    # 混用形态时按数值成序（1.1→1、2.1→2 同属 1/2 段）
+    ("# 篇\n\n#### 1.1 年月日与时分秒的独立获取\n\n### 2.1 无序列表\n",
+     ["#### 年月日与时分秒的独立获取", "### 无序列表"]),
+)
+
+# 必须**原样保留**：数字是内容，剥掉就是永久损坏。这些是实测踩到的原样。
+KEEP_CASES = (
+    # 计量单位：数字是量
+    "## 80 小时和 60 小时的两道坎",
+    "### 4 厘米的钥匙扣案",
+    # 孤立数字：全篇没有第二个同类标题，无从成序
+    "### 520 沟通题",
+    "## 315 多省联考判断推理逐题精讲",
+    # 章号后无边界：`第14讲` 的 `的` 说明它不是「第 14 讲：」这种引用
+    "## 第14讲的收尾：量刑情节的完整地图",
+)
+
+# 必须进**报告档**（只报不改）并给出理由：(整篇文本, 期望出现在 report 里的片段)
+REPORT_CASES = (
+    # 孤立 + 量词
+    ("# 篇\n\n## 80 小时和 60 小时的两道坎\n", "计量单位"),
+    ("# 篇\n\n### 4 厘米的钥匙扣案\n", "计量单位"),
+    # 孤立，无护栏
+    ("# 篇\n\n### 520 沟通题\n", "孤立数字"),
+    ("# 篇\n\n## 315 多省联考判断推理逐题精讲\n", "孤立数字"),
+    # 成序但剥完是残句：应建议把编号移到末尾，而不是删号
+    ("# 篇\n\n## 71 题：先画个九宫格\n\n## 72 题：看对称\n", "残句"),
+    # 残句判定必须认中缀点：实测 `### 100 题 · 食用果蔬…` 会被剥成 `### 题 · …`
+    ("# 篇\n\n### 100 题 · 食用果蔬与老年人认知能力\n", "残句"),
+    ("# 篇\n\n### 75、76题：越简单，越容易想复杂\n", "分隔符后接数字"),
+    # 计数词/连词护栏
+    ("# 篇\n\n## 3 种方案的取舍\n", "计数词"),
+    ("# 篇\n\n#### 5.7 与 8.0 版本元数据呈现差异\n", "计数词"),
+)
+
+
+@pytest.mark.parametrize("text, expected", AUTO_CASES)
+def test_document_level_auto_strip(text: str, expected: List[str]):
+    """成序标题必须被自动剥掉，且只动序号、不动标题文字。"""
+    plan = plan_heading_cleanup(text)
+    got = [item["after"] for item in plan["auto"]]
+    assert got == expected, f"自动剥结果不符：{got}"
+    assert plan["report"] == [], f"不该有报告项：{plan['report']}"
+
+
+@pytest.mark.parametrize("line", KEEP_CASES)
+def test_document_level_keeps_content_numbers(line: str):
+    """孤立/带单位的数字**一个都不许自动剥**——这些是实测被削掉过头的标题。"""
+    text = f"# 篇\n\n{line}\n"
+    plan = plan_heading_cleanup(text)
+    assert plan["auto"] == [], f"内容型标题被自动剥: {plan['auto']}"
+
+
+@pytest.mark.parametrize("text, needle", REPORT_CASES)
+def test_document_level_reports_and_explains(text: str, needle: str):
+    """低置信项必须进报告档（不写盘）并带上理由，供人眼一次确认。"""
+    plan = plan_heading_cleanup(text)
+    assert plan["auto"] == [], f"低置信项被自动剥了: {plan['auto']}"
+    assert plan["report"], "低置信项既没剥也没报，等于被静默放过"
+    for item in plan["report"]:
+        assert needle in item["reason"], f"理由未命中 {needle!r}: {item['reason']}"
+        assert item["hint"], "报告项必须给出处置建议"
+
+
+def test_report_tier_does_not_reach_disk_via_clean_text():
+    """报告档的东西绝不落盘：`clean_text` 只能改 auto 档。"""
+    text = "# 篇\n\n## 80 小时和 60 小时的两道坎\n\n## 315 多省联考判断推理逐题精讲\n"
+    new_text, headings, _toc, _changes, suspects = heading_cleanup.clean_text(text)
+    assert new_text == text and headings == 0, "报告档被写进了正文"
+    assert len(suspects) == 2, f"报告档未进 suspects: {suspects}"
+
+
+def test_document_level_offers_actionable_hint_for_question_headings():
+    """题号类给的是「把编号移到末尾」的可执行建议，不是删号。"""
+    plan = plan_heading_cleanup("# 篇\n\n## 71 题：先画个九宫格\n\n## 72 题：看对称\n")
+    hints = [item["hint"] for item in plan["report"]]
+    assert any("先画个九宫格（第 71 题）" in h for h in hints), f"建议不可执行: {hints}"
+
+
+def test_chapter_prefix_requires_boundary():
+    """章号后必须是分隔符/空白/结尾：`第14讲的收尾` 里的 `第14讲` 是句子成分，不是章号。"""
+    assert strip_heading_number("## 第 3 章：关系模型") == "## 关系模型"
+    assert strip_heading_number("## 第14讲的收尾：量刑情节的完整地图") == "## 第14讲的收尾：量刑情节的完整地图"
 
 
 def test_lint_heading_numbers_skips_fenced_lines():
@@ -172,15 +280,32 @@ CLEAN_NOTE = (
 )
 
 
-def test_check_fix_numbering_rewrites_article_in_place(run_cli, make_workspace):
-    """端到端：`check --fix-numbering` 必须就地改掉存量产物里的标题序号。"""
-    ws = make_workspace("清理_就地去号")
+def test_check_fix_numbering_default_is_report_only(run_cli, make_workspace):
+    """端到端：缺省**只报不改**。去号判定含猜的成份，猜错一次就是内容永久损坏，
+    所以写盘必须显式 `--apply`——这条默认行为本身就是安全护栏。"""
+    ws = make_workspace("清理_默认只报")
     article = ws.articles_dir / "模块01_绪论与数制_精读长文.md"
     article.write_text(NUMBERED_ARTICLE, encoding="utf-8")
 
     result = run_cli("check", "--fix-numbering", "--dir", str(ws.root_dir), "--json")
     assert result.code == 0, result.norm
-    totals = json.loads(result.out)["totals"]
+    payload = json.loads(result.out)
+    assert payload["dry_run"] is True and payload["applied"] is False
+    assert payload["totals"]["headings"] == 2, f"未统计出待改行数: {payload['totals']}"
+    assert article.read_text(encoding="utf-8") == NUMBERED_ARTICLE, "缺省却写盘了"
+
+
+def test_check_fix_numbering_applies_in_place(run_cli, make_workspace):
+    """端到端：`--fix-numbering --apply` 才就地改掉存量产物里的标题序号。"""
+    ws = make_workspace("清理_就地去号")
+    article = ws.articles_dir / "模块01_绪论与数制_精读长文.md"
+    article.write_text(NUMBERED_ARTICLE, encoding="utf-8")
+
+    result = run_cli("check", "--fix-numbering", "--apply", "--dir", str(ws.root_dir), "--json")
+    assert result.code == 0, result.norm
+    payload = json.loads(result.out)
+    assert payload["applied"] is True
+    totals = payload["totals"]
     assert totals["headings"] == 2 and totals["changed_files"] == 1, f"清理报告异常: {totals}"
 
     text = article.read_text(encoding="utf-8")
@@ -194,28 +319,14 @@ def test_check_fix_numbering_is_idempotent(run_cli, make_workspace):
     article = ws.articles_dir / "模块01_绪论与数制_精读长文.md"
     article.write_text(NUMBERED_ARTICLE, encoding="utf-8")
 
-    assert run_cli("check", "--fix-numbering", "--dir", str(ws.root_dir)).code == 0
+    assert run_cli("check", "--fix-numbering", "--apply", "--dir", str(ws.root_dir)).code == 0
     after_first = article.read_text(encoding="utf-8")
 
-    second = run_cli("check", "--fix-numbering", "--dir", str(ws.root_dir), "--json")
+    second = run_cli("check", "--fix-numbering", "--apply", "--dir", str(ws.root_dir), "--json")
     assert second.code == 0, second.norm
     totals = json.loads(second.out)["totals"]
     assert totals["changed_files"] == 0 and totals["headings"] == 0, f"第二轮仍有改动: {totals}"
     assert article.read_text(encoding="utf-8") == after_first, "第二轮改动或改写了文件"
-
-
-def test_check_fix_numbering_dry_run_leaves_file_alone(run_cli, make_workspace):
-    """`--dry-run` 只报不改：预演若偷偷写盘，存量产物就没人敢先看一眼了。"""
-    ws = make_workspace("清理_预演")
-    article = ws.articles_dir / "模块01_绪论与数制_精读长文.md"
-    article.write_text(NUMBERED_ARTICLE, encoding="utf-8")
-
-    result = run_cli("check", "--fix-numbering", "--dry-run", "--dir", str(ws.root_dir), "--json")
-    assert result.code == 0, result.norm
-    payload = json.loads(result.out)
-    assert payload["dry_run"] is True
-    assert payload["totals"]["headings"] == 2, f"预演未统计出待改行数: {payload['totals']}"
-    assert article.read_text(encoding="utf-8") == NUMBERED_ARTICLE, "预演却写盘了"
 
 
 def test_check_fix_numbering_skips_task_files(run_cli, make_workspace):
@@ -224,7 +335,7 @@ def test_check_fix_numbering_skips_task_files(run_cli, make_workspace):
     task = ws.articles_dir / "模块01_绪论与数制_TASK.md"
     task.write_text(NUMBERED_ARTICLE, encoding="utf-8")
 
-    result = run_cli("check", "--fix-numbering", "--dir", str(ws.root_dir), "--json")
+    result = run_cli("check", "--fix-numbering", "--apply", "--dir", str(ws.root_dir), "--json")
     assert result.code == 0, result.norm
     totals = json.loads(result.out)["totals"]
     assert totals["scanned_files"] == 0 and totals["headings"] == 0, f"任务书被清理: {totals}"

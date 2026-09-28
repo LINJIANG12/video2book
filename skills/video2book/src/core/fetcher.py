@@ -108,12 +108,14 @@ def _解析等待秒数(响应头: Any, 轮次: int) -> float:
     return float(2 ** max(1, 轮次))
 
 
-def _请求元数据(地址: str, 请求头: Dict[str, str], 超时: int = 15) -> Dict[str, Any]:
+def _请求元数据(
+    地址: str, 请求头: Dict[str, str], 超时: int = 15, 重试: bool = True
+) -> Dict[str, Any]:
     """带限速、重试与熔断的元数据请求（处理风控与服务端异常）。"""
     _检查熔断()
     打开器 = _获取会话打开器()
     最后错误: Optional[Exception] = None
-    for 轮次 in range(1, _最大重试次数 + 2):
+    for 轮次 in range(1, (_最大重试次数 if 重试 else 0) + 2):
         _等待集中限速()
         try:
             请求 = urllib.request.Request(地址, headers=请求头)
@@ -128,7 +130,7 @@ def _请求元数据(地址: str, 请求头: Dict[str, str], 超时: int = 15) -
             最后错误 = 错误
             状态 = 错误.code
             响应头 = getattr(错误, "headers", None)
-            可重试 = is_retryable_status(状态)
+            可重试 = is_retryable_status(状态) and 重试
             if 可重试 and 轮次 <= _最大重试次数:
                 等待 = _解析等待秒数(响应头, 轮次)
                 print(f"[重试]元数据接口状态异常（{状态}），{等待:.1f}秒后重试（第{轮次}次）")

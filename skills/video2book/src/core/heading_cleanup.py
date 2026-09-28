@@ -10,9 +10,14 @@
   <工作区>/articles/*_精读长文.md   模块长文（去 `## 1. …` / `### 2.1 …`）
 
 两条规则：
-  ① 标题行序号前缀剥离——规则与门禁共用 `src/core/heading_numbers`，幂等、跳过代码围栏。
-     纯数字前缀只在「不是在数东西」时才剥：`## 3 种方案的取舍`、`## 2025 年路线图` 保持不动。
+  ① 标题行序号前缀剥离——判定与剥离共用 `src/core/heading_numbers` 的**文档级计划**
+     （`plan_heading_cleanup`）：只有「成序」的标题才自动剥，「孤立数字」与「被内容护栏救下」
+     的只报告不改。实测教训：旧的行级规则会把 `## 80 小时和 60 小时的两道坎` 削成
+     `## 小时和 60 小时的两道坎`、把 `## 第14讲的收尾` 削成 `## 的收尾`——现在两者都进报告档。
   ② 教材目录行 `- **第 N 章**：标题` → `N. 标题`（改成有序列表，序号交给渲染器）。
+
+**默认只报不改**：写盘必须显式 `apply=True`（CLI 上是 `--apply`）。去号曾经是默认就写，
+而它的判定含猜的成份——猜错一次就是内容永久损坏，这个代价必须由人确认来兜。
 """
 
 from __future__ import annotations
@@ -27,9 +32,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from src.core.heading_numbers import (
     HEADING_RE,
-    first_bare_prefix,
     iter_lines,
-    strip_heading_number,
+    plan_heading_cleanup,
 )
 
 # 教材目录行：`- **第 3 章**：标题` → `3. 标题`
@@ -83,14 +87,38 @@ def collect_files(ws: Any, only: str) -> List[Path]:
 
 
 def clean_text(text: str) -> Tuple[str, int, int, List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """返回 `(新文本, 标题去号条数, 目录归一化条数, 改动明细, 被略过的可疑行)`。"""
+    """返回 `(新文本, 标题去号条数, 目录归一化条数, 改动明细, 被略过的可疑行)`。
+
+    标题去号走**文档级计划**：只有计划判为 `auto` 的行才改，`report` 档整条进 `suspects`
+    供人眼确认（含理由与处置建议）。
+    """
+    plan = plan_heading_cleanup(text)
+    targets = {item["line"]: item for item in plan["auto"]}
+
     changes: List[Dict[str, Any]] = []
-    suspects: List[Dict[str, Any]] = []
+    suspects: List[Dict[str, Any]] = [
+        {
+            "line": item["line"],
+            "number": item.get("number") or "",
+            "text": item["before"][:120],
+            "reason": item.get("reason", ""),
+            "hint": item.get("hint", ""),
+        }
+        for item in plan["report"]
+    ]
     out: List[str] = []
     headings = toc = 0
 
     for line_no, line, in_fence in iter_lines(text):
         if not in_fence:
+            target = targets.get(line_no)
+            if target is not None:
+                changes.append({"rule": "heading", "line": line_no,
+                                "before": target["before"], "after": target["after"]})
+                headings += 1
+                out.append(target["after"])
+                continue
+
             toc_match = TOC_CHAPTER_RE.match(line)
             if toc_match:
                 new_line = f"{toc_match.group(1)}{toc_match.group(2)}. {toc_match.group(3)}"
@@ -99,21 +127,6 @@ def clean_text(text: str) -> Tuple[str, int, int, List[Dict[str, Any]], List[Dic
                 toc += 1
                 out.append(new_line)
                 continue
-
-            new_line = strip_heading_number(line)
-            if new_line != line:
-                changes.append({"rule": "heading", "line": line_no,
-                                "before": line.strip(), "after": new_line.strip()})
-                headings += 1
-                out.append(new_line)
-                continue
-
-            heading_match = HEADING_RE.match(line)
-            if heading_match:
-                number = first_bare_prefix(heading_match.group(3))
-                if number:
-                    suspects.append({"line": line_no, "number": number,
-                                     "text": line.strip()[:120]})
         out.append(line)
 
     new_text = "\n".join(out)
@@ -144,12 +157,16 @@ def run_fix_numbering(
     task: Optional[str] = None,
     dir_path: Optional[str] = None,
     only: str = "both",
-    dry_run: bool = False,
+    apply: bool = False,
     as_json: bool = False,
     max_samples: int = 5,
     hash_nonheading: bool = False,
 ) -> int:
-    """存量产物标题去号（幂等，可反复跑）。"""
+    """存量产物标题去号（幂等，可反复跑）。
+
+    **默认只报不改**（`apply=False`）：去号判定含猜的成份，猜错一次就是内容永久损坏，
+    所以写盘必须显式传入 `apply=True`（CLI 上是 `--apply`）。
+    """
     from src.core.task_cleanup import find_workspaces
     from src.core.workspace import TaskWorkspace
 
@@ -204,7 +221,7 @@ def run_fix_numbering(
                     changed_paths.add(str(path))
                     entry["headings"] += headings
                     entry["toc"] += toc
-                    if not dry_run:
+                    if apply:
                         write_text_lf(path, new_text)
                 entry["suspects"] += [
                     {**item, "file": TaskWorkspace.to_relative(path)} for item in suspects
@@ -214,7 +231,7 @@ def run_fix_numbering(
                         "file": TaskWorkspace.to_relative(path),
                         **changes[0],
                     })
-            if dry_run or changed_this_pass == 0:
+            if not apply or changed_this_pass == 0:
                 break
         entry["changed_files"] = len(changed_paths)
         reports.append(entry)
@@ -224,11 +241,11 @@ def run_fix_numbering(
 
     if as_json:
         print(json.dumps({"reports": reports, "totals": totals,
-                          "dry_run": bool(dry_run), "only": only},
+                          "dry_run": not apply, "applied": bool(apply), "only": only},
                          ensure_ascii=False, indent=2))
         return 0
 
-    mode = "预演（不改动）" if dry_run else "就地清理"
+    mode = "就地清理" if apply else "预演（不改动）"
     print("=" * 72)
     print("[*] 交付物标题去号" + f"（{mode}；范围={only}）")
     print("=" * 72)
@@ -248,14 +265,16 @@ def run_fix_numbering(
             print(f"    · {sample['before'][:60]}")
             print(f"      → {sample['after'][:60]}")
         if report["suspects"]:
-            print(f"    [!] 被规则略过、需人眼确认的纯数字标题 {len(report['suspects'])} 行（前 5 条）：")
+            print(f"    [!] 只报不改、需人眼确认的标题 {len(report['suspects'])} 行（前 5 条）：")
             for item in report["suspects"][:5]:
-                print(f"        {item['file']} @{item['line']}: {item['text'][:72]}")
+                print(f"        {item['file']} @{item['line']}: {item['text'][:64]}")
+                if item.get("reason"):
+                    print(f"            {item['reason']}；{item.get('hint', '')}")
     print("\n" + "-" * 72)
     print(f"合计：扫描 {totals['scanned_files']} 份 | 需改 {totals['changed_files']} 份 | "
           f"标题去号 {totals['headings']} 行 | 目录归一 {totals['toc']} 行")
-    if dry_run:
-        print("[i] 这是预演，未写入任何文件；确认无误后去掉 --dry-run 再跑一次。")
+    if not apply:
+        print("[i] 这是预演，未写入任何文件；确认无误后加 --apply 再跑一次。")
     elif totals["changed_files"] == 0:
         print("[i] 没有需要改动的文件（已全部无手写序号，幂等）。")
     print("=" * 72)

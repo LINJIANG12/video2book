@@ -22,18 +22,21 @@ import re
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from src.core import fsutil
 from src.core.block_plan import BlockPlan
 from src.core.deliverable_lint import (
     FATAL_NOTE_KEYS,
+    TITLE_META_KEY,
     STRUCTURE_KEYS,
     fatal_note_total,
     fatal_render_total,
     lint_heading_numbers,
     lint_note,
+    lint_note_filename,
     lint_render,
+    note_semantic_name,
     summarize_note,
     summarize_render,
 )
@@ -192,6 +195,32 @@ def extract_cn_entities(text: str, min_freq: int = DEFAULT_CN_MIN_FREQ) -> Count
     return Counter({term: n for term, n in counter.items() if n >= min_freq})
 
 
+def strip_transcript_header(text: str) -> str:
+    """剥掉逐字稿的抬头，只留正文。
+
+    抬头是元信息——块标题、来源标签、核验行、逐集来源声明——不是讲授内容。依据级校验
+    拿它抽实体会引入两类纯噪声：① 集号/块号（写作规范明令不得出现在长文里，必然命不中）；
+    ② 来源词（`听音转录`/`站字幕`/`时间轴判据` 在每份稿的抬头里重复出现，频次轻易越过
+    min_freq 门槛）。剥掉之后分母只剩真正讲过的内容。
+
+    判据是**逐行**的：从顶部起，跳过空行与 `#`/`>` 开头的行，遇到第一行正文即停。
+    不用「首个空行」作分界——实际抬头是 `H1` / 空行 / 来源行 / 空行 的结构，
+    停在第一个空行会把来源行留下。
+
+    整份稿都由抬头构成（无正文）时原样返回，避免返回空串把分母清零。
+    """
+    段 = str(text or "").split("\n")
+    起点 = 0
+    for idx, 行 in enumerate(段):
+        条 = 行.strip()
+        if not 条 or 条.startswith("#") or 条.startswith(">"):
+            起点 = idx + 1
+            continue
+        break
+    体 = "\n".join(段[起点:])
+    return 体 if 体.strip() else str(text or "")
+
+
 def check_grounding_block(
     ws: TaskWorkspace, block: Dict[str, Any], min_freq: int, min_coverage: float
 ) -> Dict[str, Any]:
@@ -240,8 +269,10 @@ def check_grounding_block(
     entry["transcript_bytes"] = transcript.stat().st_size
 
     # 语料要先归一再抽：长文侧同样归一后才好比对（同一术语可能一边繁一边简）。
-    entities = extract_entities(transcript_text, min_freq)
-    cn_entities = extract_cn_entities(transcript_text)
+    # 抬头先剥掉：它是元信息不是讲授内容，集号/来源词只会稀释覆盖率（见 strip_transcript_header）。
+    transcript_body = strip_transcript_header(transcript_text)
+    entities = extract_entities(transcript_body, min_freq)
+    cn_entities = extract_cn_entities(transcript_body)
     if not entities and not cn_entities:
         entry["status"] = "no_entities"
         return entry
@@ -412,6 +443,125 @@ def collect_notes(ws: Any) -> List[Path]:
     return notes
 
 
+def check_note_naming_workspace(ws: Any) -> Dict[str, Any]:
+    """工作区级笔记命名体检（跨文件，单文件 lint 看不到的问题）。
+
+    查三件只在集合层面才暴露的事：
+
+    1. **重名**——剥掉 `笔记NN_` 序号后语义标题相同的两篇笔记，并列时读者/脑图无法区分，
+       文件系统也只能靠序号硬分。
+    2. **机械 1:1**——笔记数恰好等于块数且工作区没有 `note_plan.json`，说明
+       `cluster-notes` 归并步骤从未执行，笔记是照块标题直接生成的，每篇都是单块长文的缩写。
+    3. **计划不自洽**——`note_plan.json` 存在时，块归属必须并集完整且无重复。
+    """
+    files = collect_notes(ws)
+    issues: List[Dict[str, Any]] = []
+
+    buckets: Dict[str, List[str]] = {}
+    for path in files:
+        buckets.setdefault(note_semantic_name(path.name), []).append(path.name)
+    for name, group in sorted(buckets.items()):
+        if len(group) > 1:
+            issues.append({
+                "kind": "duplicate_title",
+                "title": name,
+                "files": group,
+                "detail": f"{len(group)} 篇笔记同名，剥掉序号后无法区分",
+            })
+
+    plan_path = ws.root_dir / "note_plan.json"
+    if files and not plan_path.exists():
+        blocks = 0
+        if ws.subtitles_dir.exists():
+            blocks = sum(1 for p in ws.subtitles_dir.glob("*逐字稿.md"))
+        if blocks and blocks == len(files):
+            issues.append({
+                "kind": "mechanical_one_to_one",
+                "detail": f"{blocks} 块 / {len(files)} 篇笔记且无 note_plan.json——归并步骤未执行，属机械 1:1",
+            })
+    elif plan_path.exists():
+        try:
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            seen: Counter = Counter()
+            for entry in plan if isinstance(plan, list) else []:
+                seen.update(entry.get("blocks", []) or [])
+            duplicated = sorted(b for b, n in seen.items() if n > 1)
+            if duplicated:
+                issues.append({
+                    "kind": "note_plan_duplicate_blocks",
+                    "detail": f"note_plan.json 中块 {duplicated[:10]} 被多篇笔记重复认领",
+                })
+        except (OSError, ValueError) as err:
+            issues.append({"kind": "note_plan_unreadable", "detail": str(err)})
+
+    return {
+        "workspace": ws.root_dir.name,
+        "note_count": len(files),
+        "has_note_plan": plan_path.exists(),
+        "issue_count": len(issues),
+        "issues": issues,
+    }
+
+
+def _页码范围(pages: List[int]) -> str:
+    """把集号列表压成 `P10-P18` 这样的区间串，便于人一眼扫过。"""
+    if not pages:
+        return ""
+    段: List[str] = []
+    起 = 前 = pages[0]
+    for page in pages[1:]:
+        if page == 前 + 1:
+            前 = page
+            continue
+        段.append(f"P{起:02d}" if 起 == 前 else f"P{起:02d}-P{前:02d}")
+        起 = 前 = page
+    段.append(f"P{起:02d}" if 起 == 前 else f"P{起:02d}-P{前:02d}")
+    return "、".join(段)
+
+
+def check_plan_coverage_workspace(ws: Any) -> Dict[str, Any]:
+    """计划覆盖体检（**只报告**，不进门禁）：`blocks` 是否覆盖了 `source.parts` 的全部集。
+
+    覆盖缺口本身是**合法的**——刻意排除某些集（如英文原声重复版）就靠"保留 source.parts 全长、
+    只裁 blocks"表达，且 `append` 只追加尾部，所以这个状态是稳定的。但缺一个可见提示，
+    它就只能靠人记得住：实测某工作区正是靠一段手写中文备注在维持，没有任何工具会提醒它。
+    这里把缺口如实列出来，让"刻意排除"与"意外丢块"能被区分。
+    """
+    plan_path = ws.root_dir / "block_plan.json"
+    if not plan_path.is_file():
+        return {"workspace": ws.root_dir.name, "has_plan": False, "issues": []}
+    try:
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as err:
+        return {"workspace": ws.root_dir.name, "has_plan": True,
+                "issues": [{"kind": "unreadable", "detail": str(err)}]}
+    if not isinstance(plan, Mapping):
+        return {"workspace": ws.root_dir.name, "has_plan": True,
+                "issues": [{"kind": "unreadable", "detail": "block_plan 不是对象"}]}
+
+    parts = ((plan.get("source") or {}).get("parts") or [])
+    pages = [int(p.get("page") or 0) for p in parts if isinstance(p, Mapping) and p.get("page")]
+    covered: set = set()
+    for block in plan.get("blocks") or []:
+        for seg in (block.get("segments") or []):
+            if seg.get("page"):
+                covered.add(int(seg["page"]))
+        for unit in (block.get("units") or []):
+            if unit.get("page"):
+                covered.add(int(unit["page"]))
+    missing = sorted(set(pages) - covered)
+    issues: List[Dict[str, Any]] = []
+    if missing:
+        issues.append({
+            "kind": "coverage_gap",
+            "detail": f"计划覆盖 {len(covered)}/{len(pages)} 集，未覆盖 "
+                      f"{len(missing)} 集：{_页码范围(missing)}",
+            "pages": missing,
+        })
+    return {"workspace": ws.root_dir.name, "has_plan": True,
+            "total_pages": len(pages), "covered_pages": len(covered), "issues": issues}
+
+
 def check_note_workspace(
     ws: Any, max_truncated: int, require_structure: bool = False
 ) -> Dict[str, Any]:
@@ -427,6 +577,11 @@ def check_note_workspace(
             continue
         lint = lint_note(text)
         summary = summarize_note(lint)
+        for label in lint_note_filename(path.name):
+            lint.setdefault("title_meta", []).append(
+                {"line": 1, "text": path.name[:120], "kind": label}
+            )
+            summary["title_meta"] = summary.get("title_meta", 0) + 1
         notes_fatal = fatal_note_total(summary)
         fatal_total += notes_fatal
         for key, value in summary.items():
@@ -440,7 +595,7 @@ def check_note_workspace(
             "fatal": notes_fatal,
             "structure_missing": missing,
             "samples": {
-                key: lint[key][:3] for key in (*FATAL_NOTE_KEYS, "truncated") if lint.get(key)
+                key: lint[key][:3] for key in (*FATAL_NOTE_KEYS, TITLE_META_KEY, "truncated") if lint.get(key)
             },
         }
         files.append(detail)
@@ -571,14 +726,19 @@ def run_deliver(
         return 1
 
     note_reports = [check_note_workspace(ws, max_truncated, require_structure) for ws in workspaces]
+    naming_reports = [check_note_naming_workspace(ws) for ws in workspaces]
+    coverage_reports = [check_plan_coverage_workspace(ws) for ws in workspaces]
     render_reports = [
         check_render_workspace(ws, require_lang=require_lang, require_no_numbering=require_no_numbering)
         for ws in workspaces
     ]
+    naming_total = sum(r["issue_count"] for r in naming_reports)
 
     if as_json:
         print(json.dumps({
             "notes": note_reports,
+            "note_naming": naming_reports,
+            "plan_coverage": coverage_reports,
             "render": render_reports,
             "strict": bool(strict),
             "require_structure": bool(require_structure),
@@ -587,7 +747,7 @@ def run_deliver(
         }, ensure_ascii=False, indent=2))
     else:
         print("=" * 72)
-        print(f"[*] 交付前体检（笔记成色 + 渲染合规；致命项门禁 = {'/'.join(FATAL_NOTE_KEYS)}）")
+        print(f"[*] 交付前体检（笔记成色 + 命名 + 渲染合规；致命项门禁 = {'/'.join(FATAL_NOTE_KEYS)}）")
         print("=" * 72)
         for report in note_reports:
             print(f"\n▶ {report['workspace']}  （{report['file_count']} 份笔记）")
@@ -605,15 +765,19 @@ def run_deliver(
                         f"    {flag} {Path(item['file']).name[:44]:46s} 套话={s['boilerplate']:4d} "
                         f"空壳={s['hollow_headings']:2d} 分集标题={s['episode_headings']:3d} "
                         f"行内引用={s['inline_quote']:2d} 分集口吻={s['episode_voice']:2d} "
+                        f"标题元数据={s.get('title_meta', 0):2d} "
                         f"断句={s['truncated']:2d} 缺件={miss}"
                     )
-                    for key in FATAL_NOTE_KEYS:
+                    for key in (*FATAL_NOTE_KEYS, "title_meta"):
                         for sample in item["samples"].get(key, [])[:2]:
-                            print(f"         └ {key} @{sample['line']}: {sample['text'][:88]}")
+                            label = sample.get("kind", "") if key == "title_meta" else ""
+                            suffix = f"（{label}）" if label else ""
+                            print(f"         └ {key}{suffix} @{sample['line']}: {sample['text'][:88]}")
                 t = report["totals"]
                 print(f"    ── 合计：致命 {report['fatal_total']} 处 | 套话 {t.get('boilerplate', 0)} | "
                       f"空壳标题 {t.get('hollow_headings', 0)} | 分集标题 {t.get('episode_headings', 0)} | "
                       f"行内引用 {t.get('inline_quote', 0)} | 分集口吻 {t.get('episode_voice', 0)} | "
+                      f"标题元数据 {t.get('title_meta', 0)} | "
                       f"断句合计 {t.get('truncated', 0)}（阈值按**每份**笔记 {report['truncated_threshold']} 处判定）| "
                       f"结构缺件 {t.get('structure_missing', 0)}")
                 if report["failed"]:
@@ -651,16 +815,46 @@ def run_deliver(
                 print(f"    … 其余 {len(report['entries']) - 12} 份见 --json 输出")
             if report["problem_files"] == 0:
                 print("    ── 全部合规")
+
+        print("\n" + "-" * 72)
+        print("[*] 笔记命名体检（重名 / 机械 1:1 / note_plan 自洽）")
+        for report in naming_reports:
+            print(f"\n▶ {report['workspace']}  （{report['note_count']} 篇笔记，"
+                  f"note_plan {'有' if report['has_note_plan'] else '无'}）")
+            if not report["issue_count"]:
+                print("    ── 命名全部合规")
+            for issue in report["issues"]:
+                print(f"    [✗] {issue['kind']}: {issue['detail']}")
+                if issue.get("title"):
+                    for name in issue.get("files", [])[:5]:
+                        print(f"         └ {name}")
+        print("\n" + "-" * 72)
+        print("[*] 计划覆盖体检（只报告：刻意排除与意外丢块要能区分开）")
+        for report in coverage_reports:
+            if not report.get("has_plan"):
+                continue
+            print(f"\n▶ {report['workspace']}")
+            if not report.get("issues"):
+                print(f"    ── 覆盖完整（{report.get('covered_pages', 0)}/"
+                      f"{report.get('total_pages', 0)} 集）")
+                continue
+            for issue in report["issues"]:
+                print(f"    [!] {issue['kind']}: {issue['detail']}")
+                if issue.get("pages"):
+                    print("        刻意排除的集属正常；若并非本意，检查是否手工改过 "
+                          "block_plan.source.parts——那会让它们被当新增重新规划成块")
         print("\n" + "=" * 72)
 
     notes_failed = any(r["failed"] for r in note_reports)
     render_fatal = any(r["fatal_total"] > 0 for r in render_reports)
 
-    if strict and (notes_failed or render_fatal):
+    if strict and (notes_failed or render_fatal or naming_total):
         if notes_failed:
             print("[FAIL] 笔记成色不达标（详见上方 ✗ 项）")
         if render_fatal:
             print("[FAIL] 存在渲染致命项（详见上方 [✗] 文件）")
+        if naming_total:
+            print(f"[FAIL] 笔记命名不达标（{naming_total} 处：重名 / 机械 1:1 / note_plan 不自洽）")
         return 1
     if not as_json:
         problems = []

@@ -142,6 +142,7 @@ def cmd_pipeline(args):
             range_str=args.range,
             process_all=args.all,
             force=args.force,
+            allow_downgrade=getattr(args, "allow_downgrade", False),
             quality=args.quality,
             article_type=article_type,
             block_minutes=getattr(args, "block_minutes", None) or 0.0,
@@ -206,7 +207,9 @@ def cmd_cluster_notes(args):
     # 加载转绝对、保存转相对（TaskWorkspace 原生支持）
     manifest = ws.load_manifest(absolute=True)
     if outcome["note_status"] != "no-blocks":
-        manifest["note_plan"] = outcome["notes"]
+        # `note_plan` 不写进 manifest：唯一事实源是工作区根下的 `note_plan.json`，
+        # 在 manifest 里再存一份只会造成两处不一致（且历来没有任何读取方）。
+        manifest.pop("note_plan", None)
         manifest["note_results"] = outcome["results"]
     ws.save_manifest(manifest)
 
@@ -319,7 +322,7 @@ def cmd_check(args):
             task=getattr(args, "task", None),
             dir_path=getattr(args, "dir", None),
             only=getattr(args, "only", "both"),
-            dry_run=bool(getattr(args, "dry_run", False)),
+            apply=bool(getattr(args, "apply", False)),
             as_json=bool(getattr(args, "json", False)),
             max_samples=int(getattr(args, "max_samples", 5) or 5),
             hash_nonheading=bool(getattr(args, "hash_nonheading", False)),
@@ -396,6 +399,22 @@ def cmd_cleanup(args):
     if dry_run:
         print("[i] 当前为预演模式；去掉 --dry-run 即真正删除。")
     print("=" * 65)
+
+
+def cmd_audit_names(args) -> int:
+    """专名核对（只报告，不影响任何门禁）。
+
+    为什么要有它：阶段一的实体覆盖率测的是「长文有没有用这块的语料」，不是「用得对不对」。
+    实测某长文写了 `git.nju.edu.cn` 而讲师原话只是「在 git 的」——覆盖率 96.6% 全绿，
+    域名却是编的。判定需要语义，所以只产出复核清单，不设门禁。
+    """
+    from src.core.name_audit import run_audit_names
+    return run_audit_names(
+        base_dir=args.base_dir,
+        task=getattr(args, "task", None),
+        dir_path=getattr(args, "dir", None),
+        as_json=bool(getattr(args, "json", False)),
+    )
 
 
 def cmd_sync(args):
@@ -656,6 +675,8 @@ def main():
     p_pipe.add_argument("--task", default=None, help="Custom task workspace folder name")
     p_pipe.add_argument("--base-dir", default=None, help=BASE_DIR_HELP)
     p_pipe.add_argument("--force", action="store_true", help="Force re-transcribing and re-generating even if exists")
+    p_pipe.add_argument("--allow-downgrade", action="store_true", dest="allow_downgrade",
+                       help="[--force] 允许用字幕稿覆盖已有的听音稿。缺省拒绝——听音稿由逐段听写整理而成，质量高于平台字幕碎片，降级不可逆")
     p_pipe.add_argument(
         "--block-minutes", type=float, default=None,
         help="块级转录的块时长目标（分钟）；缺省取环境变量 BVB_AUDIO_BLOCK_MINUTES，再缺省 50（落 40–60 带中段）。"
@@ -683,7 +704,7 @@ def main():
     p_check.add_argument("--stage1", action="store_true", help="阶段一放行门禁：模块长文是否基于本块逐字稿")
     p_check.add_argument("--deliver", action="store_true", help="交付前体检：笔记成色 + 渲染合规（默认）")
     p_check.add_argument("--fix-numbering", action="store_true", dest="fix_numbering",
-                         help="存量产物标题手写序号就地清理（幂等；加 --dry-run 预演）")
+                         help="存量产物标题手写序号清理（默认只报不改；加 --apply 才写盘）")
     p_check.add_argument("--dir", default=None, help="直接指定单个工作区目录")
     p_check.add_argument("--task", default=None, help="仅处理目录名包含该关键字的工作区")
     p_check.add_argument("--base-dir", default=None, help=BASE_DIR_HELP)
@@ -704,8 +725,9 @@ def main():
                          help="[--deliver] 把「标题手写序号」纳入门禁")
     p_check.add_argument("--only", choices=("textbooks", "articles", "both"), default="both",
                          help="[--fix-numbering] 只处理哪一类（默认 both）")
-    p_check.add_argument("--dry-run", action="store_true", dest="dry_run",
-                         help="[--fix-numbering] 只报不改")
+    p_check.add_argument("--apply", action="store_true", dest="apply",
+                         help="[--fix-numbering] 真的写盘（缺省只预演报告；去号判定含猜的成份，"
+                              "写盘需显式确认）")
     p_check.add_argument("--max-samples", type=int, default=5, dest="max_samples",
                          help="[--fix-numbering] 每类最多打印几条样例（默认 5）")
     p_check.add_argument("--hash-nonheading", action="store_true", dest="hash_nonheading",
@@ -765,6 +787,15 @@ def main():
     p_sync.add_argument("--all", action="store_true", help="Process every workspace under base-dir (compatibility flag; this is already the default)")
     p_sync.add_argument("--dry-run", action="store_true", help="Only report the reconciled state without writing")
 
+    p_names = subparsers.add_parser(
+        "audit-names",
+        help="专名核对：列出长文里逐字稿查不到的英文专名，产出每课程一份 专名核对.md（只报告）",
+    )
+    p_names.add_argument("--task", default=None, help="仅处理目录名包含该关键字的工作区")
+    p_names.add_argument("--dir", default=None, help="直接指定单个工作区目录")
+    p_names.add_argument("--base-dir", default=None, help=BASE_DIR_HELP)
+    p_names.add_argument("--json", action="store_true", help="JSON 输出")
+
     args = parser.parse_args()
     if not args.subcommand:
         parser.print_help()
@@ -812,6 +843,7 @@ def main():
         "check": cmd_check,
         "cleanup": cmd_cleanup,
         "sync": cmd_sync,
+        "audit-names": cmd_audit_names,
         "login": cmd_login,
         "logout": cmd_logout,
         "info": cmd_info,

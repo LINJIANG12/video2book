@@ -151,3 +151,70 @@ def test_root_title_file_is_used_and_audio_paths_are_only_derived(make_workspace
     assert BlockPlan.audio_ready(ws, single) is True
     expected_single.write_bytes(b"")
     assert BlockPlan.audio_ready(ws, single) is False
+
+
+# ---------------------------------------------------------------------------
+# source.parts 完整性：digest 自校验（防手工裁短 parts 引发重规划）
+# ---------------------------------------------------------------------------
+
+def _裁掉尾部源集(ws, 保留: int) -> None:
+    """模拟手工把 `source.parts` 裁短——实测的破坏向量。"""
+    path = BlockPlan.path(ws)
+    plan = json.loads(path.read_text(encoding="utf-8"))
+    plan["source"]["parts"] = plan["source"]["parts"][:保留]
+    plan["source"]["pages"] = plan["source"]["pages"][:保留]
+    plan["source"]["part_count"] = 保留
+    plan["source"]["part_fingerprints"] = plan["source"]["part_fingerprints"][:保留]
+    path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def test_append_rejects_hand_trimmed_source_parts(make_workspace):
+    """手工裁短 `source.parts` 必须在**写计划之前**被拦下。
+
+    这是实测踩过的坑：`append` 只追加 `current[旧 parts 数:]`，所以一旦 parts 被裁短，
+    下一次 pipeline 就会把那些集当"新增"重新规划成块——9 块变 24 块、产物与块号整体错位。
+    `source.digest` 早就记着原始 parts，只是一直没人校验。
+    """
+    ws = make_workspace("计划完整性_BVTEST01")
+    BlockPlan.ensure(ws, _parts([1, 2, 3]), limits=LIMITS)
+
+    _裁掉尾部源集(ws, 2)
+    with pytest.raises(ValueError, match="digest"):
+        BlockPlan.ensure(ws, _parts([1, 2, 3]), limits=LIMITS)
+
+
+def test_load_still_reads_plan_after_source_tampering(make_workspace):
+    """自校验只在 strict 档（写路径）生效：只读工具必须仍能读，不能整个降级成"无计划"。"""
+    ws = make_workspace("计划完整性_只读_BVTEST01")
+    BlockPlan.ensure(ws, _parts([1, 2, 3]), limits=LIMITS)
+
+    _裁掉尾部源集(ws, 2)
+    plan = BlockPlan.load(ws)
+    assert plan is not None and len(plan["source"]["parts"]) == 2
+
+
+def test_plan_coverage_report_flags_gap_but_never_gates(make_workspace):
+    """覆盖缺口**只报告**：刻意排除某些集是合法状态（CMU 的 P10–P18 英文原声重复版就是），
+    缺的只是一个可见提示——实测它一直靠一段手写中文备注在维持。"""
+    from src.core.quality_gate import check_plan_coverage_workspace
+
+    ws = make_workspace("计划覆盖_BVTEST01")
+    # 12 集 × 600s，块目标 3000s → 会切成多个块，裁掉尾部块才能形成缺口
+    BlockPlan.ensure(ws, _parts(list(range(1, 13))), limits=LIMITS)
+    report = check_plan_coverage_workspace(ws)
+    assert report["issues"] == [], f"完整计划不该报缺口: {report}"
+    全块 = json.loads(BlockPlan.path(ws).read_text(encoding="utf-8"))["blocks"]
+    assert len(全块) > 1, "用例前提：分集要能切成多个块"
+
+    # 只裁 blocks（保留 source.parts 全长）——这是**合法**的刻意排除
+    path = BlockPlan.path(ws)
+    plan = json.loads(path.read_text(encoding="utf-8"))
+    plan["blocks"] = plan["blocks"][:1]
+    path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    report = check_plan_coverage_workspace(ws)
+    assert len(report["issues"]) == 1, f"缺口未被报出: {report}"
+    issue = report["issues"][0]
+    assert issue["kind"] == "coverage_gap", issue
+    assert issue["pages"] == list(range(7, 13)), issue
+    assert "P07-P12" in issue["detail"], issue

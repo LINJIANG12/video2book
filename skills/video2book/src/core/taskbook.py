@@ -11,7 +11,7 @@ Renders and exports task books for:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from src.core.constants import DEFAULT_TRANSCRIBE_WORKERS
 from src.core.block_plan import BlockPlan
@@ -21,11 +21,15 @@ from src.prompts import resolve_article_prompt
 
 TRANSCRIBE_INSTRUCTION = (
     "请忠实转录音频全文为纯文本逐字稿：\n"
+    "0. 来源抬头：**首行必须原样写** `> 来源：**听音转录**——非平台字幕，由讲师原声转录`。"
+    "这是逐字稿的来源标记，下游据它决定「能不能用平台字幕覆盖这份稿子」——"
+    "听音稿质量高于平台字幕，缺了这个标记就会被当成无来源而遭降级覆盖；\n"
     "1. 忠实完整：完整转录讲师的原声讲解、口述推导与对话，严禁大意摘要、节选跳过、二次总结或提前截断；\n"
     "2. 术语准确：准确识别领域专业术语、英文标识符、指令名、API、变量与缩写；\n"
     "3. 代码公式：讲师口述推导的数学公式、代码逻辑与配置参数如实记录；\n"
     "4. 纯净正文：严禁输出「总结」、「概览」、「大纲」等任何模型元语言，严禁自作主张提炼概括；\n"
     "5. 格式规整：不需要也不得标注时间戳（严禁臆测添加 [HH:MM:SS]），按自然语意与话题分段成通顺的段落正文。"
+    "时间戳同时是来源判据——听音稿必须**没有**它。"
 )
 
 TRANSCRIBE_TIMESTAMP_INSTRUCTION = TRANSCRIBE_INSTRUCTION
@@ -183,5 +187,107 @@ def export_block_article_task(
         f"{article_prompt}\n"
     )
     task_file.parent.mkdir(parents=True, exist_ok=True)
+    task_file.write_text(content, encoding="utf-8")
+    return task_file
+
+
+def page_audio_entries(ws: TaskWorkspace, block: Dict[str, Any], pages: Sequence[int]) -> List[Dict[str, Any]]:
+    """块内指定分集的**分集源音频**条目（不物化、不读文件）。
+
+    按集源音频是块音频的 concat 素材，整集腿时与块内该段内容逐字节一致；因此
+    「只转录失败的那几集」不需要重新物化任何音频。劈分腿（`P12上`/`P12下`）没有独立
+    文件，回退到整集源音频并带 `start_offset_sec`，由听音通道按区间读。
+    """
+    units = [u for u in (block.get("units") or []) if isinstance(u, dict)]
+    分腿页 = {
+        int(u.get("page") or 0)
+        for u in units
+        if str(u.get("label") or "").endswith(("上", "下")) and u.get("split")
+    }
+    条目: List[Dict[str, Any]] = []
+    for page in pages:
+        page = int(page)
+        腿 = [u for u in units if int(u.get("page") or 0) == page]
+        元数据 = dict((腿[0].get("source") if 腿 else None) or {})
+        if not 元数据:
+            元数据 = next(
+                (dict((s.get("source") or {}).get("metadata") or {})
+                 for s in (block.get("segments") or [])
+                 if isinstance(s, dict) and int(s.get("page") or 0) == page),
+                {},
+            )
+        元数据.setdefault("page", page)
+        条目.append({
+            "page": page,
+            "label": str(腿[0].get("label")) if 腿 else f"P{page:02d}",
+            "title": str(元数据.get("title") or f"P{page:02d}"),
+            "audio": str(BlockPlan.source_audio_path(ws, 元数据).resolve()),
+            "split": page in 分腿页,
+            "start_offset_sec": float(腿[0].get("source_offset_sec") or 0.0) if 腿 else 0.0,
+            "duration_sec": float(腿[0].get("duration_sec") or 0.0) if 腿 else 0.0,
+            "target": str(TaskWorkspace.page_transcript_path(ws, block, page)),
+        })
+    return 条目
+
+
+def export_page_transcribe_task(
+    ws: TaskWorkspace,
+    block: Dict[str, Any],
+    pages: Sequence[int],
+    *,
+    course_title: str = "",
+) -> Path:
+    """导出**按集补录**的转录任务书（subtitles/BLK03_P05-P07_转录任务书.md）。
+
+    与块级任务书的区别：音频是**按分集**的（不是整块拼接音轨），目标也是**按分集**的
+    补录稿。合并成最终块级逐字稿由编排层做，不要在这里合并。
+    """
+    block_id = int(block.get("block_id") or 0)
+    目标页 = [int(p) for p in pages]
+    entries = page_audio_entries(ws, block, 目标页)
+    span = BlockPlan.span(block) if block.get("segments") else "?"
+    task_file = Path(ws.subtitles_dir) / f"BLK{block_id:02d}_{span}_转录任务书.md"
+    task_file.parent.mkdir(parents=True, exist_ok=True)
+
+    audio_rows = "\n".join(
+        f"| P{e['page']:02d} | {e['title']} | `{e['audio']}` | `{e['target']}` |"
+        for e in entries
+    )
+    table = (
+        "| 集号 | 分集标题 | 分集音频（绝对路径） | 补录稿落盘路径 |\n"
+        "| :--- | :--- | :--- | :--- |\n" + audio_rows
+    )
+    content = (
+        f"# BLK{block_id:02d} {span} 按集补录转录任务书（TRANSCRIBE_TASK）\n\n"
+        f"> 📌 **执行指引（直接执行，无需探索）**：本任务输入与输出路径均已在第 1 节完全指定。直接读取指定输入文件，完成转录并保存到目标路径；无需也不要检索、扫描项目其他文件或仓库代码。\n"
+        f"> 状态：need-agent-transcript | **只做转录这一件事**，不要写长文\n"
+        f"> 说明：本块其余分集已用 B 站字幕拼好，**只有下列分集**取不到可用字幕，需要听音补录；"
+        f"补录稿是合并原料，**不要**自行改写块级逐字稿。\n"
+        f"> 完成后只回报一行 `BLK{block_id:02d} | 补录稿路径 | 字节数 | 执行者`，**不回传正文**\n\n"
+        f"## 1. 任务输入\n\n"
+        f"- 课程全称：{course_title}\n"
+        f"- 待补录分集（共 {len(entries)} 集）：{'、'.join('P%02d' % e['page'] for e in entries)}\n\n"
+        f"### 分集音频与落盘路径\n\n{table}\n\n"
+        f"---\n\n"
+        f"## 2. 执行指引\n\n"
+        f"1. **逐集转录**（对第 1 节表里**每一行**各转一次，不要只转第一行、也不要早退）：\n"
+        f"   - **优先 `omni-media-ext:read_media`**：\n"
+        f"     `file_path` = 该行的分集音频绝对路径；`mode` = `\"transcribe\"`；\n"
+        f"     `prompt` = 第 2.1 节纯文本转录要求（**必须原样传入**）；\n"
+        f"     `output_file` = 该行的补录稿落盘路径——传入它 MCP 就原子直写磁盘，全文 0 Token 进上下文；\n"
+        f"     唯二例外：需要限定本片时长时加 `duration_minutes` = 该集时长；需要按名切换端点时加 `endpoint`）；\n"
+        f"   - **工具列表里没有 `read_media` 时才用 `omni-media:read_audio`**（宿主原生听音：\n"
+        f"     `file_path` = 该行的分集音频绝对路径；`output_mode` = `\"file\"` 拿切片路径，再用\n"
+        f"     宿主的「读文件」能力聆听；`read_audio` 没有 `mode` / `prompt` / `output_file` / `endpoint` 这几个参数）；\n"
+        f"2. **落盘补录稿**：`read_media` 未传 `output_file` 时，把该集的完整转录正文写入该行指定的路径；"
+        f"`read_audio` 由宿主聆听后自行落盘。\n"
+        f"3. **逐集核对**：确认**每一集**的补录稿都已落盘且非空，再按抬头格式回报单行。\n\n"
+        f"### 2.1 纯文本转录要求（原样传给 `prompt`）\n\n"
+        f"```text\n{TRANSCRIBE_INSTRUCTION}\n```\n\n"
+        f"---\n\n"
+        f"## 3. 纪律\n\n"
+        f"- 本任务**只产出补录稿**：不写长文、不动 `articles/`、不合并块级逐字稿；\n"
+        f"- 补录稿是唯一事实来源，严禁脑补。\n"
+    )
     task_file.write_text(content, encoding="utf-8")
     return task_file
