@@ -101,4 +101,4 @@ metadata:
 
 细则索引：`workflow.md`（阶段流程）、`runtime.md`（依赖与听音）、`cli-cookbook.md`（命令）、`delivery_matrix.md`（产物规范）、`host-tools/`（宿主工具映射）。
 
-> 标题纪律：长文、教材、笔记标题一律不写序号；用 `check --fix-numbering` 清理存量。交付物禁用 GitHub 告警块语法。
+> 标题纪律：长文、教材、笔记标题一律不写序号；用 `check --fix-numbering --apply` 清理存量。交付物禁用 GitHub 告警块语法。

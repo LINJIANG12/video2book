@@ -204,6 +204,7 @@ flowchart TD
 ```
 
 - **Audio is read only by the transcriber roles, only for subtitle-less blocks**: The logical block plan is computed from metadata into `block_plan.json`; blocks with complete subtitles produce their transcript directly, and only the remaining blocks fetch audio under `audio/blocks/` on that same locked plan — never re-planned. Writer roles read block transcripts only and never touch audio.
+- **Physical audio is recycled once every deliverable exists**: the per-episode source audio and the block-level concatenations are the only bulky intermediates (a 145-episode course is about 476 MB, and each block file is merely a concat copy of its episodes), while no transcript ever references an audio path. `pipeline` deletes them at the close-out step only when **all four conditions hold** — every block transcript complete, every module article written, notes merged, textbooks compiled; if any is missing it skips and prints what is missing. `--keep-audio` opts out, and the ledger lands in `manifest.json` under `audio_purge`.
 - **Dispatch thresholds live in `src/core/budget.py`**: under 60 minutes total the main agent handles work serially; over 60 minutes it must dispatch — three transcriber roles consuming the block queue, plus writer roles (one sub-agent per block, one module article per block). The window fallback applies only to transcriber roles on Channel A: a block whose computed audio tokens exceed 60% of the context window must be read in continuation chunks.
 - **Module level needs no plan, and note merging never stalls**: a block *is* the knowledge module (audio is packed into 40–60 minute blocks, each block titled by semantically combining its episodes' names), so textbooks simply compile block articles in block order; notes merge blocks into a number of notes (`note_plan.json`, one note may span several blocks). Unknown or duplicate block claims are rescued in place (first-come-wins, orphan blocks get fallback notes), the command always exits normally, and the on-disk `note_plan.json` is never overwritten by fallback results.
 - **Stage 1 and Stage 2 are decoupled by content boundaries**, so a long course can resume from a breakpoint.
@@ -232,7 +233,7 @@ For everything else see the [CLI cookbook](skills/video2book/references/cli-cook
 - **Per platform / per range fetching**: Bilibili collections and legacy collections where every episode is its own BV, YouTube channels, Douyin creator collections, `--page` / `--range`;
 - **Dispatch queue and stage gate**: `queue_tracker.py` payloads for the transcriber / writer / note side, plus one-line status;
 - **Textbooks and notes**: `cluster-articles` / `cluster-notes` (with `--force`);
-- **Quality checks and close-out**: the unified `check` gate (`--stage1` release, judged by two-layer entity coverage over English identifiers and Chinese terminology / `--deliver` audit / `--fix-numbering` heading cleanup), plus `cleanup` and `sync` (already run automatically).
+- **Quality checks and close-out**: the unified `check` gate (`--stage1` release, judged by two-layer entity coverage over English identifiers and Chinese terminology / `--deliver` audit / `--fix-numbering` heading cleanup, **report-only unless `--apply` is passed**), plus `audit-names` (lists English proper nouns that cannot be found in the transcripts), `cleanup` and `sync` (already run automatically).
 
 Five note-quality checks are fatal and fail the delivery outright: **boilerplate filler, hollow headings, per-episode headings, inline quote fragments and episode voice**. Sentence truncation and missing structure are advisory; add `--require-structure` to gate on them. Rendering fatals are GitHub alert blocks, bare ASCII art outside fences and fence pairing; a missing fence **language tag** is advisory unless you pass `--require-lang`.
 
@@ -300,11 +301,12 @@ skill/
 ├── skills/video2book/          # the skill itself; this is the only directory you install
 │   ├── SKILL.md                # skill contract, the single source of truth for the Agent
 │   ├── src/                    # toolchain
-│   │   ├── cli.py              # entry point: 11 subcommands
+│   │   ├── cli.py              # entry point: 10 subcommands
 │   │   ├── core/               # paths, audio budget, pipeline, fetching, deliverable lint
 │   │   │   └── ingestion/      # unified media engine (Bilibili / local / YouTube / Douyin)
 │   │   └── generator/          # task files, prompt templates and semantic aggregation
 │   ├── scripts/                # dispatch queue, selfcheck and no-install runner
+│   ├── tools/                  # batch dispatch scripts (v2b_dispatch / v2b_env / v2b_prompt)
 │   └── references/             # install guide, delivery matrix, CLI cookbook, host tool maps
 ├── agents/                     # skill metadata for the generic agents side
 ├── .claude-plugin/             # Claude Code plugin manifest
@@ -340,7 +342,7 @@ python src/cli.py cluster-notes "<url or local path>"     # block → note aggre
 python src/cli.py check --deliver --strict                 # pre-delivery check (note quality + render)
 ```
 
-**All 11 subcommands, every flag, the full argument list, per-scenario examples and the exit codes (0–4)** live in the
+**All 10 subcommands, every flag, the full argument list, per-scenario examples and the exit codes (0–4)** live in the
 [CLI cookbook](skills/video2book/references/cli-cookbook.md) — the single source for CLI detail; this README no longer duplicates them.
 
 <div align="right">
@@ -384,7 +386,7 @@ Prioritize direct-to-disk writers. Prefer mounting the `omni-media-ext` entry (p
 
 ### The listening channel is installed but no transcript comes back
 
-First check which layer the error came from. If the tool reports that the error came from the endpoint's **upstream**, the MCP service and the gateway process are both fine — the gateway itself cannot obtain upstream credentials, or the upstream is unreachable. `omni-media-ext status --probe` **cannot detect this**, because it only issues `GET /models`. Check that your local proxy/accelerator is running and can reach the upstream, and do **not** change endpoint settings such as `/audio/transcriptions` or `model` — rerunning will not help either.
+First check which layer the error came from. If the tool reports that the error came from the endpoint's **upstream**, the MCP service and the gateway process are both fine — the gateway itself cannot obtain upstream credentials, or the upstream is unreachable. `omni-media status` **cannot detect this**, because it only performs local diagnostics (Python / ffmpeg, config file and host mount state) and issues no transcription request. Check that your local proxy/accelerator is running and can reach the upstream, and do **not** change endpoint settings such as `/audio/transcriptions` or `model` — rerunning will not help either.
 
 If instead the error says the transcription endpoint returned the model's own outline/plan N times in a row, that is an occasional upstream-model behaviour: the service already re-reads within `max_retries`. If it still fails, retry the slice or re-read it with a smaller `duration_minutes`.
 

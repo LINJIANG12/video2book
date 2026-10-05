@@ -65,7 +65,7 @@ If you copied the directory, re-copy it after pulling.
 
 1. Use the `skill` tool to list what has been discovered
 2. Confirm your OpenCode skills directory actually matches where you put the link
-3. Confirm the linked directory contains both `SKILL.md` and the toolchain (`src/`, `scripts/`)
+3. Confirm the linked directory contains both `SKILL.md` and the toolchain (`src/`, `scripts/`, `tools/`)
 
 ### Tool mapping
 

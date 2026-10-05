@@ -132,8 +132,8 @@
 
 - **公式的阅读侧设置**：Typora → 偏好设置 → Markdown → 勾选「内联公式」（Inline Math）。未开启时行内公式会原样显示 `$…$` 源码，看起来像公式损坏。
 - **标题序号**：三类交付物的标题**一律不写序号**——阅读器会自动给标题编号，手写序号会与它叠成
-  `1. 第 1 章：…` 这种双号。存量产物的手写序号用 `python src/cli.py check --fix-numbering` 就地清理
-  （幂等、可 `--dry-run` 预演）；`python src/cli.py check --deliver` 会统计「标题手写序号」，
+  `1. 第 1 章：…` 这种双号。存量产物的手写序号用 `python src/cli.py check --fix-numbering --apply` 就地清理
+  （幂等；不带 `--apply` 时只预演报告、不写盘）；`python src/cli.py check --deliver` 会统计「标题手写序号」，
   加 `--require-no-numbering` 可把它纳入门禁。
 - **音频码率备注**（非排版项，供排查体积问题）：B 站链路下载后统一转封装为 **16kHz 单声道 32kbps AAC**（`fetcher.py`），
   本地媒体提取为 **16kHz 单声道 64kbps AAC**（`local_media.py`）；文档一律只承诺「16kHz 单声道」。

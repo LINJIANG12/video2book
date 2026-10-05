@@ -107,9 +107,9 @@ python src/cli.py check --deliver --strict --require-structure
 python src/cli.py check --deliver --strict --require-lang
 python src/cli.py check --deliver --strict --require-no-numbering
 
-# 清理存量标题手写序号
-python src/cli.py check --fix-numbering --dry-run
+# 清理存量标题手写序号（默认只报不改；加 --apply 才写盘）
 python src/cli.py check --fix-numbering
+python src/cli.py check --fix-numbering --apply
 ```
 
 阶段一使用双层实体覆盖率：英文标识符与多位数字、中文技术术语骨架；任一层达到 `--min-coverage` 即放行。中文层固定 3 次门槛，`--min-freq` 只调英文层。
@@ -144,10 +144,10 @@ python src/cli.py audit-names          # 专名复核清单（只报告，可随
 
 | 入口 | 参数 | 用途 |
 | :--- | :--- | :--- |
-| `pipeline` | `--all` `--range X-Y` `--page N` `--quality <档>` `--block-minutes N` `--force` `--article-type <风格>` `--dry-run` `--audio-only` `--keep-audio` `--task NAME` `--base-dir DIR` | 阶段一主入口；`--force` 只重取物理音频/逐字稿/任务书，不改变已有计划；`--keep-audio` 豁免收尾的音频自动回收 |
+| `pipeline` | `--all` `--range X-Y` `--page N` `--quality <档>` `--block-minutes N` `--force` `--allow-downgrade` `--article-type <风格>` `--dry-run` `--audio-only` `--keep-audio` `--task NAME` `--base-dir DIR` `--sessdata <串>` `--douyin-cookie <串>` | 阶段一主入口；`--force` 只重取物理音频/逐字稿/任务书，不改变已有计划（默认拒绝用字幕稿覆盖听音稿，`--allow-downgrade` 才放行）；`--keep-audio` 豁免收尾的音频自动回收 |
 | `cluster-notes` | `--force` `--block-id N` `--start-block N` `--end-block N` | 笔记归并派发；后三者按笔记序号筛选 |
 | `cluster-articles` | `--force` | 默认复用已有教材，`--force` 按最新计划重编 |
-| `check` | `--stage1` `--deliver` `--fix-numbering` `--strict` `--dir` `--task` `--base-dir` `--json` `--min-freq N` `--min-coverage F` `--max-truncated N` `--require-structure` `--require-lang` `--require-no-numbering` `--only` `--dry-run` `--max-samples N` `--hash-nonheading` | 质量门禁与存量标题清理 |
+| `check` | `--stage1` `--deliver` `--fix-numbering` `--strict` `--dir` `--task` `--base-dir` `--json` `--min-freq N` `--min-coverage F` `--max-truncated N` `--require-structure` `--require-lang` `--require-no-numbering` `--only` `--apply` `--max-samples N` `--hash-nonheading` | 质量门禁与存量标题清理（`--fix-numbering` 默认只报不改，`--apply` 才写盘） |
 | `cleanup` | `--keep N` `--dry-run` `--task 关键字` | 每类保留 N 份任务书范本 |
 | `sync` | `--dry-run` `--task 关键字` | 按磁盘对账回填 manifest |
 | `queue_tracker.py` | `--next-transcribe [N]` `--next-module N` `--next-note N` `--summary` `--json` `--dir PATH` `--pattern/--task 关键字` `--base-dir DIR` `--log-dispatch` `--claim` `--claims` `--release KEYS` `--exclude KEYS` `--claim-ttl-minutes N` | 派发载荷与阶段进度；`--claim` 滚动补位（在途自动排除、落盘自动释放），`--release` / `--claims` 释放与查看 |
