@@ -200,6 +200,144 @@ def test_log_dispatch_appends_ledger_entry(run_queue, dispatch_ws):
 
 
 # ---------------------------------------------------------------------------
+# 滚动补位（--claim / --claims / --release / --exclude）
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def rolling_ws(make_workspace, blocks_factory):
+    """两个「逐字稿已就绪、长文缺席」的块：滚动补位的最小舞台。"""
+    ws = make_workspace("滚动补位课_BV1probe002")
+    ws.save_parts([
+        {"page": 1, "title": "导学", "duration": 900},
+        {"page": 2, "title": "变量", "duration": 1200},
+        {"page": 3, "title": "循环", "duration": 1100},
+        {"page": 4, "title": "函数", "duration": 1000},
+    ])
+    blocks = [
+        blocks_factory(1, [1, 2], title="导学与变量", span="P01-P02", duration_min=35.0),
+        blocks_factory(2, [3, 4], title="循环与函数", span="P03-P04", duration_min=35.0),
+    ]
+    write_blocks(ws, blocks)
+    for block in blocks:
+        audio = BlockPlan.audio_path(ws, block)
+        audio.parent.mkdir(parents=True, exist_ok=True)
+        audio.write_bytes(b"x" * 20000)
+        (ws.subtitles_dir / f"BLK{block['block_id']:02d}_{block['span']}_逐字稿.md").write_text(
+            "逐字稿正文" * 200, encoding="utf-8")
+    return ws
+
+
+def _claims_file(ws) -> dict:
+    path = ws.root_dir / ".dispatch_claims.json"
+    assert path.exists(), "认领文件未落盘"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _claim_keys(ws) -> list:
+    return sorted(c["key"] for c in _claims_file(ws)["claims"])
+
+
+def test_rolling_claim_excludes_in_flight(run_queue, rolling_ws):
+    """取一批登记认领后，下一次取载荷必须跳过仍在途的块——滚动补位的核心不变量。"""
+    first = _payload(run_queue("--base-dir", str(rolling_ws.root_dir),
+                               "--next-module", "1", "--claim", "--json"))["next"]
+    assert [i["block_id"] for i in first] == [1]
+    assert _claim_keys(rolling_ws) == ["module:1"]
+
+    second = _payload(run_queue("--base-dir", str(rolling_ws.root_dir),
+                                "--next-module", "5", "--claim", "--json"))["next"]
+    assert [i["block_id"] for i in second] == [2], "在途块被重复派发"
+    assert _claim_keys(rolling_ws) == ["module:1", "module:2"]
+
+
+def test_rolling_claim_auto_releases_when_artifact_lands(run_queue, rolling_ws):
+    """成品落盘即自动释放认领（无需手工对账），并立即腾出补位槽。"""
+    run_queue("--base-dir", str(rolling_ws.root_dir), "--next-module", "1", "--claim", "--json")
+    (rolling_ws.articles_dir / "模块01_导学与变量_精读长文.md").write_text("正文" * 400, encoding="utf-8")
+    payload = _payload(run_queue("--base-dir", str(rolling_ws.root_dir),
+                                 "--next-module", "5", "--claim", "--json"))
+    assert [i["block_id"] for i in payload["next"]] == [2]
+    assert payload["claims"]["released_done"] == 1
+    assert _claim_keys(rolling_ws) == ["module:2"]
+
+
+def test_release_allows_redispatch(run_queue, rolling_ws):
+    """失败/放弃的块：`--release` 释放后即可被重新取到，不必等 TTL。"""
+    run_queue("--base-dir", str(rolling_ws.root_dir), "--next-module", "1", "--claim", "--json")
+    res = run_queue("--base-dir", str(rolling_ws.root_dir), "--release", "BLK01")
+    assert res.code == 0, res.out[-300:]
+    again = _payload(run_queue("--base-dir", str(rolling_ws.root_dir),
+                               "--next-module", "5", "--claim", "--json"))["next"]
+    assert [i["block_id"] for i in again] == [1, 2]
+
+
+def test_exclude_filters_payload_without_claim(run_queue, rolling_ws):
+    """`--exclude` 是无状态原语：不落认领文件也能排除指定块。"""
+    payload = _payload(run_queue("--base-dir", str(rolling_ws.root_dir),
+                                 "--next-module", "5", "--exclude", "BLK01", "--json"))
+    assert [i["block_id"] for i in payload["next"]] == [2]
+    assert not (rolling_ws.root_dir / ".dispatch_claims.json").exists()
+
+
+def test_claim_requires_next_flag(run_queue, rolling_ws):
+    """`--claim` 单独使用是脚本错误：静默忽略会造成重复派发，必须直接失败。"""
+    res = run_queue("--base-dir", str(rolling_ws.root_dir), "--claim", "--json")
+    assert res.code == 1
+    assert "--claim" in res.out
+
+
+def test_stale_claim_expires_and_is_reported(run_queue, rolling_ws):
+    """过期认领自动释放并计数：崩溃的派发不能永久堵住队列。"""
+    run_queue("--base-dir", str(rolling_ws.root_dir), "--next-module", "1", "--claim", "--json")
+    path = rolling_ws.root_dir / ".dispatch_claims.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["claims"][0]["ts"] = 1.0  # 1970 年：必然过期
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    payload = _payload(run_queue("--base-dir", str(rolling_ws.root_dir),
+                                 "--next-module", "5", "--claim", "--json"))
+    assert payload["claims"]["released_stale"] == 1
+    assert [i["block_id"] for i in payload["next"]] == [1, 2], "过期认领未被释放，块被永久堵住"
+
+
+def test_claims_report_lists_in_flight(run_queue, rolling_ws):
+    run_queue("--base-dir", str(rolling_ws.root_dir), "--next-module", "1", "--claim", "--json")
+    res = run_queue("--base-dir", str(rolling_ws.root_dir), "--claims")
+    assert res.code == 0, res.out[-300:]
+    assert "在途认领" in res.out and "BLK01" in res.out
+
+
+def test_note_claim_uses_note_kind(run_queue, dispatch_ws):
+    """笔记侧认领走 note 键空间，不会被同名块号误伤。"""
+    (dispatch_ws.notes_dir / "笔记01_导学与变量_TASK.md").write_text(
+        "# 笔记 01 导学与变量 笔记任务书（NOTE_TASK）\n", encoding="utf-8")
+    first = _payload(run_queue("--base-dir", str(dispatch_ws.root_dir),
+                               "--next-note", "1", "--claim", "--json"))["next_note"]
+    assert [i["note_id"] for i in first] == [1]
+    assert _claim_keys(dispatch_ws) == ["note:1"]
+    second = _payload(run_queue("--base-dir", str(dispatch_ws.root_dir),
+                                "--next-note", "1", "--claim", "--json"))["next_note"]
+    assert second == [], "在途笔记被重复派发"
+
+
+def test_transcribe_claim_not_released_by_partial_draft(run_queue, dispatch_ws):
+    """转录认领的释放条件是**整块逐字稿**落盘：部分稿不释放，补录期间不得被重复派发。"""
+    run_queue("--base-dir", str(dispatch_ws.root_dir), "--next-transcribe", "1", "--claim", "--json")
+    assert _claim_keys(dispatch_ws) == ["transcribe:1"]
+    (dispatch_ws.subtitles_dir / "BLK01_P01-P02_字幕部分稿.md").write_text(
+        "部分稿" * 100, encoding="utf-8")
+    # 第二次故意不传 --claim：认领一旦存在就必须继续生效（粘性排除）
+    payload = _payload(run_queue("--base-dir", str(dispatch_ws.root_dir),
+                                 "--next-transcribe", "1", "--json"))
+    assert payload["claims"]["released_done"] == 0, "部分稿不应释放整块转录认领"
+    assert payload["next_transcribe"] == [], "在途转录块被重复派发"
+    _write_transcript(dispatch_ws)
+    payload2 = _payload(run_queue("--base-dir", str(dispatch_ws.root_dir),
+                                  "--next-transcribe", "1", "--json"))
+    assert payload2["claims"]["released_done"] == 1
+    assert not (dispatch_ws.root_dir / ".dispatch_claims.json").exists(), "释放后认领文件未清理"
+
+
+# ---------------------------------------------------------------------------
 # 预算系数与阈值口径
 # ---------------------------------------------------------------------------
 

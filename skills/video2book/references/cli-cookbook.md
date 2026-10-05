@@ -67,6 +67,25 @@ python scripts/queue_tracker.py --summary
 
 载荷中的 `dispatch_prompt` 必须原样透传。缺物理音频的块不会进入转录载荷；应由 `pipeline` 先完成按需物化。
 
+**滚动补位（完成一个、立即补一个）**：取载荷加 `--claim`，工具把本次取出的块登记为在途认领
+（`<task>/.dispatch_claims.json`），此后取载荷自动排除未落盘的在途块：
+
+```bash
+# 初始填充：取 6 个并登记在途认领
+python scripts/queue_tracker.py --next-module 6 --claim --json
+
+# 每收到一个子智能体完成，重跑同一条命令：得到的就是空出的补位槽
+python scripts/queue_tracker.py --next-module 6 --claim --json
+
+# 失败重派前释放认领（或 --release all）；断点恢复时查在途
+python scripts/queue_tracker.py --release BLK03
+python scripts/queue_tracker.py --claims
+```
+
+成品落盘即自动释放认领；超过 `BVB_CLAIM_TTL_MINUTES`（默认 360 分钟）未落盘的认领自动过期并打印。
+登记过一次后，后续取载荷不传 `--claim` 也照样排除在途块（粘性）；删掉认领文件即回到无状态按批模式。
+无状态手工排除用 `--exclude BLK01,笔记02`。
+
 ## 场景六：笔记与教材
 
 ```bash
@@ -131,7 +150,7 @@ python src/cli.py audit-names          # 专名复核清单（只报告，可随
 | `check` | `--stage1` `--deliver` `--fix-numbering` `--strict` `--dir` `--task` `--base-dir` `--json` `--min-freq N` `--min-coverage F` `--max-truncated N` `--require-structure` `--require-lang` `--require-no-numbering` `--only` `--dry-run` `--max-samples N` `--hash-nonheading` | 质量门禁与存量标题清理 |
 | `cleanup` | `--keep N` `--dry-run` `--task 关键字` | 每类保留 N 份任务书范本 |
 | `sync` | `--dry-run` `--task 关键字` | 按磁盘对账回填 manifest |
-| `queue_tracker.py` | `--next-transcribe [N]` `--next-module N` `--next-note N` `--summary` `--json` `--dir PATH` `--pattern/--task 关键字` `--base-dir DIR` `--log-dispatch` | 派发载荷与阶段进度 |
+| `queue_tracker.py` | `--next-transcribe [N]` `--next-module N` `--next-note N` `--summary` `--json` `--dir PATH` `--pattern/--task 关键字` `--base-dir DIR` `--log-dispatch` `--claim` `--claims` `--release KEYS` `--exclude KEYS` `--claim-ttl-minutes N` | 派发载荷与阶段进度；`--claim` 滚动补位（在途自动排除、落盘自动释放），`--release` / `--claims` 释放与查看 |
 
 ## 退出码
 

@@ -34,10 +34,11 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .bili_web import BROWSER_HEADERS
 from .fetcher import _请求元数据
@@ -71,10 +72,10 @@ SUBTITLE_OVERRUN_WARN = 1.02
 # 身份类故障（URL 不符 / 时长越界）的重试预算，与"残缺正文"类的 `BVB_SUBTITLE_ATTEMPTS` 同值。
 # 实测单次抽中**正确**轨只有约 28%（29 次抽样命中的 8 次），坏抽签里 URL 失配约占 45%、
 # 空 URL 约占 24%——三者的共同点是「再抽一次就是全新一张签」。3 轮只覆盖 62.7%，
-# 剩下的会被误判成"本集无字幕"并白烧一次听音兜底。10 轮覆盖 96.3%，最坏退避 67.5 秒。
+# 剩下的会被误判成"本集无字幕"并白烧一次听音兜底。10 轮覆盖 96.3%，最坏退避仅 22.5 秒。
 IDENTITY_RETRY_MAX = 10
 
-# 身份判据的故障原因前缀（`_身份故障` 依此分类，两处必须在同一常量上对齐）
+# 身份判据的故障原因前缀（`_身份故障` 依此分类）
 REASON_TITLE_MISMATCH = "内容与分集标题不符"
 REASON_TIME_OVERRUN = "时长越界"
 # URL 身份不符：AI 字幕文件名（`/prod/<aid><cid><hash>`）与本次请求的 aid+cid 对不上。
@@ -82,10 +83,8 @@ REASON_TIME_OVERRUN = "时长越界"
 # 13 次判不等全是别家内容），且能拦住时长贴合（覆盖率 98.3%）的错件，
 # 那是两条时长判据放行、唯一能靠它拦下的形态。
 REASON_URL_MISMATCH = "URL 身份不符"
-# 响应里一条中文轨都没有。**这不是定论**：实测约 1.4% 的抽次会返回零轨（坏抽签），
-# 而同一集在别的抽次里正常给出 ai-zh——原先把它当定论直接返回，会把有字幕的集
-# 误判成"无字幕"。故改为可重试，但只给 `NO_TRACK_RETRY_MAX` 轮子预算：
-# 够逃出坏抽签，又不至于让"整门课都没有字幕"的课程白等完整预算的退避。
+# 响应里一条中文轨都没有。实测显示：空轨与串台是同一服务端调度故障的两种随机表现，
+# 并非定论。它与身份族统一共享完整的重试上限，避免过早收手造成假杀。
 REASON_NO_TRACK = "无中文字幕轨"
 
 # AI 字幕文件名前缀：`.../bfs/ai_subtitle/prod/<aid><cid><hash>?...`
@@ -96,42 +95,22 @@ REASON_NO_TRACK = "无中文字幕轨"
 # 注意人工 CC 轨不走 `/prod/` 路径，本判据对它不适用（见 `_取字幕一次`）。
 AI_SUBTITLE_PATH_RE = re.compile(r"/prod/(\d+)")
 
-# 标题术语的子窗宽度：容忍讲师用词与 ASR 断字差异（标题「法律拟定」/讲师说「法律拟制」、
-# 标题 7 字长术语而正文只念出后半截）。子窗只到 3 字，避免「安全」这类通用二字窗误命中。
-CN_SUBWINDOW_WIDTH = 3
-
-# 单次命中可能是巧合：实测串台短剧里恰好出现过一次「罪名」（标题「普通罪名」的第二个术语），
-# 只按"非零命中"放行会漏掉整页串台。故要求"长术语（≥3 字）命中"或"任一术语命中 ≥ 2 次"。
-IDENTITY_MIN_HITS = 2
-
-# 课程高频术语对照（第二票）：标题不匹配时再看这页是否还落在这门课的词频骨架上。
-# 实测（刑法课 118 页）：串台页与课程高频 Top30 的重叠只有 0~1 个，而"标题用词与讲师说法不同"
-# 的正常页有 4~8 个（「枪支类犯罪」讲成「枪支犯罪」、「危害税收征管罪」讲成「税收犯罪」）——
-# 只靠标题一票会把这类正常页误判成串台，白烧一次音频兜底。
-COURSE_TERMS_TOP = 30
-COURSE_OVERLAP_MIN = 2
-# 课程术语表的启用下限：参照正文（工作区已有逐字稿 + 本次已取回字幕）少于这么多页时不建表，
-# 身份判据退回"只看标题"。
-COURSE_TERMS_MIN_PAGES = 5
-
 # 行首时间戳：字幕稿的特征（听音稿被明令禁止标注时间戳），用于 `transcript_source` 判来源。
 时间戳行_RE = re.compile(r"^\s*\[\d{1,2}:\d{2}(?::\d{2})?\]", re.MULTILINE)
 # 来源行的加粗标签：`> 来源：**B 站字幕…**` 里的 `B 站字幕…`——整行搜关键词会判反。
 来源标签_RE = re.compile(r"\*\*(.+?)\*\*")
 
-# 内容级重试：同一分集被 CDN 截断 / 服务端串台 / 空 URL 时重试几轮（线性退避，轮次 × 该基数）。
+# 内容级重试：同一分集被 CDN 截断 / 服务端串台 / 空 URL / 偶发无轨时重试几轮（线性退避，轮次 × 该基数）。
 # 实测单次抽中正确轨约 28%，且**每次抽签独立**——重试不是等故障恢复，是重新抽。
 # 10 轮把单集覆盖率从 3 轮的 62.7% 提到 96.3%。环境变量只能调低（批量任务想更快时用）。
 ENV_SUBTITLE_ATTEMPTS = "BVB_SUBTITLE_ATTEMPTS"
 DEFAULT_SUBTITLE_ATTEMPTS = 10
 MAX_SUBTITLE_ATTEMPTS = 10
-# 「零中文轨」的子预算（见 `REASON_NO_TRACK`）：比总预算小得多，因为它是确认性重试
-# 而非捞取性重试——坏抽签逃出去一次就够，真要没有字幕的集也不该等满 8 轮。
-NO_TRACK_RETRY_MAX = 3
+# 无轨重试上限：与总上限统一为 10，不再提前截断。
+NO_TRACK_RETRY_MAX = 10
 # 抽签重试退避：同一分集被 CDN 截断 / 服务端串台 / 空 URL 时每轮抽签之间的间隔。
 # 实测串台是 B 站负载均衡每次随机丢一张签，换签不需要长久等待；且底层 `_请求元数据`
-# 本身已有 1.5 秒安全限速保护，故外层退避基数定为 0.5 秒（10 轮累计仅 22.5 秒，
-# 相比原先 67.5 秒坐牢提速 3 倍）。
+# 本身已有 1.5 秒安全限速保护，故外层退避基数定为 0.5 秒（10 轮累计仅 22.5 秒）。
 SUBTITLE_RETRY_BACKOFF_SEC = 0.5
 
 
@@ -279,196 +258,8 @@ def subtitle_time_band(coverage: float, is_ai: bool) -> str:
     return "warn" if coverage > SUBTITLE_OVERRUN_WARN else "ok"
 
 
-def _标题术语(title: str) -> List[str]:
-    """分集标题里的术语骨架（len ≥ 2）。
-
-    复用阶段一门禁（`quality_gate`）的同一套切分——繁简归一 + 停用字切片，不另立词表：
-    标题「第20讲 第02节：走私犯罪」→ `['走私犯罪']`，「第16讲 第02节：注意规定与法律拟定」
-    → `['注意规定', '法律拟定']`。
-    """
-    from .quality_gate import extract_cn_entities  # 函数内导入，避免 core 内模块级循环
-    return [术语 for 术语 in extract_cn_entities(str(title or ""), min_freq=1) if len(术语) >= 2]
-
-
-def _子窗(术语: str, 宽度: int = CN_SUBWINDOW_WIDTH) -> List[str]:
-    """术语内长度 = `CN_SUBWINDOW_WIDTH` 的连续子窗（术语本身不超过该宽度时返回空）。"""
-    if len(术语) <= 宽度:
-        return []
-    return [术语[i:i + 宽度] for i in range(len(术语) - 宽度 + 1)]
-
-
-def course_terms(texts: Any, top: int = COURSE_TERMS_TOP) -> List[str]:
-    """课程高频术语表：把参考正文（同课其它分集的字幕正文）按术语骨架计数，取最高的 `top` 个。
-
-    用途是给身份判据当"第二票"：串台内容来自别的稿件，与这门课的高频术语几乎不重叠。
-    参考正文不足（拿不到别的分集）时返回空表，判据自动退回"只看标题"。
-    """
-    from .quality_gate import extract_cn_entities  # 与术语抽取同一套繁简口径
-    计数: Dict[str, int] = {}
-    for 文本 in texts or []:
-        正文 = str(文本 or "").strip()
-        if not 正文:
-            continue
-        for 术语, 次 in extract_cn_entities(正文, min_freq=1).items():
-            if len(术语) >= 2:
-                计数[术语] = 计数.get(术语, 0) + 次
-    return [术语 for 术语, _ in sorted(计数.items(), key=lambda kv: (-kv[1], kv[0]))[:max(1, int(top))]]
-
-
-def course_overlap(cues: Any, 术语表: Any, top: int = COURSE_TERMS_TOP) -> int:
-    """本页高频术语与课程高频术语表的交集大小（第二票的度量）。
-
-    两侧都取"最高频的 `top` 个术语"再比交集，与篇幅无关：串台页自己的高频词是
-    「手机/屏幕/大家」这类，交集实测 0~1；正常页即便是冷门章节，也会共享
-    「犯罪/行为/规定/判断」这类课程骨架词，实测 4~8。
-    """
-    参考 = {str(t) for t in (术语表 or []) if str(t).strip()}
-    if not 参考:
-        return 0
-    from .quality_gate import extract_cn_entities, normalize_script
-    正文 = normalize_script("".join(
-        str(条.get("content") or "") for 条 in (cues or []) if isinstance(条, dict)
-    ))
-    if not 正文:
-        return 0
-    本页高频 = {术语 for 术语, _ in extract_cn_entities(正文, min_freq=1).most_common(max(1, int(top)))}
-    return len(本页高频 & 参考)
-
-
-def _身份命中(cues: Any, title: str) -> tuple:
-    """返回 `(标题术语组, 命中计数表, 有无正文)`；术语组为空表示标题无实词、判据让路。
-
-    计数 = 术语全文命中数 + 该术语的子窗命中数（子窗容忍用词/断字差异）。没有正文时不计数，
-    由调用方按"正文为空"的瞬时故障处理（`subtitle_identity` 则直接让路）。
-    """
-    术语组 = _标题术语(title)
-    if not 术语组:
-        return [], {}, False
-    from .quality_gate import normalize_script  # 与术语抽取同一套繁简口径
-    正文 = normalize_script("".join(
-        str(条.get("content") or "") for 条 in (cues or []) if isinstance(条, dict)
-    ))
-    if not 正文:
-        return 术语组, {}, False
-    计数: Dict[str, int] = {}
-    for 术语 in 术语组:
-        窗口 = [窗 for 窗 in _子窗(术语) if 窗 in 正文]
-        次 = 正文.count(术语) + len(窗口)
-        if 次:
-            计数[术语] = 次
-    return 术语组, 计数, True
-
-
-def _身份强命中(计数: Any) -> bool:
-    """是否"确实在讲本集标题里的东西"：长术语（≥3 字）命中，或任一术语命中 ≥ `IDENTITY_MIN_HITS` 次。"""
-    if not isinstance(计数, dict):
-        return False
-    return (any(len(术语) >= CN_SUBWINDOW_WIDTH for 术语 in 计数)
-            or any(次 >= IDENTITY_MIN_HITS for 次 in 计数.values()))
-
-
-def title_hit_rate(cues: Any, title: str, 课程术语: Any = None) -> float:
-    """标题术语的**判别力加权**命中率；无术语或无正文时返回 0（表示不可比）。
-
-    为什么不能直接用命中次数，也不能只按术语个数归一化（实测两轮教训）：
-
-    1. 用命中总数排名会被**长标题**带偏——CMU 的 `05｜规划、任务分解与多 agent 协作`
-       术语最多，8 个块里 7 个都"更像"它。
-    2. 只按术语个数归一化仍会被**通用词**带偏——`第10讲 第02节：犯罪未遂` 只有两个术语，
-       而「犯罪」在刑法课每页都出现，于是每个正常页都被它压成 rate 8.0，
-       与真正的串台页（rate 8.0）完全重叠、无法分离。
-
-    所以按术语**判别力**加权：出现在课程高频术语表里的通用词权重为 0（它区分不了任何两集），
-    只有课程层面的稀见词才计分。这样 `犯罪未遂` 这类标题的 rate 归零，不再制造虚假吸引力。
-    """
-    术语组, 计数, 有正文 = _身份命中(cues, title)
-    if not 有正文 or not 术语组:
-        return 0.0
-    通用 = {str(t) for t in (课程术语 or []) if str(t).strip()}
-    加权 = sum(0.0 if 术语 in 通用 else float(计数.get(术语, 0)) for 术语 in 术语组)
-    return 加权 / len(术语组)
-
-
-def distinctive_title(cues: Any, own_title: str, all_titles: Any,
-                      课程术语: Any = None) -> tuple:
-    """**诊断用**：本集正文最像哪一个候选标题。返回 `(是否本集最优, 原因, 诊断)`。
-
-    ⚠ **这不是门禁，不要拿它 decision。** 实测结论（224 块真实字幕稿，全量跑）：
-
-    ```
-                           排名≤1   排名≤2   排名≤5
-    合法（本集标题）        34.1%    51.2%    70.1%
-    注入同课程漂移（相邻集） 16.5%    33.5%    51.0%
-    ```
-
-    两条分布几乎重合，**没有任何可用工作点**：取「排名≤1」会误杀 66% 的合法块，
-    取「排名≤5」仍误杀 30% 却只抓到 49% 的漂移。原因不是阈值问题而是判据不成立——
-    真实课程里相邻集本来就互相提及（讲师会回顾上节、预告下节），标题术语又只有 2~4 字
-    且大量重叠，"这段内容最像哪一集标题"在**术语命中层面无法回答**。
-
-    保留它的用途只有一个：当 `subtitle_time_band` 因时长越界把某一页标为可疑时，
-    把这个排名一起打进诊断，供人工复核时参考。
-
-    历史：先试过"命中总数排名"（被长标题带偏：CMU 的 05 讲 8 个块里 7 个"更像"它），
-    再试过"按术语个数归一化"（被通用词带偏：`第10讲 犯罪未遂` 只有两个词，一个 `犯罪`
-    就压过所有正常页），最后试过"按课程高频表做判别力加权"（略好，误杀仍 62%）。
-    三种都不可用。要从根上解决同课程串台，需要内容级对齐（如本集课纲关键词），
-    不是标题术语能给的。
-    """
-    own_rate = title_hit_rate(cues, own_title, 课程术语)
-    诊断 = {"own_rate": round(own_rate, 2), "best_rate": 0.0,
-            "best_title": "", "rank": 0, "candidates": 0}
-    if not all_titles or not _标题术语(own_title):
-        return False, "", 诊断
-    候选 = [str(t) for t in all_titles if str(t).strip() and str(t) != str(own_title)]
-    最大 = 0.0
-    最优 = ""
-    for title in 候选:
-        rate = title_hit_rate(cues, title, 课程术语)
-        if rate > 最大:
-            最大, 最优 = rate, title
-    名次 = 1 + sum(1 for title in 候选 if title_hit_rate(cues, title, 课程术语) > own_rate)
-    诊断 = {"own_rate": round(own_rate, 2), "best_rate": round(最大, 2),
-            "best_title": 最优, "rank": 名次, "candidates": len(候选) + 1}
-    if 最大 <= own_rate:
-        return True, "", 诊断
-    return False, (f"诊断：本集「{own_title}」命中率 {own_rate:.1f}，"
-                   f"低于「{最优}」的 {最大:.1f}（排名 {名次}/{len(候选) + 1}）"), 诊断
-
-
-def subtitle_identity(cues: Any, title: str, 课程术语: Any = None) -> tuple:
-    """字幕正文是否对得上本集身份：返回 `(是否通过, 原因)`。
-
-    **两票制**：
-    1. 标题票：本集标题的术语骨架（或术语内 ≥3 字子窗）**强命中**——长术语命中一次，
-       或任一术语命中 ≥ `IDENTITY_MIN_HITS` 次。实测串台样本（LOL 赛事实况 / iPhone 评测 /
-       蔡徐坤消费主义 / 短剧 / 导航语音 / 分体水冷 / vlog / 科幻剧）全部 0 命中，
-       正常页命中 12~117 次。
-    2. 课程票（仅在标题票不中时用）：正文与课程高频术语表的重叠 ≥ `COURSE_OVERLAP_MIN` 即
-       放行——讲师常有"标题写「枪支类犯罪」、嘴上说「枪支犯罪」"的用词差异，光看标题会把
-       这类正常页误判成串台。实测串台页重叠 0~1，正常页 4~8，取 2 作界。
-
-    标题没有实词、或没有正文时判据让路（返回通过）；没有课程术语表时只按标题票判。
-
-    **已知缺口：这两票都拦不住「同课程串台」**（本课程某一集的字幕被挂到另一集的 cid 上）。
-    课程票是**课程级**判据，同课程内容天然高重叠。实测过的补救方案与结论见
-    `distinctive_title`——术语排名无法分离，故不设为门禁；同课程串台目前只靠
-    `subtitle_time_band` 的**时长越界**抓（实测抓到过 2937s/2467s = 119%）。
-    """
-    术语组, 计数, 有正文 = _身份命中(cues, title)
-    if not 有正文 or not 术语组 or _身份强命中(计数):
-        return True, ""
-    摘要 = "、".join(f"{术语} {计数.get(术语, 0)} 次" for 术语 in 术语组[:3])
-    if not 课程术语:
-        return False, f"{REASON_TITLE_MISMATCH}（{摘要}）"
-    重叠 = course_overlap(cues, 课程术语)
-    if 重叠 >= COURSE_OVERLAP_MIN:
-        return True, ""
-    return False, f"{REASON_TITLE_MISMATCH}（{摘要}；课程术语重叠 {重叠} < {COURSE_OVERLAP_MIN}）"
-
-
 def _身份故障(原因: str) -> bool:
-    """是否身份类故障（URL 不是本集 / 正文不是本集 / 时长越界）：这类按 `IDENTITY_RETRY_MAX` 收手。"""
+    """是否身份类故障（URL 不是本集 / 时长越界 / 标题不符）：这类按 `IDENTITY_RETRY_MAX` 预算重试。"""
     文本 = str(原因 or "")
     return (文本.startswith(REASON_URL_MISMATCH)
             or 文本.startswith(REASON_TITLE_MISMATCH)
@@ -558,12 +349,14 @@ def transcript_source(path: Any) -> str:
 # 进程级粘性标记：一旦 wbi 端点在 auto 模式下遭遇 412 风控，后续分集直接直连老端点，
 # 不再每集重复尝试并白吃 14 秒风控退避（145 集立省 33+ 分钟）。
 _wbi_degraded: bool = False
+_wbi_lock = threading.Lock()
 
 
 def reset_wbi_degraded() -> None:
     """重置 wbi 降级标记（测试或凭证刷新后用）。"""
     global _wbi_degraded
-    _wbi_degraded = False
+    with _wbi_lock:
+        _wbi_degraded = False
 
 
 def _取播放器数据(
@@ -581,7 +374,10 @@ def _取播放器数据(
     裸参数 = urllib.parse.urlencode({"bvid": bvid, "cid": cid})
     模式 = (os.environ.get(ENV_SUBTITLE_ENDPOINT) or "auto").strip().lower()
 
-    if 模式 == "legacy" or (_wbi_degraded and 模式 != "wbi"):
+    with _wbi_lock:
+        degraded = _wbi_degraded
+
+    if 模式 == "legacy" or (degraded and 模式 != "wbi"):
         return _请求元数据(f"{PLAYER_V2_API_LEGACY}?{裸参数}", _请求头(sessdata), 超时=15)
     if 模式 == "wbi":
         参数 = WbiSigner.enc_wbi({"bvid": bvid, "cid": cid}, sessdata=sessdata, keys_file=keys_file)
@@ -593,8 +389,10 @@ def _取播放器数据(
         参数 = WbiSigner.enc_wbi({"bvid": bvid, "cid": cid}, sessdata=sessdata, keys_file=keys_file)
         return _请求元数据(f"{PLAYER_V2_API}?{urllib.parse.urlencode(参数)}", _请求头(sessdata), 超时=15, 重试=False)
     except Exception as 错误:
-        _wbi_degraded = True
-        print(f"    [降级]wbi 字幕端点不可用（{错误}），后续分集自动直连免签名老端点")
+        with _wbi_lock:
+            if not _wbi_degraded:
+                _wbi_degraded = True
+                print(f"    [降级]wbi 字幕端点不可用（{错误}），后续分集自动直连免签名老端点")
         return _请求元数据(f"{PLAYER_V2_API_LEGACY}?{裸参数}", _请求头(sessdata), 超时=15)
 
 
@@ -609,18 +407,12 @@ def _取字幕一次(
     """单次取中文字幕，返回 `(字幕 or None, 瞬时原因)`。
 
     瞬时原因为空串表示**不是**可重试故障：字幕非空即成功；字幕为 `None` 且原因为空
-    说明该集确实没有中文字幕（重试也不会有）。非空原因分两族——**身份族**
-    （`subtitle_time_band` 判出的「时长越界」，按 `IDENTITY_RETRY_MAX` 收手）与**瞬时族**
-    （地址为空、正文为空、覆盖不足），两族都由 `fetch_episode_subtitle` 退避重取。
+    说明该集确实没有中文字幕（重试也不会有）。非空原因包含身份族（URL 不符 / 时长越界）
+    与瞬时族（无轨 / 地址为空 / 正文为空 / 覆盖不足 / 网络异常），均由
+    `fetch_episode_subtitle` 在总重试预算内退避重取。
 
-    接受判据只有两条**时间轴**判据：覆盖度下界（截断）与越界上界（串台）。
-    原先还有一条标题术语身份判据（`subtitle_identity`），实测假杀率高达 90%——
-    `CN_SUBWINDOW_WIDTH=3` 把「哈夫曼树」切成 `夫曼树`、「树习题-TTA.1 题意理解」切成
-    `树习`/`意理解`，而 AI 字幕实际写的是「哈弗曼」「tree traversals again」「便利」；
-    20 次拒收里 18 次是本集内容。该判据已整条删除。
-
-    候选轨按「人工优先、简体优先」逐个验：首选轨被判串台时，还有机会用另一条中文字幕交付，
-    而不是直接掉进音频兜底。
+    候选轨按「人工优先、简体优先」逐个验；多条候选轨若均不可用，按诊断优先级
+    保留最有价值的失败原因（身份故障 > 覆盖不足 > 网络异常 > 空值）。
     """
     数据 = _取播放器数据(bvid, cid, sessdata, keys_file)
     编码 = 数据.get("code")
@@ -650,35 +442,45 @@ def _取字幕一次(
 
     最后原因 = ""
     失配样本 = ""
+
+    def _更新原因(新原因: str) -> None:
+        nonlocal 最后原因
+        if not 最后原因 or _身份故障(新原因) or not _身份故障(最后原因):
+            最后原因 = 新原因
+
     for 选中 in 候选组:
         正文地址 = _绝对地址(选中.get("subtitle_url"))
         if not 正文地址:
             # 实测：接口偶发给出 `subtitle_url` 为空串的中文轨（同页三次里两次空串）；
             # 直接请求会因"无主机名"抛异常中断整条命令，必须当成可重试的瞬时故障。
-            最后原因 = "地址为空"
+            _更新原因("地址为空")
             continue
         # URL 身份锚点：AI 字幕文件名内嵌 `aid+cid`，与响应回显的 aid/cid 对不上即串台。
         # 放在取正文之前——拦下的样本连正文都不用下载，且能拦住时长贴合的错件。
         url_ok = url_identity(正文地址, 响应aid, 响应cid or cid)
         if url_ok is False:
             前缀 = (AI_SUBTITLE_PATH_RE.search(正文地址) or [None, ""])[1]
-            最后原因 = f"{REASON_URL_MISMATCH}（文件名 {前缀[:20]} 而非 {响应aid}{响应cid or cid}）"
+            _更新原因(f"{REASON_URL_MISMATCH}（文件名 {前缀[:20]} 而非 {响应aid}{响应cid or cid}）")
             失配样本 = 失配样本 or 前缀[:20]
             continue
-        线索 = _正文到线索(_请求元数据(正文地址, _请求头(sessdata), 超时=20))
+        try:
+            线索 = _正文到线索(_请求元数据(正文地址, _请求头(sessdata), 超时=20))
+        except Exception as 错误:
+            _更新原因(f"正文下载异常（{错误}）")
+            continue
         if not 线索:
-            最后原因 = "正文为空"
+            _更新原因("正文为空")
             continue
         is_ai = _is_ai(选中)
         覆盖 = subtitle_coverage(线索, duration_sec)
         时段 = subtitle_time_band(覆盖, is_ai)
         末条 = max(float(条.get("to") or 条.get("from") or 0.0) for 条 in 线索)
         if 时段 == "short":
-            最后原因 = (f"覆盖不足（末条 {末条:.0f}s / 时长 {duration_sec:.0f}s = {覆盖:.0%}）")
+            _更新原因(f"覆盖不足（末条 {末条:.0f}s / 时长 {duration_sec:.0f}s = {覆盖:.0%}）")
             continue
         if 时段 == "overrun":
             # 串台文件的长度不受本集约束（实测 2937s/973s、357s/248s），上界只对 ai 轨生效
-            最后原因 = f"{REASON_TIME_OVERRUN}（末条 {末条:.0f}s / 时长 {duration_sec:.0f}s = {覆盖:.0%}）"
+            _更新原因(f"{REASON_TIME_OVERRUN}（末条 {末条:.0f}s / 时长 {duration_sec:.0f}s = {覆盖:.0%}）")
             continue
         return {
             "is_ai": is_ai,
@@ -699,6 +501,30 @@ def _取字幕一次(
     return None, 最后原因
 
 
+def _归类故障原因(原因: str) -> str:
+    """提取核心原因分类供全局统计（去除长括号、URL、文件名等细节）。"""
+    文本 = str(原因 or "").strip()
+    if not 文本:
+        return "未知原因"
+    if 文本.startswith(REASON_URL_MISMATCH):
+        return REASON_URL_MISMATCH
+    if 文本.startswith(REASON_NO_TRACK):
+        return REASON_NO_TRACK
+    if 文本.startswith(REASON_TIME_OVERRUN):
+        return REASON_TIME_OVERRUN
+    if 文本.startswith("覆盖不足"):
+        return "覆盖不足"
+    if "下载异常" in 文本 or "网络" in 文本 or "接口" in 文本:
+        return "网络/接口异常"
+    if 文本.startswith("正文为空"):
+        return "正文为空"
+    if 文本.startswith("地址为空"):
+        return "地址为空"
+    if 文本.startswith("响应身份不符"):
+        return "响应身份不符"
+    return 文本.split("（")[0].split("(")[0].strip()
+
+
 def fetch_episode_subtitle(
     bvid: str,
     cid: int,
@@ -714,45 +540,66 @@ def fetch_episode_subtitle(
 
     返回 `{is_ai, lan, lan_doc, cues, coverage, trustworthy, audit, attempts}`，
     `cues[].from` / `cues[].to` 为**集内秒数**。`次数` 缺省取 `BVB_SUBTITLE_ATTEMPTS`
-    （默认 8、上限 8），线性退避 `SUBTITLE_RETRY_BACKOFF_SEC`。三类失败各有预算：
-    URL 失配/时长越界（身份族）按 `IDENTITY_RETRY_MAX`，「零中文轨」按
-    `NO_TRACK_RETRY_MAX`（确认性重试，预算更小），其余瞬时故障走满 `次数`。
+    （默认 10、上限 10），线性退避 `SUBTITLE_RETRY_BACKOFF_SEC`。
 
-    **每次抽签独立**（实测单次命中正确轨约 28%），所以重试是"重新抽"而非"等故障恢复"，
-    三类都重试。`诊断` 传入字典会被回填 `reason`/`attempts`/`coverage`/`kind`，供调用方
-    把"确实没有字幕轨"与"重试后仍不可用"两种结局分开告知。`title` 保留在签名里只为兼容
-    既有调用方，**不再参与任何判定**；`课程术语` 同理。
+    **每次抽签独立**（实测单次命中正确轨约 28%），重试是"重新抽"而非"等故障恢复"。
+    空轨与串台均为服务端负载均衡/异步分发的随机表现，共享统一的重试预算。
+    `诊断` 传入字典会被回填全程统计：`reason`、`attempts`、`coverage`、`kind`、
+    `dominant_reason`、`failure_stats`、`last_reason`。
+    `title` 与 `课程术语` 保留在签名里只为兼容既有调用方，不再参与任何判定。
     """
     上限 = max(1, int(次数)) if 次数 else _重试次数()
     身份上限 = min(上限, IDENTITY_RETRY_MAX)
-    无轨上限 = min(上限, NO_TRACK_RETRY_MAX)
     瞬时 = ""
     轮 = 1
+    失败统计: Dict[str, int] = {}
+    原因历史: List[str] = []
+
     for 轮 in range(1, 上限 + 1):
-        字幕, 瞬时 = _取字幕一次(bvid, cid, sessdata, keys_file, duration_sec, title)
+        try:
+            字幕, 瞬时 = _取字幕一次(bvid, cid, sessdata, keys_file, duration_sec, title)
+        except Exception as err:
+            字幕, 瞬时 = None, f"接口请求异常（{err}）"
+
         if 字幕 is not None:
             字幕["attempts"] = 轮
             if 诊断 is not None:
-                诊断.update(reason="", attempts=轮, coverage=字幕["coverage"], kind="")
+                诊断.update(reason="", attempts=轮, coverage=字幕["coverage"], kind="",
+                            dominant_reason="", failure_stats=失败统计, last_reason="")
             return 字幕
         if not 瞬时:
             # 调用方替身（测试）用它表示"定论性无字幕"。生产路径不再产生空原因。
             if 诊断 is not None:
-                诊断.update(reason="", attempts=轮, coverage=0.0, kind="")
+                诊断.update(reason="", attempts=轮, coverage=0.0, kind="",
+                            dominant_reason="", failure_stats={}, last_reason="")
             return None
-        if 瞬时.startswith(REASON_NO_TRACK) and 轮 >= 无轨上限:
-            print(f"    [拒绝]字幕{瞬时}——连续 {轮} 轮零中文轨，判该集无字幕")
-            break
+
+        归类 = _归类故障原因(瞬时)
+        失败统计[归类] = 失败统计.get(归类, 0) + 1
+        原因历史.append(瞬时)
+
         if _身份故障(瞬时) and 轮 >= 身份上限:
             print(f"    [拒绝]字幕{瞬时}——身份类故障 {轮} 轮用尽，该块转音频兜底")
             break
+
         if 轮 < 上限:
             等待 = SUBTITLE_RETRY_BACKOFF_SEC * 轮
             print(f"    [重试]字幕{瞬时}（第 {轮} 次）→ {等待:.1f}s 后重试")
             time.sleep(等待)
+
     if 诊断 is not None:
-        诊断.update(reason=瞬时, attempts=轮, coverage=0.0,
-                    kind="identity" if _身份故障(瞬时) else "transient")
+        主导原因 = max(失败统计.items(), key=lambda kv: kv[1])[0] if 失败统计 else 瞬时
+        统计摘要 = "，".join(f"{k} {v}次" for k, v in 失败统计.items())
+        全称原因 = f"{主导原因}（共{轮}轮：{统计摘要}）" if len(失败统计) > 1 else 瞬时
+        诊断.update(
+            reason=全称原因,
+            attempts=轮,
+            coverage=0.0,
+            kind="identity" if any(_身份故障(r) for r in 原因历史) else "transient",
+            dominant_reason=主导原因,
+            failure_stats=失败统计,
+            last_reason=瞬时,
+        )
     return None
 
 

@@ -85,18 +85,9 @@ class SubtitleService:
         # 分集级取回结论（页面 → 诊断）：判不可用的页要把原因留下，别让"本来没有字幕"
         # 与"拿到的不是本集字幕（串台）"两种结局在产物里长得一样。
         page_diag: Dict[int, Dict[str, Any]] = {}
-        参照正文 = cls._reference_texts(ws)
-        本次正文: List[str] = []
-        课程术语: List[str] = []
-        参照阈值 = subtitle_core.COURSE_TERMS_MIN_PAGES
         for block in blocks:
             block_id = int(block.get("block_id") or 0)
             target = TaskWorkspace.block_path(ws, dict(block))
-            # 本块自己的旧稿不进参照：`--force` 重取时它就在工作区里，而被重取往往正是
-            # 因为怀疑它串台——拿它当"课程高频术语"的参照源，等于用可疑样本证明本次取回
-            # 的可信，是自我强化。参照只取**其它**块的稿子。
-            own = str(target)
-            参照他块 = [t for p, t in 参照正文.items() if p != own] if isinstance(参照正文, dict) else list(参照正文)
             if target.exists() and target.stat().st_size > 0 and not force:
                 result["cached"].append(block_id)
                 result["subtitle_ready"].append(block_id)
@@ -124,20 +115,12 @@ class SubtitleService:
             for segment in block.get("segments") or []:
                 page = int(segment.get("page") or 0)
                 if page not in cache:
-                    # 课程术语表（身份判据第二票）：工作区其它块既有逐字稿 + 本次已取回正文，
-                    # 参照数每翻一倍重建一次，避免逐页全量重算。
-                    参照数 = len(参照他块) + len(本次正文)
-                    if 参照数 >= 参照阈值:
-                        课程术语 = subtitle_core.course_terms(参照他块 + 本次正文)
-                        参照阈值 = max(subtitle_core.COURSE_TERMS_MIN_PAGES, 参照数 * 2)
                     part = parts_by_page.get(page)
                     if not part or part.get("cid") is None:
                         cache[page] = None
                     else:
                         bvid = str(part.get("bvid") or "").strip() or course_bvid
                         duration = float(part.get("duration") or 0.0)
-                        # title 是身份判据的锚点（标题术语必须出现在正文里）：串台字幕
-                        # 的正文来自别的稿件，标题术语一次都不命中，据此整页判不可用。
                         title = str(part.get("title") or "").strip()
                         diagnostic: Dict[str, Any] = {}
                         try:
@@ -148,7 +131,6 @@ class SubtitleService:
                                 keys_file=getattr(ws, "wbi_keys_file", None),
                                 duration_sec=duration,
                                 title=title,
-                                课程术语=课程术语,
                                 诊断=diagnostic,
                             )
                         except Exception as err:
@@ -167,10 +149,6 @@ class SubtitleService:
                                 "kind": diagnostic.get("kind") or "",
                                 "attempts": int(diagnostic.get("attempts") or 0),
                             })
-                        else:
-                            本次正文.append("".join(
-                                str(条.get("content") or "") for 条 in cache[page].get("cues") or []
-                            ))
                 page_values[page] = cache[page]
 
             # 按集兜底：取到字幕的集照常拼装，缺的集只记账。`allow_partial=True` 让
@@ -288,28 +266,6 @@ class SubtitleService:
             return [p for p in source["parts"] if isinstance(p, Mapping)]
         return []
 
-    @staticmethod
-    def _reference_texts(ws: TaskWorkspace) -> Dict[str, str]:
-        """课程参考正文：`{逐字稿绝对路径: 正文}`，来自工作区里已有的全部逐字稿。
-
-        身份判据的第二票（课程高频术语）靠它建立；已有逐字稿不足时由本次取回的正文补足，
-        两者都不够（新工作区首跑的前几页）则退回"只看标题"。这样单块 `--range` 重跑
-        也能拿到参照，不依赖本次抓了哪些页。
-
-        返回**路径 → 正文的映射**而不是纯文本列表：调用方要按块剔除"本块自己的旧稿"
-        （见 `run` 里的 `参照他块`），拿不到路径就没法剔。
-        """
-        try:
-            文件 = sorted(ws.subtitles_dir.glob("*_逐字稿.md"))
-        except OSError:
-            return {}
-        映射: Dict[str, str] = {}
-        for 路径 in 文件:
-            try:
-                映射[str(路径)] = 路径.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                continue
-        return 映射
 
 
 __all__ = ["SubtitleService"]

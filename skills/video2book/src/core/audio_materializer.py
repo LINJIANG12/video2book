@@ -9,6 +9,7 @@ BlockPlan 决定模块边界；本模块只把计划中的源分集音频变成�
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from datetime import datetime
@@ -347,7 +348,16 @@ class AudioMaterializer:
             raise AudioMaterializationError("音频拼接需要 FFmpeg，请确认 ffmpeg 在 PATH 中")
         target.parent.mkdir(parents=True, exist_ok=True)
         list_file = target.parent / f"_{target.stem}_concat.txt"
-        lines = [f"file '{Path(source).as_posix().replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}'" for source in sources]
+        # ffmpeg 9.x 的 concat demuxer 会把 `D:/...` 形态的绝对路径当相对路径，
+        # 再拼上列表文件所在目录导致打不开。改写相对列表文件目录的路径：
+        # 源音频与块音频同在工作区 audio/ 下，同盘必然可表达；跨盘兜底退回绝对路径。
+        lines = []
+        for source in sources:
+            try:
+                rel = os.path.relpath(source.resolve(), start=target.parent.resolve())
+            except ValueError:
+                rel = str(source.resolve())
+            lines.append("file '" + rel.replace("\\", "/").replace("'", "'\\''") + "'")
         list_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
         cmd = [
             ffmpeg, "-hide_banner", "-loglevel", "error", "-y",

@@ -8,6 +8,13 @@ continuous dispatch ("完成一个，立即派生一个") without manual offsets
 `--next-module N` / `--next-transcribe [N]`（默认并发 3 任务） / `--next-note N`（配合 `--json`）输出的是**可直接转交子智能体的派发载荷**（内含开箱即用的预制派发提示词 `dispatch_prompt`、任务书路径、音频切片清单、
 目标文件路径、本集 token 预算），并附带派发建议（并发数 / 打包粒度 / 是否必须派发）。
 `--log-dispatch` 可选地把本次建议写入 `<task>/.dispatch_log.jsonl` 作为派发台账。
+
+**滚动补位（可选）**：取载荷加 `--claim` 会把本次取出的块登记为**在途认领**
+（`<task>/.dispatch_claims.json`）；此后每次取载荷都会自动排除「已认领且成品未落盘」的块，
+因此可以在任一子智能体完成时立即取下一个补位，而不会把在途块派第二遍。成品落盘即自动释放认领；
+`--claims` 查在途清单，`--release BLK03`（或 `--release all`）释放失败项后重派，
+超过 `BVB_CLAIM_TTL_MINUTES`（默认 360）未落盘的认领自动过期并打印。
+不加 `--claim`、也没有认领文件时行为与从前完全一致（无状态按批）。
 """
 
 import argparse
@@ -16,7 +23,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # 允许从任意工作目录运行（SKILL.md 推荐直接调用 scripts/queue_tracker.py）
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -365,7 +372,7 @@ def scan_transcript_status(ws: Path) -> Dict:
     }
 
 
-def _transcribe_payload(tstatus: Dict, n: int) -> List[Dict]:
+def _transcribe_payload(tstatus: Dict, n: int, exclude: Optional[Set[int]] = None) -> List[Dict]:
     """转录角色的取载荷入口。
 
     两种形态：
@@ -374,12 +381,15 @@ def _transcribe_payload(tstatus: Dict, n: int) -> List[Dict]:
     - **整块**（无部分稿，历史工作区）：保持原样，派整块音频。
 
     两种形态都只返回**没转录过**的块，因此重跑不会让同一个块被两个转录角色各转一遍。
+    `exclude` 再由调用方叠加**在途认领**（滚动补位）与显式 `--exclude`。
     """
     items: List[Dict] = []
     for block in tstatus.get("blocks") or []:
         if block["transcribed"] or not block.get("audio_ready"):
             continue
         block_id = int(block["block_id"])
+        if exclude and block_id in exclude:
+            continue
         subtitles_dir = Path(block["block_transcript"]).parent
         task_file = subtitles_dir / f"BLK{block_id:02d}_{block['span']}_转录任务书.md"
         pending = [int(p) for p in (block.get("pending_pages") or [])]
@@ -453,17 +463,19 @@ def _budget_summary(status: Dict) -> Dict:
     return info
 
 
-def _module_payload(ws: Path, n: int) -> List[Dict]:
+def _module_payload(ws: Path, n: int, exclude: Optional[Set[int]] = None) -> List[Dict]:
     """模块长文的派发载荷（写作侧取载荷入口）：只返回「块逐字稿已就绪且模块长文缺失」的块。
 
     一个块一篇、读块逐字稿写——这是块级链路对写作角色的全部约束，载荷里给全路径与语料状态，
-    主 Agent 不需要自己拼文件名。
+    主 Agent 不需要自己拼文件名。`exclude` 由调用方叠加在途认领（滚动补位）与显式 `--exclude`。
     """
     items: List[Dict] = []
     articles_dir = ws / "articles"
     subtitles_dir = ws / "subtitles"
     for block in _load_blocks(ws):
         block_id = int(block.get("block_id") or 0)
+        if exclude and block_id in exclude:
+            continue
         span = BlockPlan.span(block)
         transcript = subtitles_dir / f"BLK{block_id:02d}_{span}_逐字稿.md"
         if not transcript.exists() or transcript.stat().st_size <= 0:
@@ -492,10 +504,11 @@ def _module_payload(ws: Path, n: int) -> List[Dict]:
     return items
 
 
-def _note_payload(ws: Path, n: int) -> List[Dict]:
+def _note_payload(ws: Path, n: int, exclude: Optional[Set[int]] = None) -> List[Dict]:
     """复习笔记的派发载荷（笔记侧取载荷入口）：扫描 notes/ 下的任务书，只返回尚无成品或成品不达标的笔记。
 
     一篇笔记一个子智能体、读涵盖块的长文写——载荷内直接内嵌预制派发词，主 Agent 无需自编提示词。
+    `exclude` 由调用方叠加在途认领（滚动补位）与显式 `--exclude`。
     """
     notes_dir = ws / "notes"
     if not notes_dir.exists():
@@ -508,6 +521,8 @@ def _note_payload(ws: Path, n: int) -> List[Dict]:
         if not m:
             continue
         note_id = int(m.group(1))
+        if exclude and note_id in exclude:
+            continue
         title = m.group(2)
         target_note = notes_dir / f"笔记{note_id:02d}_{title}_笔记.md"
 
@@ -587,6 +602,149 @@ def _log_dispatch(status: Dict, requested: int, payload: List[Dict], budget_info
         print(f"[!] 派发台账写入失败: {err}", file=sys.stderr)
 
 
+# ---------------------------------------------------------------------------
+# 滚动补位：在途认领
+# ---------------------------------------------------------------------------
+
+CLAIMS_FILE = ".dispatch_claims.json"
+ENV_CLAIM_TTL_MINUTES = "BVB_CLAIM_TTL_MINUTES"
+DEFAULT_CLAIM_TTL_MINUTES = 360.0
+
+
+def _claims_path(ws: Path) -> Path:
+    return ws / CLAIMS_FILE
+
+
+def _claim_label(kind: str, item_id: int) -> str:
+    return f"笔记{item_id:02d}" if kind == "note" else f"BLK{item_id:02d}"
+
+
+def _parse_id_tokens(raw: Optional[str]) -> Set[int]:
+    """把 `BLK01` / `blk1` / `笔记01` / `NOTE1` / `1,3` 形态的键解析成整数集合。
+
+    只取串里的第一个数字，编号与类型无关（模块块、转录块、笔记共用一套编号空间）；
+    需要精确到某一类时用带前缀的写法自查，释放时按 `id` 匹配。
+    """
+    ids: Set[int] = set()
+    for token in re.split(r"[,，、;；\s]+", raw or ""):
+        if not token:
+            continue
+        m = re.search(r"\d+", token)
+        if m:
+            ids.add(int(m.group()))
+    return ids
+
+
+def _load_claims(ws: Path) -> List[Dict]:
+    path = _claims_path(ws)
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    raw = data.get("claims") if isinstance(data, dict) else None
+    return [c for c in (raw or []) if isinstance(c, dict) and c.get("key")]
+
+
+def _save_claims(ws: Path, claims: List[Dict]) -> None:
+    """认领文件是运行时状态：空则删文件，非空用临时文件原子替换。"""
+    path = _claims_path(ws)
+    try:
+        if not claims:
+            path.unlink(missing_ok=True)
+            return
+        payload = {"version": 1, "claims": claims}
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    except OSError as err:
+        print(f"[!] 认领文件写入失败: {err}", file=sys.stderr)
+
+
+def _claim_age_minutes(claim: Dict) -> float:
+    ts = float(claim.get("ts") or 0.0)
+    return (time.time() - ts) / 60.0 if ts else 0.0
+
+
+def _claim_released(claim: Dict) -> bool:
+    """成品落盘即释放：`release_when` 存在且非空（与取载荷的「已完工」判定同向）。
+
+    转录认领的 `release_when` 是**整块**逐字稿路径（不是补录稿），所以按集补录期间
+    认领不会提前释放、同一块不会被重复派发。
+    """
+    raw = str(claim.get("release_when") or claim.get("target") or "")
+    if not raw:
+        return False
+    try:
+        path = Path(raw)
+        return path.exists() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _prune_claims(ws: Path, ttl_minutes: float) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+    """把磁盘上的认领分成 (在途, 已完成释放, 过期释放)；纯分类，不落盘。"""
+    active: List[Dict] = []
+    done: List[Dict] = []
+    stale: List[Dict] = []
+    for claim in _load_claims(ws):
+        if _claim_released(claim):
+            done.append(claim)
+            continue
+        age = _claim_age_minutes(claim)
+        if ttl_minutes > 0 and age > ttl_minutes:
+            stale.append(dict(claim, age_min=age))
+            continue
+        active.append(claim)
+    return active, done, stale
+
+
+def _claims_ids(claims: List[Dict], kind: str) -> Set[int]:
+    return {int(c.get("id") or 0) for c in claims if c.get("kind") == kind}
+
+
+def _public_claim(claim: Dict) -> Dict:
+    keep = ("key", "kind", "id", "label", "title", "at", "ts", "target", "targets", "release_when")
+    return {k: claim[k] for k in keep if k in claim}
+
+
+def _make_claim(kind: str, item_id: int, target: str, release_when: str,
+                title: str = "", targets: Optional[List[str]] = None) -> Dict:
+    now = time.time()
+    entry: Dict[str, Any] = {
+        "key": f"{kind}:{int(item_id)}",
+        "kind": kind,
+        "id": int(item_id),
+        "label": _claim_label(kind, int(item_id)),
+        "at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
+        "ts": now,
+        "target": target,
+        "release_when": release_when,
+    }
+    if title:
+        entry["title"] = title
+    if targets and len(targets) > 1:
+        entry["targets"] = list(targets)
+    return entry
+
+
+def _claim_ttl_minutes(cli_value: Optional[float]) -> float:
+    if cli_value is not None and cli_value > 0:
+        return float(cli_value)
+    try:
+        from src.core.paths import env_float
+
+        return env_float(ENV_CLAIM_TTL_MINUTES, DEFAULT_CLAIM_TTL_MINUTES)
+    except Exception:
+        return DEFAULT_CLAIM_TTL_MINUTES
+
+
+def _claims_status_line(active: List[Dict]) -> str:
+    labels = "、".join(str(c.get("label") or c.get("key")) for c in active)
+    return f"[*] 在途认领 {len(active)} 条: {labels}（滚动补位；--claims 看详情，--release 释放）"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Real-time Dynamic Queue Tracker (Sliding Window Dispatch)")
     parser.add_argument("--dir", default=None, help="Path to task workspace")
@@ -604,9 +762,30 @@ def main():
                         help="笔记侧取载荷：返回尚未撰写或不达标的复习笔记（含任务书、目标笔记路径与预制派发提示词）")
     parser.add_argument("--log-dispatch", action="store_true", dest="log_dispatch",
                         help="把本次建议派发的块追加写入 <task>/.dispatch_log.jsonl（派发台账；默认关闭）")
+    parser.add_argument("--claim", action="store_true",
+                        help="把本次取出的任务登记为在途认领（滚动补位）：后续取载荷自动排除未落盘的认领项")
+    parser.add_argument("--claims", action="store_true",
+                        help="显示在途认领清单（滚动补位断点恢复/排查用）")
+    parser.add_argument("--release", default=None, metavar="KEYS",
+                        help="释放在途认领：BLK03 / 笔记01 / 1,3 / all（失败重派前使用）")
+    parser.add_argument("--exclude", default=None, metavar="KEYS",
+                        help="本次取载荷额外排除的编号（BLK01,笔记02；与在途认领的排除叠加）")
+    parser.add_argument("--claim-ttl-minutes", type=float, default=None, dest="claim_ttl_minutes",
+                        help=f"在途认领过期时长（分钟；默认 {DEFAULT_CLAIM_TTL_MINUTES:g}，"
+                             f"环境变量 {ENV_CLAIM_TTL_MINUTES} 同效）")
     parser.add_argument("--json", action="store_true", help="Output in JSON format")
     parser.add_argument("--summary", action="store_true", help="Output one-line summary for scripting")
     args = parser.parse_args()
+
+    fetch_requested = bool(args.next_transcribe_n or args.next_module_n or args.next_note_n)
+    if args.claim and not fetch_requested:
+        print("[ERROR] --claim 需要与 --next-transcribe / --next-module / --next-note 之一同时使用",
+              file=sys.stderr)
+        sys.exit(1)
+    if args.exclude and not fetch_requested:
+        print("[ERROR] --exclude 需要与 --next-transcribe / --next-module / --next-note 之一同时使用",
+              file=sys.stderr)
+        sys.exit(1)
 
     try:
         ws = get_task_workspace(args.dir, pattern=args.pattern, base_dir=args.base_dir)
@@ -633,16 +812,69 @@ def main():
         )
         return
 
+    # 滚动补位：先按成品落盘与 TTL 处理认领，再依「在途 + 显式排除」取载荷。
+    ttl_minutes = _claim_ttl_minutes(args.claim_ttl_minutes)
+    active_claims, released_done, released_stale = _prune_claims(ws, ttl_minutes)
+    released_now: List[Dict] = []
+    if args.release:
+        token = args.release.strip()
+        if token.lower() == "all":
+            released_now, active_claims = list(active_claims), []
+        else:
+            ids = _parse_id_tokens(token)
+            released_now = [c for c in active_claims if int(c.get("id") or 0) in ids]
+            released_keys = {c.get("key") for c in released_now}
+            active_claims = [c for c in active_claims if c.get("key") not in released_keys]
+        if not released_now:
+            print(f"[!] --release 未命中任何在途认领: {args.release}", file=sys.stderr)
+    # 释放过的认领当场落盘：成品已落盘/已过期的条目不该留在文件里等下一轮
+    if released_done or released_stale or released_now:
+        _save_claims(ws, active_claims)
+
+    cli_excluded = _parse_id_tokens(args.exclude)
+    ex_transcribe = cli_excluded | _claims_ids(active_claims, "transcribe")
+    ex_module = cli_excluded | _claims_ids(active_claims, "module")
+    ex_note = cli_excluded | _claims_ids(active_claims, "note")
+
     # 取载荷：转录侧（块）、写作侧（模块长文）与笔记侧各自只返回「还没做完」的那批
     transcribe_payload: List[Dict] = []
     if args.next_transcribe_n > 0:
-        transcribe_payload = _transcribe_payload(tstatus, args.next_transcribe_n)
+        transcribe_payload = _transcribe_payload(tstatus, args.next_transcribe_n, ex_transcribe)
     payload: List[Dict] = []
     if args.next_module_n > 0:
-        payload = _module_payload(Path(status["workspace"]), args.next_module_n)
+        payload = _module_payload(Path(status["workspace"]), args.next_module_n, ex_module)
     note_payload: List[Dict] = []
     if args.next_note_n > 0:
-        note_payload = _note_payload(Path(status["workspace"]), args.next_note_n)
+        note_payload = _note_payload(Path(status["workspace"]), args.next_note_n, ex_note)
+
+    # --claim：把本次取出的任务登记为在途认领（成品路径即释放条件）
+    registered: List[Dict] = []
+    if args.claim:
+        candidates: List[Dict] = []
+        for item in transcribe_payload:
+            targets = [str(t) for t in (item.get("targets") or [])]
+            candidates.append(_make_claim(
+                "transcribe", int(item["block_id"]),
+                target=targets[0] if targets else str(item.get("block_transcript") or ""),
+                release_when=str(item.get("block_transcript") or ""),
+                title=str(item.get("span") or ""), targets=targets))
+        for item in payload:
+            candidates.append(_make_claim(
+                "module", int(item["block_id"]),
+                target=str(item.get("target_article") or ""),
+                release_when=str(item.get("target_article") or ""),
+                title=str(item.get("title") or "")))
+        for item in note_payload:
+            candidates.append(_make_claim(
+                "note", int(item["note_id"]),
+                target=str(item.get("target_note") or ""),
+                release_when=str(item.get("target_note") or ""),
+                title=str(item.get("title") or "")))
+        existing_keys = {c.get("key") for c in active_claims}
+        registered = [c for c in candidates if c["key"] not in existing_keys]
+        if registered:
+            active_claims = active_claims + registered
+            _save_claims(ws, active_claims)
 
     if args.json:
         out = {
@@ -660,6 +892,14 @@ def main():
                 "blocks_total": tstatus["blocks_total"],
                 "blocks_transcribed": tstatus["blocks_transcribed"],
                 "blocks_pending": tstatus["blocks_pending"],
+            },
+            "claims": {
+                "ttl_minutes": ttl_minutes,
+                "active": [_public_claim(c) for c in active_claims],
+                "registered": [_public_claim(c) for c in registered],
+                "released_done": len(released_done),
+                "released_stale": len(released_stale),
+                "released_now": [_public_claim(c) for c in released_now],
             },
             "next": payload,
             "next_transcribe": transcribe_payload,
@@ -692,6 +932,15 @@ def main():
             print(f"    - P{p_num:02d}: {f.name} (仅 {sz} 字节)")
     print("=" * 68)
 
+    if released_stale:
+        labels = "、".join(str(c.get("label") or c.get("key")) for c in released_stale)
+        print(f"[!] 释放 {len(released_stale)} 条过期认领（超过 {ttl_minutes:g} 分钟未落盘）: {labels}")
+    if released_now:
+        labels = "、".join(str(c.get("label") or c.get("key")) for c in released_now)
+        print(f"[i] 已释放 {len(released_now)} 条认领: {labels}")
+    if active_claims:
+        print(_claims_status_line(active_claims))
+
     if transcribe_payload:
         print(f"\n【待转录的块 Next {len(transcribe_payload)} 个】：")
         for item in transcribe_payload:
@@ -711,6 +960,33 @@ def main():
             print(f"    - 目标长文: {item['target_article']}")
         if args.log_dispatch:
             print(f"\n[i] 已追加派发台账: {Path(status['workspace']) / '.dispatch_log.jsonl'}")
+
+    if args.claim:
+        if registered:
+            print(f"\n[i] 已登记 {len(registered)} 条在途认领（在途共 {len(active_claims)} 条）"
+                  f"→ {_claims_path(ws)}")
+        for kind, got, requested in (("transcribe", len(transcribe_payload), args.next_transcribe_n),
+                                     ("module", len(payload), args.next_module_n),
+                                     ("note", len(note_payload), args.next_note_n)):
+            if requested and got == 0:
+                inflight = [c for c in active_claims if c.get("kind") == kind]
+                if inflight:
+                    labels = "、".join(str(c.get("label") or c.get("key")) for c in inflight)
+                    print(f"[i] {kind} 侧暂无新任务可派：在途 {len(inflight)} 条"
+                          f"（{labels}）等待落盘，或 --release 释放后重派")
+
+    if args.claims:
+        print(f"\n【在途认领】TTL {ttl_minutes:g} 分钟；成品落盘自动释放")
+        if not active_claims:
+            print("  （无在途认领）")
+        for claim in active_claims:
+            targets = claim.get("targets") or []
+            extra = f"（共 {len(targets)} 份目标）" if len(targets) > 1 else ""
+            print(f"  • {claim.get('label')} [{claim.get('kind')}] 认领于 {claim.get('at')}"
+                  f"（{_claim_age_minutes(claim):.1f} 分钟前）")
+            print(f"    - 目标: {claim.get('target')}{extra}")
+        if not fetch_requested:
+            return
 
     if note_payload:
         print(f"\n【待派发复习笔记 Next {len(note_payload)} 篇（一篇一个子智能体）】：")

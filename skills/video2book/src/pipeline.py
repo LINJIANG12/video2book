@@ -306,6 +306,7 @@ class PipelineCoordinator:
         except (OSError, TypeError, ValueError):
             return False
 
+    @staticmethod
     def _page_transcript_exists(ws: Any, block: Mapping[str, Any], page: int) -> bool:
         """块内某一集的**补录稿**是否已落盘。"""
         try:
@@ -697,7 +698,7 @@ class PipelineCoordinator:
         # 4) 完整拓扑先在内存合并。已有计划走 BlockPlan 的安全追加；新工作区必须
         # 先 ensure 再保存 parts.json，否则 BlockPlan 会把刚创建的分集缓存误判为 legacy。
         cached_parts = self._clean_parts(ws.load_parts())
-        incoming_parts = self._clean_parts(info_parts or selected_parts)
+        incoming_parts = self._clean_parts(selected_parts if range_str else (info_parts or selected_parts))
         complete_parts = self._clean_parts(
             TaskWorkspace.merge_parts(cached_parts, incoming_parts)
         )

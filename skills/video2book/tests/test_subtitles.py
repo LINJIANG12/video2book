@@ -26,7 +26,6 @@ from src.core.subtitles import (
     pick_chinese_subtitle,
     resolve_course_bvid,
     subtitle_coverage,
-    subtitle_identity,
     subtitle_time_band,
 )
 
@@ -301,21 +300,60 @@ def test_empty_transient_reason_is_definitive(monkeypatch):
     assert 诊断["reason"] == ""
 
 
-def test_zero_track_response_is_retried_with_small_budget(monkeypatch):
-    """零中文轨是**坏抽签**，不是定论：实测 1.4% 的抽次返回零轨，而同集别次正常给轨。
-
-    原先它一次即判死，把有字幕的集误判成"无字幕"。改后可重试，但只给
-    `NO_TRACK_RETRY_MAX` 轮——足够逃出坏抽签，又不会让"整门课没字幕"白等满额退避。
-    """
+def test_zero_track_response_is_retried_with_full_budget(monkeypatch):
+    """零中文轨是坏抽签，与串台统一享有完整预算，不再提前过早收手。"""
     记录: list = []
     _monkeypatch_attempt(monkeypatch, [(None, subtitles.REASON_NO_TRACK)], 记录)
 
     诊断: dict = {}
     assert subtitles.fetch_episode_subtitle("BV1x", 1, 次数=8, 诊断=诊断) is None
-    assert len(记录) == subtitles.NO_TRACK_RETRY_MAX
-    assert len(记录) < 8                                  # 子预算确实比总预算小
+    assert len(记录) == 8                                  # 统一走满指定的重试上限，不提前截断
     assert 诊断["reason"].startswith(subtitles.REASON_NO_TRACK)
-    assert 诊断["kind"] == "transient"                     # 不是身份族，不该吃身份预算
+    assert 诊断["kind"] == "transient"
+    assert 诊断["dominant_reason"] == subtitles.REASON_NO_TRACK
+    assert 诊断["failure_stats"][subtitles.REASON_NO_TRACK] == 8
+
+
+def test_retry_survives_download_network_error(monkeypatch):
+    """下载字幕正文遭遇 412 或网络抖动异常时，被捕获为瞬时重试，不杀掉整集预算。"""
+    正确 = ({"is_ai": True, "lan": "ai-zh", "lan_doc": "", "coverage": 0.99,
+             "trustworthy": True, "audit": {"band": "ok", "url_identity": True},
+             "cues": [{"from": 0.0, "to": 2.0, "content": "正文"}]}, "")
+    记录: list = []
+
+    def _假取异常(bvid, cid, sessdata, keys_file, duration_sec, title="", 课程术语=None):
+        记录.append(1)
+        if len(记录) == 1:
+            raise RuntimeError("请求失败（状态码 412）")
+        return 正确
+
+    monkeypatch.setattr(subtitles, "_取字幕一次", _假取异常)
+    monkeypatch.setattr(subtitles.time, "sleep", lambda _s: None)
+
+    诊断: dict = {}
+    结果 = subtitles.fetch_episode_subtitle("BV1x", 1, 次数=5, 诊断=诊断)
+    assert 结果 is not None
+    assert 结果["attempts"] == 2
+    assert len(记录) == 2
+
+
+def test_diagnosis_tracks_full_history_and_identity_kind(monkeypatch):
+    """诊断必须记录全程失败分布与主导原因，即使最后一轮是无轨也保留 identity 分类。"""
+    记录: list = []
+    _monkeypatch_attempt(monkeypatch, [
+        (None, f"{subtitles.REASON_URL_MISMATCH}（文件名 123 而非 456）"),
+        (None, f"{subtitles.REASON_URL_MISMATCH}（文件名 123 而非 456）"),
+        (None, subtitles.REASON_NO_TRACK),
+    ], 记录)
+
+    诊断: dict = {}
+    assert subtitles.fetch_episode_subtitle("BV1x", 1, 次数=3, 诊断=诊断) is None
+    assert len(记录) == 3
+    assert 诊断["kind"] == "identity"                      # 全程出现过 URL 不符，判定为 identity
+    assert 诊断["dominant_reason"] == subtitles.REASON_URL_MISMATCH
+    assert 诊断["failure_stats"][subtitles.REASON_URL_MISMATCH] == 2
+    assert 诊断["failure_stats"][subtitles.REASON_NO_TRACK] == 1
+    assert "共3轮" in 诊断["reason"]
 
 
 def test_zero_track_recovers_on_a_later_draw(monkeypatch):
@@ -536,158 +574,6 @@ def test_wbi_auto_sticky_downgrade_on_first_failure(monkeypatch):
     subtitles.reset_wbi_degraded()
 
 
-# ---------------------------------------------------------------------------
-# 内容身份：字幕正文必须对得上本集（实测串台样本见 fixtures/subtitle_pages.json）
-# ---------------------------------------------------------------------------
-
-def test_cross_talk_samples_pass_length_gate_but_fail_identity():
-    """这批坏页就是被"覆盖率 ≥ 90%"放行的：串台文件长度铺满整集，长度判据永远抓不到。"""
-    for entry in FIXTURE["cross_talk"]:
-        cues = _cue_list(entry)
-        覆盖 = subtitle_coverage(cues, entry["duration"])
-        assert 覆盖 >= SUBTITLE_COVERAGE_MIN, f"P{entry['page']} 应当被长度判据放行（复现原故障）"
-        对得上, 原因 = subtitle_identity(cues, entry["title"])
-        assert 对得上 is False, f"P{entry['page']}（{entry['source']}）必须判为不是本集"
-        assert "标题" in 原因
-
-
-def test_term_ranking_cannot_separate_same_course_drift():
-    """**负结果固化**：术语排名分不开同课程串台，所以它不能当门禁。
-
-    实测（224 块真实字幕稿全量跑）：
-        合法（本集标题）   排名≤1 34.1% | ≤2 51.2% | ≤5 70.1%
-        注入同课程漂移     排名≤1 16.5% | ≤2 33.5% | ≤5 51.0%
-    两条分布几乎重合，没有可用工作点：取 ≤1 误杀 66% 合法块，取 ≤5 仍误杀 30% 却只抓到
-    49%。原因是真实课程里相邻集本来就互相提及，标题术语又只有 2~4 字且大量重叠。
-
-    这个测试存在是为了**挡住"再加一张区分票"的复发**：它断言 fixture 里那两条同课程串台
-    的 own_rate 与最优他集 rate 与"用词差异"的正常页处在同一量级——即判据在原理上不成立，
-    不是阈值没调好。真要解决同课程串台，得靠内容级对齐（本集课纲关键词），或继续用
-    时长越界这一唯一实测有效的信号。
-    """
-    data = FIXTURE
-    titles = data["course_titles"]
-    terms = data["course_top_terms"]
-
-    def cues(entry):
-        return [{"from": c[0], "to": c[1], "content": c[2]} for c in entry["cues"]]
-
-    drift = [subtitles.distinctive_title(cues(e), e["title"], titles, terms)[2]
-             for e in data["same_course_cross_talk"]]
-    variant = [subtitles.distinctive_title(cues(e), e["title"], titles, terms)[2]
-               for e in data["title_variant"] + data["variant_windows"]]
-
-    assert drift and variant, "fixture 缺少同课程串台或正常页样本"
-    # 串台页的"最优他集"强度落在正常页的区间内 → 无阈值可分离
-    for d, v in zip(drift, variant):
-        assert (d.get("best_rate") or 0) <= max((x.get("best_rate") or 0) for x in variant), (
-            f"出现可分离信号，请重新评估区分票：drift={d} variant_best_max="
-            f"{max((x.get('best_rate') or 0) for x in variant)}"
-        )
-
-
-@pytest.mark.parametrize("entry", FIXTURE["legit"], ids=lambda e: f"P{e['page']}")
-def test_identity_accepts_normal_pages(entry):
-    """正常页零误伤：标题术语在正文里出现若干次（实测命中 12~117 次）。"""
-    对得上, 原因 = subtitle_identity(_cue_list(entry), entry["title"])
-    assert 对得上 is True and 原因 == ""
-
-
-def test_identity_rejects_single_short_term_hit():
-    """实测形态：串台短剧里恰好冒出一次「罪名」（标题「普通罪名」的第二术语）——
-    单次两字词命中不算数，否则整页串台照常放行。"""
-    短剧 = [{"from": 0.0, "to": 2.0, "content": "女人刑满释放20年的牢狱"},
-           {"from": 1900.0, "to": 1902.0, "content": "一辈子都摆脱不了这个罪名"}]
-    对得上, 原因 = subtitle_identity(短剧, "第23讲：渎职罪 第02节：普通罪名")
-    assert 对得上 is False and "罪名 1 次" in 原因
-    # 同样的两字词，命中 ≥2 次即算真的在讲本集
-    assert subtitle_identity([{"from": 0.0, "to": 2.0, "content": "罪名的分类与罪名的认定"}],
-                             "第23讲：渎职罪 第02节：普通罪名")[0] is True
-    # 长术语（≥3 字）命中一次即算数
-    assert subtitle_identity([{"from": 0.0, "to": 2.0, "content": "渎职罪的构成"}],
-                             "第23讲：渎职罪 第02节：普通罪名")[0] is True
-
-
-def test_course_vote_rescues_title_wording_variants():
-    """标题用词与讲师说法不同的正常页（实测 3 例）：只有标题票会误判成串台，
-    补上课程术语票后必须放行——否则每次跑都要白烧一次音频兜底。"""
-    术语 = set(FIXTURE["course_top_terms"])
-    assert 术语, "fixture 应带课程高频术语表"
-    for entry in FIXTURE["title_variant"]:
-        重叠 = len(set(entry["page_top_terms"]) & 术语)
-        assert 重叠 >= subtitles.COURSE_OVERLAP_MIN, \
-            f"P{entry['page']}（{entry['source']}）课程票应通过，实测重叠 {重叠}"
-    for entry in FIXTURE["variant_windows"]:
-        cues = _cue_list(entry)
-        assert subtitle_identity(cues, entry["title"])[0] is False, f"P{entry['page']} 只有标题票时应判不可用"
-        assert subtitle_identity(cues, entry["title"], FIXTURE["course_top_terms"])[0] is True, \
-            f"P{entry['page']} 有课程票时应放行"
-
-
-def test_course_vote_rejects_cross_talk_on_real_page_profiles():
-    """串台页的页高频术语与课程骨架几乎不重叠（实测 0~1），补上课程票也照样判不可用。"""
-    术语 = set(FIXTURE["course_top_terms"])
-    for entry in FIXTURE["cross_talk"] + FIXTURE["cross_talk_extra"]:
-        重叠 = len(set(entry["page_top_terms"]) & 术语)
-        assert 重叠 < subtitles.COURSE_OVERLAP_MIN, \
-            f"P{entry['page']}（{entry['source']}）课程票不该通过，实测重叠 {重叠}"
-
-
-def test_course_terms_and_overlap_second_vote():
-    """第二票：标题用词与讲师说法不同（实测「枪支类犯罪」→ 讲师说「枪支犯罪」）时，
-    只要内容还落在这门课的词频骨架上就不该判串台；真串台则两票都不过。"""
-    课程 = ["狗蛋构成故意杀人罪，既遂与未遂的判断", "犯罪构成要件与客观归责，狗蛋儿",
-            "小芳与铁牛的共同犯罪，责任形式", "盗窃罪的既遂标准与数额认定",
-            "主观故意与客观行为的对应关系，狗蛋"]
-    术语 = subtitles.course_terms(课程)          # 默认 top=30，与生产一致
-    assert {"狗蛋", "既遂"} & set(术语), f"课程高频术语应含课程骨架词：{术语}"
-
-    # 标题写「枪支类犯罪」、讲师说「枪支犯罪」——标题票不中，课程票中 → 放行
-    正常页 = [{"from": 0.0, "to": 2.0, "content": "接下来就是第五节枪支犯罪"},
-            {"from": 300.0, "to": 302.0, "content": "枪支犯罪的既遂与故意认定，狗蛋这个案件"}]
-    assert subtitles.course_overlap(正常页, 术语) >= subtitles.COURSE_OVERLAP_MIN
-    assert subtitle_identity(正常页, "第19讲 第05节：枪支类犯罪", 术语)[0] is True
-    # 同一个页面若无课程参照（只有标题一票），会被判不可用——这正是需要第二票的原因
-    assert subtitle_identity(正常页, "第19讲 第05节：枪支类犯罪")[0] is False
-
-    # 真串台：标题票不中 + 与课程术语零重叠 → 两票都不过
-    串台页 = [{"from": 0.0, "to": 2.0, "content": "大家好，今年 iPhone 16 的续航实测"},
-            {"from": 100.0, "to": 102.0, "content": "屏幕刷新率和充电功率都没什么变化"}]
-    assert subtitles.course_overlap(串台页, 术语) < subtitles.COURSE_OVERLAP_MIN
-    assert subtitle_identity(串台页, "第19讲 第05节：枪支类犯罪", 术语)[0] is False
-
-
-def test_course_terms_empty_when_no_reference():
-    assert subtitles.course_terms([]) == []
-    assert subtitles.course_overlap([{"from": 0.0, "content": "狗蛋"}], []) == 0
-
-
-def test_identity_lets_through_empty_body():
-    """没有正文时不做身份判据（空正文由调用方按"正文为空"的瞬时故障处理）。"""
-    assert subtitle_identity([], "第20讲 第02节：走私犯罪") == (True, "")
-
-
-def test_identity_accepts_page_with_in_lecture_music():
-    """页内含英文歌词是合法素材（课间音乐），不得误判成串台。"""
-    entry = FIXTURE["in_lecture_media"][0]
-    assert any("♪" in c[2] or re.search(r"[A-Za-z]{3,}", c[2]) for c in entry["cues"]), "样本里应含外文行"
-    assert subtitle_identity(_cue_list(entry), entry["title"])[0] is True
-
-
-def test_identity_lets_through_titles_without_terms():
-    """标题没有实词（纯「第01节」一类）→ 判据让路，只保留原有长度判据，不误伤。"""
-    cues = [{"from": 0.0, "to": 3.0, "content": "随便什么正文"}]
-    assert subtitle_identity(cues, "第01节") == (True, "")
-    assert subtitle_identity(cues, "") == (True, "")
-
-
-def test_identity_tolerates_word_boundary_variance():
-    """标题「法律拟定」而讲师全程说「法律拟制」：按"任一术语/子窗命中"判定，不因单个词失配误拒。"""
-    cues = [{"from": 0.0, "to": 3.0, "content": "注意规定与法律拟制的区分"}]
-    assert subtitle_identity(cues, "第16讲 第02节：注意规定与法律拟定")[0] is True
-    # 子窗容忍：标题 7 字长术语，正文只念出后半截
-    assert subtitle_identity([{"from": 0.0, "to": 3.0, "content": "国家安全罪的构成"}],
-                             "第24讲：危害国家安全罪")[0] is True
 
 
 # ---------------------------------------------------------------------------

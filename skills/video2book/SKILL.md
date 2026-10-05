@@ -21,7 +21,7 @@ metadata:
 2. **逐字稿事实保真**：`subtitles/BLKxx_*_逐字稿.md` 是模块长文的唯一事实来源。逐字稿可由 B 站中文字幕或听音转录产生；写作角色只读逐字稿，不重新听音。`check --stage1` 用双层实体覆盖率校验。
 3. **拒绝脱缰黑话**：经典基础课必须贴课程实际，不套互联网大厂浮夸黑话。
 4. **提示词风格红线**：`pipeline` 必须带 `--article-type`；当前提供 `learning`（推荐）与 `legacy`。未指定或命中未提供形态以退出码 4 终止。
-5. **阶段一派发纪律**：课程总时长 ≤ 60 分钟由主 Agent 串行处理，超过 60 分钟必须派发。转录角色通过 `queue_tracker --next-transcribe` 按块消费，写作角色通过 `--next-module` 一块一篇；`dispatch_prompt` 必须原样透传，**不回传正文**，只回报一行。实算音频 token（时长 × `BVB_AUDIO_TOKENS_PER_SEC`，默认 32）超过窗口 60% 时按 `next_start_time` / `next_duration_minutes` 续读。
+5. **阶段一派发纪律**：课程总时长 ≤ 60 分钟由主 Agent 串行处理，超过 60 分钟必须派发。转录角色通过 `queue_tracker --next-transcribe` 按块消费，写作角色通过 `--next-module` 一块一篇；`dispatch_prompt` 必须原样透传，**不回传正文**，只回报一行。实算音频 token（时长 × `BVB_AUDIO_TOKENS_PER_SEC`，默认 32）超过窗口 60% 时按 `next_start_time` / `next_duration_minutes` 续读。派发节奏默认按批；需要「完成一个、立即补一个」时取载荷加 `--claim`（在途块自动排除、成品落盘自动释放，细则见 `workflow.md` §1.5）。
 
 ## 2. 唯一执行路径（SOP）
 
