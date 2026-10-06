@@ -4,7 +4,7 @@ description: 把 B 站、YouTube、抖音长视频/系列网课或本地音视�
 license: MIT
 metadata:
   author: LINJIANG12
-  version: 4.0.0
+  version: 4.1.0
   category: learning-and-education
   compatibility: Python 3.10+；系统 ffmpeg 在 PATH；缺字幕块需要宿主听音通道之一（read_audio 或 read_media）。
 ---
@@ -17,7 +17,7 @@ metadata:
 
 ## 1. 五条红线
 
-1. **黑盒调用**：所有任务经官方 CLI 与原生多模态工具链推进，不写离线造文脚本伪造产物。
+1. **黑盒调用**：所有任务经官方 CLI 与原生多模态工具链推进，不写离线造文脚本伪造产物；**转录只走 `read_media` / `read_audio` 两条听音通道，严禁下载、安装或调用任何本地语音识别模型（faster-whisper、whisper.cpp、Vosk、FunASR 等）顶替，也不得写临时脚本绕道**。
 2. **逐字稿事实保真**：`subtitles/BLKxx_*_逐字稿.md` 是模块长文的唯一事实来源。逐字稿可由 B 站中文字幕或听音转录产生；写作角色只读逐字稿，不重新听音。`check --stage1` 用双层实体覆盖率校验。
 3. **拒绝脱缰黑话**：经典基础课必须贴课程实际，不套互联网大厂浮夸黑话。
 4. **提示词风格红线**：`pipeline` 必须带 `--article-type`；当前提供 `learning`（推荐）与 `legacy`。未指定或命中未提供形态以退出码 4 终止。

@@ -91,6 +91,19 @@ def test_block_transcribe_taskbook_embeds_transcription_instruction(make_workspa
     assert TRANSCRIBE_INSTRUCTION in text
 
 
+def test_block_transcribe_taskbook_bans_local_model_fallback(make_workspace):
+    """通道不可用时只能停下：任务书要写明严禁改用本地模型转录（runtime.md §1.3 ⑥ 的硬约束）。
+
+    转录角色只读任务书、且被明确要求不检索其他文件，所以这条禁令必须出现在任务书里，
+    写在 references/ 里等于没写。
+    """
+    ws = make_workspace("转录任务书_BVTEST01")
+    block = {"block_id": 1, "episodes": [1], "duration_min": 10.0}
+    text = export_block_transcribe_task(ws, block).read_text(encoding="utf-8")
+    assert "严禁改用本地语音识别模型" in text
+    assert "严禁下载模型权重" in text
+
+
 def test_block_transcribe_taskbook_has_no_private_endpoint(make_workspace):
     """任务书不得硬编码本机私有端点：换台机器照抄就整条链路失效。"""
     ws = make_workspace("转录任务书_BVTEST01")

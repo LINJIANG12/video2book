@@ -61,6 +61,10 @@
    没有抬头就会被判成无来源，从而被 `--force` 降级覆盖（实测发生过，不可逆）。
 4. 只回报一行：`BLK01 | 逐字稿路径 | 字节数 | 执行者`；**不回传正文**（回传会把主上下文重新撑满）。
 
+> **通道不可用 ≠ 可以换工具**：`read_media` 上游返回 5xx 时，按 `runtime.md` §1.3 ⑥ 停下排查本机代理／加速器，
+> 修好后重跑；**不得**改用本地语音识别模型（faster-whisper / whisper.cpp / Vosk 等）或任何第三方 ASR 顶替转录，
+> 更不得为此下载模型权重——这类替代的精度低于通道 B，且会长时间占满本机 CPU。
+
 ### 1.4 写作角色（按块成文）
 
 1. 主 Agent 取载荷：`python scripts/queue_tracker.py --next-module 5 --json --log-dispatch`
