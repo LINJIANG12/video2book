@@ -131,6 +131,10 @@
 三类交付物的默认阅读场景是 **Typora**，同时需兼顾 VS Code Markmap、XMind 导入与纯文本查看。
 
 - **公式的阅读侧设置**：Typora → 偏好设置 → Markdown → 勾选「内联公式」（Inline Math）。未开启时行内公式会原样显示 `$…$` 源码，看起来像公式损坏。
+- **公式断裂**（写作侧把 `\neq` 的 `\n` 当成了换行符，公式断在中途、下一行以 `eq` 开头）：不止显示难看——
+  公式真值被改（`D≠0` 渲染成 `D eq 0` 这种假式子），落在显示公式里时收尾 `$$` 还会落到行尾、
+  被阅读器判成未闭合而一路吞掉后续正文。属**渲染致命项**，`check --deliver` 会拦；存量用
+  `python src/cli.py check --fix-formula-breaks --apply` 就地接回（幂等；不带 `--apply` 只预演）。
 - **标题序号**：三类交付物的标题**一律不写序号**——阅读器会自动给标题编号，手写序号会与它叠成
   `1. 第 1 章：…` 这种双号。存量产物的手写序号用 `python src/cli.py check --fix-numbering --apply` 就地清理
   （幂等；不带 `--apply` 时只预演报告、不写盘）；`python src/cli.py check --deliver` 会统计「标题手写序号」，

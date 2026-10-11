@@ -346,17 +346,32 @@ def lint_reported_headings(text: str) -> List[Dict[str, Any]]:
     ]
 
 
+# ── 公式断裂：`\neq` 里的 `\n` 被当成换行符，公式断在中途、下一行以 `eq` 开头 ──────────
+# 写作侧把 `$D \neq 0$` 写成了 `$D ` + 换行 + `eq 0$`。危害不止「显示难看」：公式的真值被改
+# （`D≠0` 渲染成 `D eq 0` 这种假式子）；落在显示公式里时，收尾 `$$` 还会落到行尾、被阅读器
+# 判成未闭合而一路吞掉后续正文（阅读侧的 math-guard 护栏就是为这个加的，注释里记着实测损失）。
+#
+# 为什么算致命项：2026-10-11 全库扫描 21 门课 / 67 份成品 / 460 处命中，修复后全库为 0——
+# 满足本项目「合格语料为 0、坏样本大量命中」的致命项判据，而且它改的是知识真值，不是排版口味。
+#
+# 判据：围栏外、非空行、以 `eq` 开头且其后不是字母（放过 `equals` / `equation` 这类英文词，
+# 也放过 `eq\mathbf 0$` 这种断在转义命令前的变体）。修复侧 `formula_cleanup` 共用同一判据。
+EQ_BREAK_RE = re.compile(r"^eq(?![A-Za-z])")
+
+
 def lint_render(text: str) -> Dict[str, Any]:
-    """渲染合规体检：告警块、围栏配对、围栏外裸字符画、围栏语言标识缺失。
+    """渲染合规体检：告警块、围栏配对、围栏外裸字符画、围栏语言标识缺失、公式断裂。
 
     围栏计数依据 `_iter_lines` 给出的「本行之前的围栏状态」：进入围栏状态之前的 ``` 是开启、
     之后的是闭合，避免用局部变量重复切换导致计数错乱。
     """
     alerts: List[Dict[str, Any]] = []
     stray_art: List[Dict[str, Any]] = []
+    formula_breaks: List[Dict[str, Any]] = []
     fence_opens = 0
     fence_closes = 0
     fence_without_lang: List[Dict[str, Any]] = []
+    prev_line = ""
 
     for line_no, line, in_fence, is_fence in _iter_lines(text):
         stripped = line.strip()
@@ -368,6 +383,7 @@ def lint_render(text: str) -> Dict[str, Any]:
                 lang = stripped[3:].strip()
                 if not lang:
                     fence_without_lang.append({"line": line_no, "text": stripped})
+            prev_line = ""
             continue
         if in_fence:
             continue
@@ -375,6 +391,10 @@ def lint_render(text: str) -> Dict[str, Any]:
             alerts.append({"line": line_no, "text": stripped[:120]})
         if stripped and not stripped.startswith("|") and looks_like_stray_art(line):
             stray_art.append({"line": line_no, "text": stripped[:120]})
+        # 公式断裂：上一行非空 = 这个 `eq` 是接在别的行后面的续行，不是正文起句
+        if stripped and prev_line.strip() and EQ_BREAK_RE.match(stripped):
+            formula_breaks.append({"line": line_no, "text": stripped[:120]})
+        prev_line = line
 
     return {
         "alert_blocks": alerts,
@@ -383,6 +403,7 @@ def lint_render(text: str) -> Dict[str, Any]:
         "fence_opens": fence_opens,
         "fence_closes": fence_closes,
         "fence_without_lang": fence_without_lang,
+        "formula_breaks": formula_breaks,
     }
 
 
@@ -399,7 +420,9 @@ STRUCTURE_KEYS = (
     "no_redundant_tail",
 )
 
-FATAL_RENDER_KEYS = ("alert_blocks", "stray_art", "fences_unbalanced")
+# 渲染致命项：告警块 / 裸字符画 / 围栏配对 / 公式断裂。
+# 公式断裂同样致命——它改的是公式真值，且显示公式的收尾 `$$` 落在行尾时会让阅读器吞掉后续正文。
+FATAL_RENDER_KEYS = ("alert_blocks", "stray_art", "fences_unbalanced", "formula_breaks")
 
 
 def summarize_note(lint: Dict[str, Any]) -> Dict[str, int]:
@@ -422,6 +445,7 @@ def summarize_render(lint: Dict[str, Any]) -> Dict[str, int]:
         "stray_art": len(lint["stray_art"]),
         "fences_unbalanced": 1 if lint["fences_unbalanced"] else 0,
         "fence_without_lang": len(lint["fence_without_lang"]),
+        "formula_breaks": len(lint.get("formula_breaks", [])),
     }
 
 

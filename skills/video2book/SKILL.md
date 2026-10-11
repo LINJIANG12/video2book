@@ -4,7 +4,7 @@ description: 把 B 站、YouTube、抖音长视频/系列网课或本地音视�
 license: MIT
 metadata:
   author: LINJIANG12
-  version: 4.1.0
+  version: 4.2.0
   category: learning-and-education
   compatibility: Python 3.10+；系统 ffmpeg 在 PATH；缺字幕块需要宿主听音通道之一（read_audio 或 read_media）。
 ---
@@ -65,7 +65,7 @@ metadata:
 | `pipeline` | 阶段一唯一入口：元数据、BlockPlan、字幕、按需音频与任务书 |
 | `cluster-notes` | 块 → 笔记归并，导出笔记任务书 |
 | `cluster-articles` | 按块序把模块长文整编成册 |
-| `check` | `--stage1` 依据级校验 / `--deliver` 交付体检 / `--fix-numbering` 标题去号（**默认只报不改，加 `--apply` 才写盘**） |
+| `check` | `--stage1` 依据级校验 / `--deliver` 交付体检（含公式断裂门禁）/ `--fix-numbering` 标题去号 / `--fix-formula-breaks` 公式断裂修回（两个 `--fix-*` 都**默认只报不改，加 `--apply` 才写盘**） |
 | `audit-names` | 专名核对：列出长文里逐字稿查不到的英文专名，产出每课程一份 `专名核对.md`（只报告） |
 | `cleanup` | 回收已完成任务书，每类保留 1 份范本 |
 | `sync` | 以磁盘产物回填 `manifest.json` |
@@ -83,7 +83,7 @@ metadata:
 | 长文基于本块逐字稿（双层实体覆盖率） | 机器门禁 | ✅ `check --stage1` |
 | 逐字稿来自**真字幕**（时长覆盖 + 时长上界 + 本集身份三校验） | 机器门禁 | ✅ 不过即转音频兜底，原因入 `manifest.json` |
 | 围栏语言标识与标题手写序号 | 提示项 | 默认只统计；`--require-lang` / `--require-no-numbering` 才纳入门禁 |
-| 笔记成色五类致命项、渲染致命项 | 机器门禁 | ✅ `check --deliver` |
+| 笔记成色五类致命项、渲染致命项（含**公式断裂**：`\neq` 被折成换行 + `eq`） | 机器门禁 | ✅ `check --deliver`；存量用 `--fix-formula-breaks --apply` 修回 |
 | 谁写的、转录是否忠于原声、并发是否照建议 | 纪律条款 | ❌ 只能看派发台账 |
 
 ## 6. 环境与缺失处理
@@ -102,3 +102,5 @@ metadata:
 细则索引：`workflow.md`（阶段流程）、`runtime.md`（依赖与听音）、`cli-cookbook.md`（命令）、`delivery_matrix.md`（产物规范）、`host-tools/`（宿主工具映射）。
 
 > 标题纪律：长文、教材、笔记标题一律不写序号；用 `check --fix-numbering --apply` 清理存量。交付物禁用 GitHub 告警块语法。
+> 公式纪律：`\neq` 不得写成换行 + `eq`（写作侧一旦把 `\neq` 的 `\n` 当换行符，公式真值就被改、显示公式还会吞掉后续正文）；
+> `check --deliver` 会把「行首 `eq`」判为致命项，存量用 `check --fix-formula-breaks --apply` 修回。

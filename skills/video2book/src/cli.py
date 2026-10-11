@@ -6,7 +6,7 @@ Commands:
   pipeline         - v4 plan-first single entry: topology -> BlockPlan -> subtitles -> audio/task files
   cluster-notes    - Aggregate blocks into review notes (task files), then auto cleanup + sync
   cluster-articles - Consolidate module long-forms into modular textbooks, then auto cleanup + sync
-  check            - Unified quality gate: --stage1 (grounding) / --deliver (note+render) / --fix-numbering
+  check            - Unified quality gate: --stage1 (grounding) / --deliver (note+render) / --fix-numbering / --fix-formula-breaks
   cleanup          - Reclaim completed dispatch task-files (*_TASK.md), keeping N samples per category
   sync             - Reconcile manifest.json with on-disk products (disk is the source of truth)
   login / logout   - Persist or clear Bilibili SESSDATA / Douyin credentials (--sessdata / --douyin-cookie)
@@ -314,6 +314,7 @@ def cmd_check(args):
     - `--stage1`：阶段一放行门禁——模块长文是否基于本块逐字稿（双层实体覆盖率：英文标识符与多位数字 / 中文技术术语骨架，任一层达下限即放行）；
     - `--deliver`（默认）：交付前体检——笔记成色 + 渲染合规；
     - `--fix-numbering`：存量产物标题手写序号就地清理（幂等，可先 `--dry-run` 预演）；
+    - `--fix-formula-breaks`：存量产物公式断裂（`\neq` 被折成换行 + `eq`）就地修复（默认只报不改）；
     - `--strict`：致命项才返回非零退出码（默认提示级）。
     """
     if getattr(args, "fix_numbering", False):
@@ -327,6 +328,17 @@ def cmd_check(args):
             as_json=bool(getattr(args, "json", False)),
             max_samples=int(getattr(args, "max_samples", 5) or 5),
             hash_nonheading=bool(getattr(args, "hash_nonheading", False)),
+        )
+
+    if getattr(args, "fix_formula_breaks", False):
+        from src.core.formula_cleanup import run_fix_formula_breaks
+        return run_fix_formula_breaks(
+            base_dir=getattr(args, "base_dir", None),
+            task=getattr(args, "task", None),
+            dir_path=getattr(args, "dir", None),
+            apply=bool(getattr(args, "apply", False)),
+            as_json=bool(getattr(args, "json", False)),
+            max_samples=int(getattr(args, "max_samples", 5) or 5),
         )
 
     from src.core.quality_gate import run_deliver, run_stage1
@@ -706,12 +718,15 @@ def main():
     # check：交付质量门禁统一入口（阶段一放行 / 交付前体检 / 存量标题去号）
     p_check = subparsers.add_parser(
         "check",
-        help="Unified quality gate: --stage1 (grounding) / --deliver (note+render, default) / --fix-numbering",
+        help="Unified quality gate: --stage1 (grounding) / --deliver (note+render, default) / --fix-numbering / --fix-formula-breaks",
     )
     p_check.add_argument("--stage1", action="store_true", help="阶段一放行门禁：模块长文是否基于本块逐字稿")
     p_check.add_argument("--deliver", action="store_true", help="交付前体检：笔记成色 + 渲染合规（默认）")
     p_check.add_argument("--fix-numbering", action="store_true", dest="fix_numbering",
                          help="存量产物标题手写序号清理（默认只报不改；加 --apply 才写盘）")
+    p_check.add_argument("--fix-formula-breaks", action="store_true", dest="fix_formula_breaks",
+                         help="存量产物公式断裂修复：`\\neq` 被折成换行 + `eq` 就地接回"
+                              "（默认只报不改；加 --apply 才写盘）")
     p_check.add_argument("--dir", default=None, help="直接指定单个工作区目录")
     p_check.add_argument("--task", default=None, help="仅处理目录名包含该关键字的工作区")
     p_check.add_argument("--base-dir", default=None, help=BASE_DIR_HELP)
@@ -733,10 +748,10 @@ def main():
     p_check.add_argument("--only", choices=("textbooks", "articles", "both"), default="both",
                          help="[--fix-numbering] 只处理哪一类（默认 both）")
     p_check.add_argument("--apply", action="store_true", dest="apply",
-                         help="[--fix-numbering] 真的写盘（缺省只预演报告；去号判定含猜的成份，"
-                              "写盘需显式确认）")
+                         help="[--fix-numbering / --fix-formula-breaks] 真的写盘（缺省只预演报告；"
+                              "去号判定含猜的成份，写盘需显式确认）")
     p_check.add_argument("--max-samples", type=int, default=5, dest="max_samples",
-                         help="[--fix-numbering] 每类最多打印几条样例（默认 5）")
+                         help="[--fix-numbering / --fix-formula-breaks] 每类最多打印几条样例（默认 5）")
     p_check.add_argument("--hash-nonheading", action="store_true", dest="hash_nonheading",
                          help="[--fix-numbering] 打印非标题行内容指纹")
 

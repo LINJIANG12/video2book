@@ -41,6 +41,8 @@ from src.core.deliverable_lint import (  # noqa: E402
     summarize_render,
 )
 
+from src.core.formula_cleanup import canon, fix_text  # noqa: E402
+
 
 def _doc(*blocks: str) -> str:
     return "\n\n".join(blocks) + "\n"
@@ -541,6 +543,165 @@ def test_deliver_gate_reports_zero_findings_on_clean_workspace(run_cli, make_wor
     render = payload["render"][0]["totals"]
     assert render["alert_blocks"] == 0 and render["stray_art"] == 0
     assert render["fences_unbalanced"] == 0 and render["fence_without_lang"] == 0
+
+
+# ===========================================================================
+# 六、公式断裂（`\neq` 被折成换行 + `eq`）：判定内核 + 修复命令
+# ===========================================================================
+# 语料出处：2026-10-11 全库扫描命中 21 门课 / 67 份成品 / 460 处，修复后全库归零。
+# 坏法是写作侧把 `$D \neq 0$` 写成了 `$D ` + 换行 + `eq 0$`：行内渲染成「D eq 0」这种假式子
+# （公式真值被改），显示公式更糟——收尾 `$$` 落到行尾被判成未闭合、一路吞掉后续正文。
+
+#: 行内断行：`$D ` + 换行 + `eq 0$`（Python 源码里的 `\n` 正是那个换行）
+BROKEN_INLINE = (
+    "# 行列式与方程组\n\n"
+    "## 系数行列式的判定\n\n"
+    "未知数前面的系数组成的行列式 $D \n"
+    "eq 0$，这就决定了方程组具有唯一解。\n"
+)
+
+#: 显示公式断行：收尾 `$$` 落在行尾 → 阅读器会继续往后吞
+BROKEN_DISPLAY = (
+    "# 行列式与方程组\n\n"
+    "## 矩阵记法与分块\n\n"
+    "分块之后左上块与右下块各管一段：\n\n"
+    "$$\\begin{vmatrix}1&0&1\\\\ 1&1&0\\\\ 0&1&1\\end{vmatrix}=1-0+1=2\n"
+    "eq 0$$\n"
+)
+
+#: 级联：同一处断成三行（`$x_1 ` / `eq x_2 \implies f(x_1) ` / `eq f(x_2)$$`）
+BROKEN_CASCADE = (
+    "# 映射与函数\n\n"
+    "## 单射与满射\n\n"
+    "对任意 $x_1 \n"
+    "eq x_2 \\implies f(x_1) \n"
+    "eq f(x_2)$$ 都成立。\n"
+)
+
+
+def test_inline_formula_break_is_detected():
+    assert len(lint_render(BROKEN_INLINE)["formula_breaks"]) == 1
+
+
+def test_display_formula_break_is_detected():
+    assert len(lint_render(BROKEN_DISPLAY)["formula_breaks"]) == 1
+
+
+def test_cascade_counts_every_broken_line():
+    """级联断两行就报两处：口径与 `--fix-formula-breaks` 的计数一致。"""
+    assert len(lint_render(BROKEN_CASCADE)["formula_breaks"]) == 2
+
+
+@pytest.mark.parametrize("broken_line", [
+    "eq 0$",            # 行内公式
+    "eq\\mathbf 0$",    # 断在转义命令前（无空格变体，按 `^eq ` 扫会漏掉这一种）
+    "eq\\varnothing,",  # `eq` 后紧跟反斜杠
+    "eq 1)",
+])
+def test_formula_break_variants_are_detected(broken_line: str):
+    text = f"# 笔记\n\n## 一节\n\n公式 $x \n{broken_line}\n"
+    assert len(lint_render(text)["formula_breaks"]) == 1, f"漏判: {broken_line!r}"
+
+
+def test_formula_break_is_fatal():
+    summary = summarize_render(lint_render(BROKEN_INLINE))
+    assert summary["formula_breaks"] == 1
+    assert fatal_render_total(summary) >= 1, "公式断裂没进致命项"
+
+
+@pytest.mark.parametrize("line", [
+    "equals 是「等于」的英文。",
+    "equation (3) 给出了定义。",
+])
+def test_english_words_starting_with_eq_are_not_breaks(line: str):
+    """`equals` / `equation` 以 `eq` 开头但不是断裂：判据要求 `eq` 后面不是字母。"""
+    text = f"# 笔记\n\n## 一节\n\n前一行有内容。\n{line}\n"
+    assert lint_render(text)["formula_breaks"] == [], f"英文词被误判: {line!r}"
+
+
+def test_fenced_eq_line_is_not_a_break():
+    """围栏里的 `eq` 可能是代码，一律不判。"""
+    text = "# 笔记\n\n## 一节\n\n```python\neq = 1\n```\n"
+    assert lint_render(text)["formula_breaks"] == [], "围栏内的 eq 行被计入"
+
+
+def test_eq_line_after_blank_line_is_not_a_break():
+    """上一行是空行说明这是段落起句，不是续行。"""
+    text = "# 笔记\n\n## 一节\n\n上一段结束了。\n\neq 开头的独立段落。\n"
+    assert lint_render(text)["formula_breaks"] == [], "段落起句被误判成断裂"
+
+
+# ── 修复内核 ────────────────────────────────────────────────────────────────
+
+def test_fix_text_joins_inline_break():
+    fixed, changes = fix_text(BROKEN_INLINE)
+    assert len(changes) == 1
+    assert "$D \\neq 0$" in fixed
+    assert lint_render(fixed)["formula_breaks"] == []
+
+
+def test_fix_text_joins_display_break():
+    fixed, _ = fix_text(BROKEN_DISPLAY)
+    assert "=1-0+1=2 \\neq 0$$" in fixed
+    assert lint_render(fixed)["formula_breaks"] == []
+
+
+def test_fix_text_absorbs_cascade():
+    fixed, changes = fix_text(BROKEN_CASCADE)
+    assert len(changes) == 2, "级联应按行报两处"
+    assert "$x_1 \\neq x_2 \\implies f(x_1) \\neq f(x_2)$$" in fixed
+    assert lint_render(fixed)["formula_breaks"] == []
+
+
+def test_fix_text_leaves_fenced_lines_alone():
+    text = "# 笔记\n\n## 一节\n\n```python\nequation = 1\nequal = 2\n```\n"
+    fixed, changes = fix_text(text)
+    assert changes == [] and fixed == text, "围栏内的代码被改了"
+
+
+@pytest.mark.parametrize("text", [BROKEN_INLINE, BROKEN_DISPLAY, BROKEN_CASCADE])
+def test_fix_text_preserves_everything_but_whitespace_and_eq(text: str):
+    """保真校验：canon(改前) == canon(改后)——除了空白与这一处替换，别的字符一个没动。"""
+    fixed, _ = fix_text(text)
+    assert canon(fixed) == canon(text)
+    fixed_again, changes_again = fix_text(fixed)
+    assert changes_again == [] and fixed_again == fixed, "修复不幂等"
+
+
+# ── `check --fix-formula-breaks` 端到端 ─────────────────────────────────────
+
+BROKEN_NOTE = CLEAN_NOTE.replace(
+    "先看访问模式，再决定用哪个结构。",
+    "先看访问模式：命中率 $p \n eq 0$ 时才考虑换结构。",
+)
+
+
+def test_deliver_gate_blocks_on_formula_break(run_cli, make_workspace):
+    """断裂公式是真值错误，必须让 `--strict` 失败。"""
+    ws = _deliver_note(make_workspace, "门禁_公式断裂", BROKEN_NOTE)
+    result = run_cli("check", "--deliver", "--strict", "--dir", str(ws.root_dir))
+    assert result.code == 1, "公式断裂没被门禁拦下"
+    assert "公式断裂" in result.norm
+
+
+def test_fix_formula_breaks_is_dry_run_by_default(run_cli, make_workspace):
+    ws = _deliver_note(make_workspace, "修复_预演", BROKEN_NOTE)
+    note = ws.notes_dir / "笔记01_数组与链表_笔记.md"
+    before = note.read_text(encoding="utf-8")
+    result = run_cli("check", "--fix-formula-breaks", "--dir", str(ws.root_dir))
+    assert result.code == 0, result.norm
+    assert note.read_text(encoding="utf-8") == before, "预演竟然写盘了"
+    assert "预演" in result.norm
+
+
+def test_fix_formula_breaks_apply_then_gate_passes(run_cli, make_workspace):
+    ws = _deliver_note(make_workspace, "修复_落盘", BROKEN_NOTE)
+    result = run_cli("check", "--fix-formula-breaks", "--apply", "--dir", str(ws.root_dir))
+    assert result.code == 0, result.norm
+    text = (ws.notes_dir / "笔记01_数组与链表_笔记.md").read_text(encoding="utf-8")
+    assert "$p \\neq 0$" in text and lint_render(text)["formula_breaks"] == []
+    after = run_cli("check", "--deliver", "--strict", "--dir", str(ws.root_dir))
+    assert after.code == 0, f"修复后门禁仍不放行:\n{after.norm}"
 
 
 if __name__ == "__main__":  # pragma: no cover

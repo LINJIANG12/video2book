@@ -10,8 +10,9 @@
 口径（与文档一致，改动前先查门禁断言）：
 - 默认**提示级**，只有 `strict=True` 时致命项才返回非零退出码；
 - 笔记致命项五类定义在 `deliverable_lint.FATAL_NOTE_KEYS`；
-- 渲染致命项为「告警块 / 围栏外裸字符画 / 围栏配对」；「缺语言标识」与「标题手写序号」
+- 渲染致命项为「告警块 / 围栏外裸字符画 / 围栏配对 / 公式断裂」；「缺语言标识」与「标题手写序号」
   默认只统计，分别由 `require_lang` / `require_no_numbering` 纳入门禁；
+- 公式断裂的存量修复走 `formula_cleanup.run_fix_formula_breaks`（`check --fix-formula-breaks`）。
 - 依据级校验是**启发式**：只测英文标识符与多位数字，无逐字稿的块不参与判定。
 """
 
@@ -655,6 +656,7 @@ def check_render_workspace(
         "fences_unbalanced": 0,
         "fence_without_lang": 0,
         "numbered_headings": 0,
+        "formula_breaks": 0,
     }
 
     for path in collect_markdown(ws):
@@ -686,6 +688,7 @@ def check_render_workspace(
                 "stray_art": lint["stray_art"][:3],
                 "fence_without_lang": lint["fence_without_lang"][:3],
                 "numbered_headings": numbered[:3],
+                "formula_breaks": lint["formula_breaks"][:3],
             },
         })
 
@@ -790,9 +793,10 @@ def run_deliver(
                     print("    ── 全部通过")
 
         print("\n" + "-" * 72)
-        print("[*] 渲染合规体检（告警块 / 围栏外字符画 / 围栏配对 / 围栏语言标识 / 标题手写序号）")
+        print("[*] 渲染合规体检（告警块 / 围栏外字符画 / 围栏配对 / 公式断裂 / 围栏语言标识 / 标题手写序号）")
         scope = "语言标识=门禁项（--require-lang）" if require_lang else "语言标识=提示项（不参与 --strict）"
         scope += "；标题序号=门禁项" if require_no_numbering else "；标题序号=提示项"
+        scope += "；公式断裂=门禁项（存量修复用 check --fix-formula-breaks）"
         print(f"[*] 门禁口径：{scope}")
         for report in render_reports:
             print(f"\n▶ {report['workspace']}")
@@ -800,15 +804,17 @@ def run_deliver(
                   f"致命 {report['fatal_total']} 处")
             t = report["totals"]
             print(f"    ── 告警块 {t['alert_blocks']} | 围栏外字符画 {t['stray_art']} | "
-                  f"围栏未闭合 {t['fences_unbalanced']} | 缺语言标识 {t['fence_without_lang']} | "
+                  f"围栏未闭合 {t['fences_unbalanced']} | 公式断裂 {t.get('formula_breaks', 0)} | "
+                  f"缺语言标识 {t['fence_without_lang']} | "
                   f"标题手写序号 {t.get('numbered_headings', 0)}")
             for entry in report["entries"][:12]:
                 s = entry["summary"]
                 short = entry["file"].split("/", 2)[-1] if "/" in entry["file"] else entry["file"]
                 print(f"    [✗] {short[:66]:68s} 告警块={s['alert_blocks']:3d} "
                       f"裸图={s['stray_art']:2d} 未闭合={s['fences_unbalanced']} "
+                      f"公式断裂={s.get('formula_breaks', 0):3d} "
                       f"缺语言={s['fence_without_lang']} 序号={entry.get('numbered_headings', 0)}")
-                for key in ("alert_blocks", "stray_art", "numbered_headings"):
+                for key in ("alert_blocks", "stray_art", "numbered_headings", "formula_breaks"):
                     for sample in entry["samples"].get(key, [])[:1]:
                         print(f"         └ {key} @{sample['line']}: {sample['text'][:84]}")
             if len(report["entries"]) > 12:
