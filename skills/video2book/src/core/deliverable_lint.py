@@ -358,9 +358,96 @@ def lint_reported_headings(text: str) -> List[Dict[str, Any]]:
 # 也放过 `eq\mathbf 0$` 这种断在转义命令前的变体）。修复侧 `formula_cleanup` 共用同一判据。
 EQ_BREAK_RE = re.compile(r"^eq(?![A-Za-z])")
 
+# ── 思维链泄漏：写作模型的自我对话/计划文本落进了产物 ─────────────────────────────
+# 语料出处：2026-11-01 issue#2（宋浩高数 2.0 模块11）。写作子智能体在单次超长 Write 中
+# 注意力崩坏，把「Let me rewrite it from scratch…」「I'm producing garbage…」这类自我
+# 对话原样写进了长文，整编阶段逐字搬运进教材，`check --deliver` 当时全绿——因为五类
+# 成色致命项全是中文套话模式，渲染致命项也没有英文推理模式这一类。
+#
+# 为什么算致命项：泄漏的推理文本不是知识内容，混在教材里直接毁掉阅读信任；且模式高度
+# 特征化（第一人称 + 写作动作词），正常讲义正文不会命中——全库扫描 40+ 门课只有坏样本
+# 命中，符合「合格语料为 0、坏样本大量命中」的致命项判据。
+#
+# 判据：围栏外、整行匹配任一高特征模式。模式必须足够窄：全部要求「I / Let me /
+# My」等第一人称与写作元动作同现，避免误伤讲义里合法的英文术语句。
+COT_LEAK_PATTERNS = (
+    re.compile(r"\bI(?:'m| am|'|)\s+(producing|writing|generating)\s+(garbage|huge|too much)", re.IGNORECASE),
+    re.compile(r"\bThe generator might\b", re.IGNORECASE),
+    re.compile(r"\bLet me (just )?(clean it up|rewrite|think about|look at (the|what)\b)", re.IGNORECASE),
+    re.compile(r"\bI need to (be careful|fix this|rewrite|avoid|make sure|think about)\b", re.IGNORECASE),
+    re.compile(r"\bI (will|have to) (now )?write a? ?clean", re.IGNORECASE),
+    re.compile(r"\bI (attempted|tried) to edit with old_string\b", re.IGNORECASE),
+    re.compile(r"\bI(?:'| a)m? (corrupted|going off the rails|off the rails)\b", re.IGNORECASE),
+    re.compile(r"\bWrite (tool|call)s?\b.*\binline\b", re.IGNORECASE),
+    re.compile(r"\brewrite (it|the whole thing|the from) (from )?scratch\b", re.IGNORECASE),
+    re.compile(r"\bI(?:'ve| have) been repeating nonsensical content\b", re.IGNORECASE),
+)
+
+
+def lint_cot_leak(text: str) -> List[Dict[str, Any]]:
+    """思维链泄漏检测：围栏外的英文推理模式行。供 lint_render 复用围栏遍历。"""
+    leaks: List[Dict[str, Any]] = []
+    for line_no, line, in_fence, is_fence in _iter_lines(text):
+        if is_fence or in_fence:
+            continue
+        stripped = line.strip()
+        if not stripped:
+            continue
+        for pattern in COT_LEAK_PATTERNS:
+            if pattern.search(stripped):
+                leaks.append({"line": line_no, "text": stripped[:120], "pattern": pattern.pattern})
+                break
+    return leaks
+
+
+# ── 同文件重复标题：同级标题在一份成品里重名多次 ────────────────────────────────
+# 语料出处：同 issue#2。坏样本里 `### 圆锥面` 出现 7 次、`师的不两` 等碎标题各 1 次，
+# 源头是写作侧失控输出未被清洗。article/textbook 没有跨文件命名检查（笔记才有），
+# 文件内重名此前无任何判定。
+#
+# 判定口径：同**一级**（`##` 与 `###` 各算各的）标题正文重名 ≥2 计 1 处（按重名组计，
+# 不按多余次数计）。为什么提示级：讲义存在合法的章节性重名（「本讲提到的题目」每章
+# 一节、「绕 x 轴」等并列小节），≥2 就门禁会全盘误杀；致命病灶（思维链泄漏）已由
+# cot_leak 把守，这里只负责把「写崩了」的信号亮出来供人工过目。
+DUPLICATE_HEADING_WHITELIST = frozenset({
+    "本讲提到的题目",
+    "题目描述",
+    "题意解析与推导",
+})
+
+
+def lint_duplicate_headings(text: str) -> List[Dict[str, Any]]:
+    """同文件同级标题重名检测（提示级）。跳过围栏；重名组整体报 1 处。"""
+    buckets: Dict[tuple, List[Dict[str, Any]]] = {}
+    for line_no, line, in_fence, is_fence in _iter_lines(text):
+        if is_fence or in_fence:
+            continue
+        matched = HEADING_RE.match(line)
+        if not matched:
+            continue
+        level = len(matched.group(1))
+        if level < 2:  # H1 是篇名，唯一性由「一份成品一个 H1」保证，不参与重名
+            continue
+        title = matched.group(2).strip()
+        if not title or title in DUPLICATE_HEADING_WHITELIST:
+            continue
+        buckets.setdefault((level, title), []).append({"line": line_no, "text": line.strip()[:120]})
+    dups: List[Dict[str, Any]] = []
+    for (level, title), hits in buckets.items():
+        if len(hits) < 2:
+            continue
+        dups.append({
+            "level": level,
+            "title": title,
+            "count": len(hits),
+            "lines": hits[:3],
+        })
+    dups.sort(key=lambda d: (-d["count"], d["lines"][0]["line"]))
+    return dups
+
 
 def lint_render(text: str) -> Dict[str, Any]:
-    """渲染合规体检：告警块、围栏配对、围栏外裸字符画、围栏语言标识缺失、公式断裂。
+    """渲染合规体检：告警块、围栏配对、围栏外裸字符画、围栏语言标识缺失、公式断裂、思维链泄漏。
 
     围栏计数依据 `_iter_lines` 给出的「本行之前的围栏状态」：进入围栏状态之前的 ``` 是开启、
     之后的是闭合，避免用局部变量重复切换导致计数错乱。
@@ -396,6 +483,8 @@ def lint_render(text: str) -> Dict[str, Any]:
             formula_breaks.append({"line": line_no, "text": stripped[:120]})
         prev_line = line
 
+    cot_leaks = lint_cot_leak(text)
+
     return {
         "alert_blocks": alerts,
         "stray_art": stray_art,
@@ -404,6 +493,8 @@ def lint_render(text: str) -> Dict[str, Any]:
         "fence_closes": fence_closes,
         "fence_without_lang": fence_without_lang,
         "formula_breaks": formula_breaks,
+        "cot_leaks": cot_leaks,
+        "duplicate_headings": lint_duplicate_headings(text),
     }
 
 
@@ -420,9 +511,10 @@ STRUCTURE_KEYS = (
     "no_redundant_tail",
 )
 
-# 渲染致命项：告警块 / 裸字符画 / 围栏配对 / 公式断裂。
+# 渲染致命项：告警块 / 裸字符画 / 围栏配对 / 公式断裂 / 思维链泄漏。
 # 公式断裂同样致命——它改的是公式真值，且显示公式的收尾 `$$` 落在行尾时会让阅读器吞掉后续正文。
-FATAL_RENDER_KEYS = ("alert_blocks", "stray_art", "fences_unbalanced", "formula_breaks")
+# 思维链泄漏致命——写作模型的自我对话混进产物直接毁掉阅读信任（issue#2 实测样本）。
+FATAL_RENDER_KEYS = ("alert_blocks", "stray_art", "fences_unbalanced", "formula_breaks", "cot_leaks")
 
 
 def summarize_note(lint: Dict[str, Any]) -> Dict[str, int]:
@@ -446,6 +538,8 @@ def summarize_render(lint: Dict[str, Any]) -> Dict[str, int]:
         "fences_unbalanced": 1 if lint["fences_unbalanced"] else 0,
         "fence_without_lang": len(lint["fence_without_lang"]),
         "formula_breaks": len(lint.get("formula_breaks", [])),
+        "cot_leaks": len(lint.get("cot_leaks", [])),
+        "duplicate_headings": len(lint.get("duplicate_headings", [])),
     }
 
 

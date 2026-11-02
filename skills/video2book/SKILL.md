@@ -4,7 +4,7 @@ description: 把 B 站、YouTube、抖音长视频/系列网课或本地音视�
 license: MIT
 metadata:
   author: LINJIANG12
-  version: 4.2.0
+  version: 4.3.0
   category: learning-and-education
   compatibility: Python 3.10+；系统 ffmpeg 在 PATH；缺字幕块需要宿主听音通道之一（read_audio 或 read_media）。
 ---
@@ -83,7 +83,8 @@ metadata:
 | 长文基于本块逐字稿（双层实体覆盖率） | 机器门禁 | ✅ `check --stage1` |
 | 逐字稿来自**真字幕**（时长覆盖 + 时长上界 + 本集身份三校验） | 机器门禁 | ✅ 不过即转音频兜底，原因入 `manifest.json` |
 | 围栏语言标识与标题手写序号 | 提示项 | 默认只统计；`--require-lang` / `--require-no-numbering` 才纳入门禁 |
-| 笔记成色五类致命项、渲染致命项（含**公式断裂**：`\neq` 被折成换行 + `eq`） | 机器门禁 | ✅ `check --deliver`；存量用 `--fix-formula-breaks --apply` 修回 |
+| 笔记成色五类致命项、渲染致命项（含**公式断裂**：`\neq` 被折成换行 + `eq`；含**思维链泄漏**：写作模型自我对话落进产物，`I'm producing garbage…` 等英文推理模式） | 机器门禁 | ✅ `check --deliver`；存量公式断裂用 `--fix-formula-breaks --apply` 修回，思维链泄漏必须重写该篇 |
+| 同文件同级标题重名（重复/碎裂标题） | 提示项 | ✅ `check --deliver` 只报告；写作侧禁令见长文任务书「写作纪律硬性要求」 |
 | 谁写的、转录是否忠于原声、并发是否照建议 | 纪律条款 | ❌ 只能看派发台账 |
 
 ## 6. 环境与缺失处理

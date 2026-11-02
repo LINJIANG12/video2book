@@ -657,6 +657,8 @@ def check_render_workspace(
         "fence_without_lang": 0,
         "numbered_headings": 0,
         "formula_breaks": 0,
+        "cot_leaks": 0,
+        "duplicate_headings": 0,
     }
 
     for path in collect_markdown(ws):
@@ -689,6 +691,8 @@ def check_render_workspace(
                 "fence_without_lang": lint["fence_without_lang"][:3],
                 "numbered_headings": numbered[:3],
                 "formula_breaks": lint["formula_breaks"][:3],
+                "cot_leaks": lint.get("cot_leaks", [])[:3],
+                "duplicate_headings": lint.get("duplicate_headings", [])[:3],
             },
         })
 
@@ -793,10 +797,11 @@ def run_deliver(
                     print("    ── 全部通过")
 
         print("\n" + "-" * 72)
-        print("[*] 渲染合规体检（告警块 / 围栏外字符画 / 围栏配对 / 公式断裂 / 围栏语言标识 / 标题手写序号）")
+        print("[*] 渲染合规体检（告警块 / 围栏外字符画 / 围栏配对 / 公式断裂 / 思维链泄漏 / 重复标题 / 语言标识 / 标题序号）")
         scope = "语言标识=门禁项（--require-lang）" if require_lang else "语言标识=提示项（不参与 --strict）"
         scope += "；标题序号=门禁项" if require_no_numbering else "；标题序号=提示项"
         scope += "；公式断裂=门禁项（存量修复用 check --fix-formula-breaks）"
+        scope += "；思维链泄漏=门禁项；重复标题=提示项"
         print(f"[*] 门禁口径：{scope}")
         for report in render_reports:
             print(f"\n▶ {report['workspace']}")
@@ -805,6 +810,7 @@ def run_deliver(
             t = report["totals"]
             print(f"    ── 告警块 {t['alert_blocks']} | 围栏外字符画 {t['stray_art']} | "
                   f"围栏未闭合 {t['fences_unbalanced']} | 公式断裂 {t.get('formula_breaks', 0)} | "
+                  f"思维链泄漏 {t.get('cot_leaks', 0)} | 重复标题 {t.get('duplicate_headings', 0)} | "
                   f"缺语言标识 {t['fence_without_lang']} | "
                   f"标题手写序号 {t.get('numbered_headings', 0)}")
             for entry in report["entries"][:12]:
@@ -813,10 +819,16 @@ def run_deliver(
                 print(f"    [✗] {short[:66]:68s} 告警块={s['alert_blocks']:3d} "
                       f"裸图={s['stray_art']:2d} 未闭合={s['fences_unbalanced']} "
                       f"公式断裂={s.get('formula_breaks', 0):3d} "
+                      f"思维链={s.get('cot_leaks', 0):2d} 重复标题={s.get('duplicate_headings', 0):2d} "
                       f"缺语言={s['fence_without_lang']} 序号={entry.get('numbered_headings', 0)}")
-                for key in ("alert_blocks", "stray_art", "numbered_headings", "formula_breaks"):
+                for key in ("alert_blocks", "stray_art", "numbered_headings", "formula_breaks",
+                            "cot_leaks", "duplicate_headings"):
                     for sample in entry["samples"].get(key, [])[:1]:
-                        print(f"         └ {key} @{sample['line']}: {sample['text'][:84]}")
+                        if key == "duplicate_headings":
+                            print(f"         └ {key} @{sample['lines'][0]['line']}: "
+                                  f"{sample['title'][:60]}（{sample['count']} 次）")
+                        else:
+                            print(f"         └ {key} @{sample['line']}: {sample['text'][:84]}")
             if len(report["entries"]) > 12:
                 print(f"    … 其余 {len(report['entries']) - 12} 份见 --json 输出")
             if report["problem_files"] == 0:
