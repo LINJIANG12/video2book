@@ -636,8 +636,9 @@ def test_eq_line_after_blank_line_is_not_a_break():
 # ===========================================================================
 # 语料出处：2026-11-01 issue#2（宋浩高数 2.0 模块11）。写作子智能体在单次超长 Write 中
 # 注意力崩坏，把自我对话原样写进长文并经整编流入教材，`check --deliver` 当时全绿。
-# cot_leak 为致命项（泄漏文本不是知识内容，且模式高度特征化——全库 3505 份成品只有
-# 坏样本命中）；duplicate_headings 为提示级（讲义存在合法的章节性重名，≥2 就门禁会误杀）。
+# cot_leak 为致命项（泄漏文本不是知识内容，且模式高度特征化——发布仓 64 门课 4000+ 份
+# 成品复扫只有坏样本命中）；duplicate_headings 为提示级（讲义存在合法的章节性重名，
+# ≥2 就门禁会误杀）。
 
 COT_LEAK_LINES = [
     "I need to fix this. I need to be careful here. I'm producing a messy document.",
