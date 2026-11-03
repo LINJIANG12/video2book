@@ -62,6 +62,14 @@ _AI_LAN_PREFIX = "ai-"
 # 字幕覆盖度下限：末条字幕时间 / 分集时长低于此值即视为字幕被截断，不采用
 SUBTITLE_COVERAGE_MIN = 0.9
 
+# 短页豁免（**只对 ai 轨**）：≤200 秒的习题/预告片常只有开头几秒口播，其余是静音题干。
+# 实测某生化课的 140s「考点小测」页，AI 字幕恰为 4.2s 的「这是考点小测…一起交流」，
+# 之后无语音；90% 覆盖下限会把这类页面永久判死（单课 55 页），连带整块无法成稿。
+# 放行但标 `trustworthy=False`，抬头留痕，供写作角色按"短片提示"处理。
+SUBTITLE_SHORT_PAGE_MAX = 200.0
+# 覆盖不足但符合短页豁免时的时段标记（区别于正常 `ok` 与越界 `warn`）。
+SUBTITLE_BAND_SHORT_PAGE = "short_page"
+
 # 时长上界（**只对 ai 轨**）：末条超过分集时长此比例即判串台——串台文件长度不受本集约束，
 # 实测「分体水冷」2937s/973s = 302%、「惠普维修」357s/248s = 144% 都栽在这条上。
 # 人工 CC 可能有片尾冗余，不设上界（只保留下限截断判据）。
@@ -273,6 +281,11 @@ def url_identity(url: str, aid: Any, cid: Any) -> Optional[bool]:
     **别的视频**的字幕文件挂到本集的轨道上，此时 `aid`/`cid` 两段都对不上——
     这是唯一能在同一次响应内、零额外请求识破串台的信号（实测 21 样本零误判）。
 
+    **aid 迁移**（2026-11 实测）：稿件换号后播放器接口回显新 aid，但历史 AI 字幕文件
+    仍以**老 aid** 命名（同一课程里新旧两种前缀并存）。只比 `aid+cid` 会把这类**正确**
+    字幕成批误杀。cid 不随迁移变化，因此判据改为：前缀等于 `aid+cid`，或文件名中出现
+    **cid 紧跟哈希后缀**（≥8 位字母数字收尾）——不同分集/别家视频的 cid 不同，仍能拦住串台。
+
     **判据不适用（返回 None）的两种情形**，调用方必须放行而不能拦：
     - URL 不含 `/prod/`：人工 CC 轨与老式路径不走这套命名；
     - 拿不到 `aid`：缺失字段不该阻塞整条链路。
@@ -281,7 +294,7 @@ def url_identity(url: str, aid: Any, cid: Any) -> Optional[bool]:
     （正确文件也可能被 CDN 截断）。
     """
     文本 = str(url or "")
-    匹配 = AI_SUBTITLE_PATH_RE.search(文本)
+    匹配 = re.search(r"/prod/([0-9A-Za-z]+)", 文本)
     if not 匹配:
         return None
     try:
@@ -291,7 +304,10 @@ def url_identity(url: str, aid: Any, cid: Any) -> Optional[bool]:
         return None
     if not aid_text or not cid_text:
         return None
-    return 匹配.group(1).startswith(aid_text + cid_text)
+    文件名 = 匹配.group(1)
+    if 文件名.startswith(aid_text + cid_text):
+        return True
+    return bool(re.search(rf"{re.escape(cid_text)}[0-9A-Za-z]{{8,}}$", 文件名))
 
 
 def transcript_source(path: Any) -> str:
@@ -476,8 +492,13 @@ def _取字幕一次(
         时段 = subtitle_time_band(覆盖, is_ai)
         末条 = max(float(条.get("to") or 条.get("from") or 0.0) for 条 in 线索)
         if 时段 == "short":
-            _更新原因(f"覆盖不足（末条 {末条:.0f}s / 时长 {duration_sec:.0f}s = {覆盖:.0%}）")
-            continue
+            # 短页豁免：≤200s 的习题/预告片常常只有开头几秒口播，其余是静音题干。
+            # 只对 ai 轨生效；仍标 trustworthy=False 留痕。
+            if is_ai and 0 < duration_sec <= SUBTITLE_SHORT_PAGE_MAX:
+                时段 = SUBTITLE_BAND_SHORT_PAGE
+            else:
+                _更新原因(f"覆盖不足（末条 {末条:.0f}s / 时长 {duration_sec:.0f}s = {覆盖:.0%}）")
+                continue
         if 时段 == "overrun":
             # 串台文件的长度不受本集约束（实测 2937s/973s、357s/248s），上界只对 ai 轨生效
             _更新原因(f"{REASON_TIME_OVERRUN}（末条 {末条:.0f}s / 时长 {duration_sec:.0f}s = {覆盖:.0%}）")
@@ -488,8 +509,8 @@ def _取字幕一次(
             "lan_doc": str(选中.get("lan_doc") or ""),
             "cues": 线索,
             "coverage": 覆盖,
-            # 轻微越界（>2%）仍采用，但标不可信：平台冗余与串台在同一条谱上，留痕给人工判断
-            "trustworthy": 时段 != "warn",
+            # 轻微越界（>2%）与短页豁免仍采用，但标不可信：留痕给人工判断
+            "trustworthy": 时段 not in ("warn", SUBTITLE_BAND_SHORT_PAGE),
             "audit": {
                 "band": 时段,
                 "last_cue_sec": round(末条, 2),

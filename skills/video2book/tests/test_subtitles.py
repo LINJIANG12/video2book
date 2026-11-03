@@ -446,6 +446,19 @@ def test_url_identity_requires_both_aid_and_cid():
     assert subtitles.url_identity(_正确URL, _真AID, 99999999) is False
 
 
+def test_url_identity_accepts_old_aid_after_video_migration():
+    """稿件换号后接口回显新 aid，但历史 AI 字幕文件仍以老 aid 命名——必须放行。
+
+    实测（2026-11，BV1zjpLeoEDh P03）：响应 aid=113105430447187、cid=1609661566，
+    字幕文件名为 `250927429`（老 aid）+ `1609661566`（cid）+ 哈希。
+    """
+    old_aid_url = ("https://aisubtitle.hdslb.com/bfs/ai_subtitle/prod/"
+                   "25092742916096615660387510cc813cda839c50f61818?auth_key=x")
+    assert subtitles.url_identity(old_aid_url, 113105430447187, 1609661566) is True
+    # cid 不符仍要拦（换号不影响 cid 的身份锚点作用）
+    assert subtitles.url_identity(old_aid_url, 113105430447187, 1609661567) is False
+
+
 def test_url_identity_is_inconclusive_for_human_tracks_and_missing_aid():
     """人工 CC 不走 `/prod/`、拿不到 aid 时判据不适用——必须放行，不能拦。"""
     assert subtitles.url_identity("https://i0.hdslb.com/bfs/subtitle/abc.json", _真AID, _真CID) is None
@@ -530,6 +543,22 @@ def test_accept_path_still_rejects_overrun_and_truncated(monkeypatch):
     字幕, 原因 = subtitles._取字幕一次("BV1H4411N7oD", _真CID, None, None, _本集时长, "P01")
     assert 字幕 is None and 原因.startswith(subtitles.REASON_TIME_OVERRUN)
 
+    _假正文(monkeypatch, 末条秒=_本集时长 * 0.5)
+    字幕, 原因 = subtitles._取字幕一次("BV1H4411N7oD", _真CID, None, None, _本集时长, "P01")
+    assert 字幕 is None and 原因.startswith("覆盖不足")
+
+
+def test_accept_path_accepts_short_page_with_opening_prompt(monkeypatch):
+    """≤200s 的习题/预告片只有开头几秒口播：放行但标不可信（实测 140s 页仅 4.2s 字幕）。"""
+    _假播放器(monkeypatch, url=_正确URL)
+    _假正文(monkeypatch, 末条秒=4.2)
+    字幕, 原因 = subtitles._取字幕一次("BV1H4411N7oD", _真CID, None, None, 140.0, "P05")
+    assert 原因 == "" and 字幕 is not None
+    assert 字幕["audit"]["band"] == subtitles.SUBTITLE_BAND_SHORT_PAGE
+    assert 字幕["trustworthy"] is False
+    assert 字幕["coverage"] < subtitles.SUBTITLE_COVERAGE_MIN
+
+    # 超过短页阈值的页面仍按覆盖不足拒绝（568s 页只有 50% 覆盖）
     _假正文(monkeypatch, 末条秒=_本集时长 * 0.5)
     字幕, 原因 = subtitles._取字幕一次("BV1H4411N7oD", _真CID, None, None, _本集时长, "P01")
     assert 字幕 is None and 原因.startswith("覆盖不足")
